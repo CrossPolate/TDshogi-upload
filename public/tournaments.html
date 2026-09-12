@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>赛事 · TDShogi</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="nav"></header>
+
+  <main class="container">
+    <!-- 顶部：标题 + 创建入口（创建需登录正式账号，后端审核流程规划见 docs/PLAN.md） -->
+    <div class="card" style="padding:24px;margin-bottom:28px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;">
+      <div>
+        <div class="section-title" style="margin-bottom:6px;">棋手赛事</div>
+        <div style="font-size:13px;color:var(--text-dim);">单败淘汰赛 · 报名满员自动开赛 · 赛事对局不计 ELO</div>
+      </div>
+      <button class="btn btn-primary btn-lg" id="btnCreateTournament">🏆 我要创建赛事</button>
+    </div>
+
+    <!-- 进行中的赛事（报名中 / 比赛中） -->
+    <div class="section-title">进行中的赛事</div>
+    <div id="ongoingList" style="margin-bottom:32px;"></div>
+
+    <!-- 往期赛事（已结束，含冠军） -->
+    <div class="section-title">往期赛事</div>
+    <div id="finishedList"></div>
+  </main>
+
+  <!-- 创建赛事弹窗 -->
+  <div class="modal-overlay" id="createModal" style="display:none;">
+    <div class="card" style="width:420px;max-width:92vw;padding:24px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <div style="font-size:19px;font-weight:800;">创建单败淘汰赛</div>
+        <button class="btn btn-ghost btn-sm" id="btnCloseCreateModal">关闭</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">赛事名称</div>
+      <input class="input" id="tName" placeholder="如：暑期棋王赛" maxlength="20" style="width:100%;">
+      <div style="font-size:12px;color:var(--text-dim);margin:14px 0 6px;">参赛人数</div>
+      <select class="select" id="tSize" style="width:100%;">
+        <option value="4">4 人</option>
+        <option value="8">8 人</option>
+        <option value="16" selected>16 人</option>
+      </select>
+      <div style="font-size:12px;color:var(--text-dim);margin-top:10px;">创建者自动成为第一名参赛棋手。</div>
+      <button class="btn btn-primary" id="btnSubmitCreate" style="width:100%;margin-top:16px;">提交创建</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/settings.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/nav.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/hovercard.js"></script>
+  <script src="js/tournaments.js"></script>
+</body>
+</html>

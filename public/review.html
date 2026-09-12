@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>复盘 · TDShogi</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/board.css">
+  <link rel="stylesheet" href="css/review.css">
+</head>
+<body>
+  <header class="nav"></header>
+
+  <main class="container">
+    <!-- 加载中 -->
+    <div id="loading" class="card" style="padding:40px;text-align:center;">
+      加载棋谱中…
+    </div>
+
+    <!-- 无权限/未找到 -->
+    <div id="error" class="card" style="padding:40px;text-align:center;display:none;color:var(--red-light);">
+      <div id="errorText"></div>
+      <button class="btn btn-ghost" style="margin-top:16px;" onclick="location.href='history.html'">返回棋谱列表</button>
+    </div>
+
+    <!-- 复盘器主体 -->
+    <div id="review" style="display:none;">
+      <!-- 顶部元信息 -->
+      <div class="card" style="padding:18px;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+          <div>
+            <div style="font-size:18px;font-weight:800;">
+              <span id="rvNameB">先手</span>
+              <span style="margin:0 10px;color:var(--text-dim);font-weight:400;">vs</span>
+              <span id="rvNameW">後手</span>
+            </div>
+            <div style="font-size:12px;color:var(--text-dim);margin-top:4px;">
+              <span id="rvResult"></span>
+              <span style="margin:0 8px;">·</span>
+              <span id="rvMoves"></span>
+              <span style="margin:0 8px;">·</span>
+              <span id="rvDate"></span>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-ghost btn-sm" id="btnFlipView" title="切换先手 / 后手视角">🔄 翻转视角</button>
+            <button class="btn btn-ghost btn-sm" id="btnExportKif">导出 KIF</button>
+            <button class="btn btn-ghost btn-sm" id="btnExportCsa">导出 CSA</button>
+            <button class="btn btn-ghost btn-sm" onclick="location.href='history.html'">返回</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 管理员：对局信息与展示设置（PLAN §L5） -->
+      <div class="card" id="adminPanel" style="padding:18px;margin-bottom:16px;display:none;">
+        <h3 style="margin:0 0 12px;font-size:15px;color:var(--gold-light);">🛡️ 管理员：对局信息与展示设置</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
+          <div><div style="font-size:11px;color:var(--text-dim);">标题</div>
+            <input class="input" id="adTitle" maxlength="120" style="width:180px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">赛事</div>
+            <input class="input" id="adEvent" maxlength="120" style="width:140px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">轮次</div>
+            <input class="input" id="adRound" maxlength="120" style="width:100px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">对局日期</div>
+            <input class="input" id="adPlayedOn" maxlength="40" placeholder="2026-09-06" style="width:130px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">标签（逗号分隔）</div>
+            <input class="input" id="adTags" style="width:180px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">先手展示名</div>
+            <input class="input" id="adNameB" maxlength="120" style="width:130px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">後手展示名</div>
+            <input class="input" id="adNameW" maxlength="120" style="width:130px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">结果说明</div>
+            <input class="input" id="adResultNote" maxlength="120" style="width:150px;"></div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;">
+            <input type="checkbox" id="adFeatured"> 广场置顶
+          </label>
+        </div>
+        <div style="margin-top:10px;">
+          <div style="font-size:11px;color:var(--text-dim);">简介</div>
+          <textarea class="input" id="adDesc" rows="2" maxlength="200" placeholder="展示在广场卡片上的一句话说明"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" id="btnSaveMeta">保存对局信息</button>
+          <select class="input" id="adVisibility" style="max-width:160px;">
+            <option value="private">私有（仅谱主可见）</option>
+            <option value="public">公开（广场可见）</option>
+          </select>
+          <button class="btn btn-ghost btn-sm" id="btnSaveVisibility">应用可见性</button>
+          <span id="adTip" style="font-size:12px;color:var(--text-dim);"></span>
+        </div>
+      </div>
+
+      <div class="review-layout">
+        <!-- 中央棋盘（对战页同款布局：玩家栏 + 棋盘区含持驹） -->
+        <div>
+          <div class="card" style="padding:18px;">
+            <div class="play-main">
+              <!-- 上方玩家栏（对面，复盘默认先手视角） -->
+              <div class="player-bar" id="topPlayerBar">
+                <div>
+                  <div class="name" id="topName">—</div>
+                  <div class="rating" id="topRating"></div>
+                </div>
+                <div class="player-clock" id="topClock">—</div>
+              </div>
+              <div class="board-area">
+                <div class="hand-row" id="oppHand">
+                  <span class="hand-label">持驹</span>
+                  <div class="hand-pieces" id="oppHandPieces"></div>
+                </div>
+                <div class="board-wrap" id="boardContainer"></div>
+                <div class="hand-row" id="myHand">
+                  <span class="hand-label">持驹</span>
+                  <div class="hand-pieces" id="myHandPieces"></div>
+                </div>
+              </div>
+              <!-- 下方玩家栏 -->
+              <div class="player-bar" id="bottomPlayerBar">
+                <div>
+                  <div class="name" id="bottomName">—</div>
+                  <div class="rating" id="bottomRating"></div>
+                </div>
+                <div class="player-clock" id="bottomClock">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右侧：棋谱 + 操作 -->
+        <div class="review-side">
+          <!-- 棋谱面板 -->
+          <div class="card" style="padding:18px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+              <h3 style="margin:0;font-size:15px;color:var(--gold-light);">棋谱</h3>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <label style="font-size:12px;color:var(--text-dim);">显示：</label>
+                <select class="select" id="rvDisplayMode" style="font-size:12px;padding:4px 8px;">
+                  <option value="jp" selected>日式</option>
+                  <option value="usi">USI</option>
+                </select>
+              </div>
+            </div>
+            <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
+              <button class="btn btn-ghost btn-sm" id="btnFirst">⏮ 首手</button>
+              <button class="btn btn-ghost btn-sm" id="btnPrev">◀ 上一手</button>
+              <button class="btn btn-ghost btn-sm" id="btnNext">下一手 ▶</button>
+              <button class="btn btn-ghost btn-sm" id="btnLast">末手 ⏭</button>
+              <button class="btn btn-ghost btn-sm" id="btnFreePlace" title="在当前局面上自由摆放棋子（草稿，不入谱）">✋ 自由摆放</button>
+              <button class="btn btn-ghost btn-sm" id="btnUndoFree" style="display:none;">↩️ 撤销摆放</button>
+            </div>
+            <div id="rvMoveList" class="rv-move-list"></div>
+            <div style="font-size:12px;color:var(--text-dim);margin-top:8px;text-align:right;" id="rvCursor">0 / 0</div>
+          </div>
+
+          <!-- 当前手详情 -->
+          <div class="card" style="padding:18px;">
+            <h3 style="margin:0 0 10px;font-size:15px;color:var(--gold-light);">当前手</h3>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn btn-ghost btn-sm" id="btnBookmark">🔖 书签</button>
+              <button class="btn btn-ghost btn-sm" id="btnComment">💬 评论</button>
+              <button class="btn btn-ghost btn-sm" id="btnVariation">↪ 添加变着</button>
+            </div>
+            <div id="rvVariations" style="margin-top:12px;"></div>
+            <div id="rvComments" style="margin-top:14px;display:none;">
+              <textarea class="input" id="rvCommentInput" placeholder="评论当前手…" rows="3"></textarea>
+              <div style="display:flex;gap:6px;margin-top:6px;">
+                <button class="btn btn-primary btn-sm" id="btnSaveComment">保存</button>
+                <button class="btn btn-ghost btn-sm" id="btnCancelComment">取消</button>
+              </div>
+            </div>
+            <div id="rvVariationPanel" style="margin-top:14px;display:none;">
+              <input class="input" id="rvVariationInput" placeholder="走法 USI，如 7g7f 或 P*5e">
+              <div style="display:flex;gap:6px;margin-top:6px;">
+                <button class="btn btn-primary btn-sm" id="btnSaveVariation">保存变着</button>
+                <button class="btn btn-ghost btn-sm" id="btnCancelVariation">取消</button>
+              </div>
+            </div>
+            <div id="rvHasVariation" style="margin-top:8px;font-size:12px;color:var(--text-dim);display:none;">
+              本手已存在变着
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/settings.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/nav.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/pieces.js"></script>
+  <script src="js/piece-kinds.js"></script>
+  <script src="js/board.js"></script>
+  <script src="js/freeboard.js"></script>
+  <script src="js/review.js"></script>
+</body>
+</html>

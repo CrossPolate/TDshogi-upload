@@ -1,0 +1,28 @@
+{
+  "name": "tdshogi",
+  "version": "1.4.0",
+  "description": "TDShogi 在线将棋对战平台 - 轻量级 Node.js 实时对局",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test tests/*.test.js",
+    "lint": "eslint .",
+    "check": "node --check server.js",
+    "backup": "node scripts/backup.js",
+    "pack": "node scripts/pack.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "express": "^4.19.0",
+    "shogi.js": "^5.4.0",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "eslint": "^10.10.0"
+  }
+}

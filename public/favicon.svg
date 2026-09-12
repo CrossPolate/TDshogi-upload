@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#1e2128"/>
+  <rect x="4" y="4" width="56" height="56" rx="9" fill="#d8b98a"/>
+  <rect x="4" y="4" width="56" height="56" rx="9" fill="none" stroke="#c9a227" stroke-width="3"/>
+  <text x="32" y="45" font-family="'Noto Serif SC','PingFang SC','Microsoft YaHei',serif" font-size="36" font-weight="900" fill="#2c2c2c" text-anchor="middle">将</text>
+</svg>

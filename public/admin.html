@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>管理后台 · TDShogi</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="nav"></header>
+
+  <main class="container">
+    <div class="section-title" style="font-size:24px;">🛡️ 管理后台</div>
+
+    <!-- 管理员未登录时 -->
+    <div class="card" id="adminLoginCard" style="max-width:420px;padding:28px;">
+      <div class="section-title">管理员登录</div>
+      <div style="font-size:13px;color:var(--text-dim);margin:10px 0 16px;">请输入管理密码以访问全部棋谱与用户数据</div>
+      <input type="password" class="input" id="adminPassword" placeholder="管理密码" style="width:100%;">
+      <button class="btn btn-primary" id="btnAdminLogin" style="margin-top:14px;width:100%;">登录</button>
+      <button class="btn btn-ghost btn-sm" id="btnAdminLogout" style="margin-top:8px;width:100%;display:none;">退出管理员</button>
+    </div>
+
+    <!-- 管理员已登录 -->
+    <div id="adminPanel" style="display:none;">
+      <!-- 标签切换 -->
+      <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">
+        <button class="btn btn-primary btn-sm tab-btn active" data-tab="records">全部棋谱</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="users">全部用户</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="tournaments">赛事管理</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="audit">操作审计</button>
+      </div>
+
+      <!-- 全部棋谱 -->
+      <div class="card" id="tab-records" style="padding:20px;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>全部棋谱（<span id="recordCount">0</span>）</span>
+          <div style="display:flex;gap:8px;">
+            <input class="input" id="recordSearch" placeholder="按选手名/ID 搜索棋谱" style="width:220px;padding:6px 10px;font-size:13px;">
+            <input type="file" id="kifFileInput" accept=".kif,.txt" style="display:none;" multiple>
+            <button class="btn btn-ghost btn-sm" id="btnImportKif">📥 导入 KIF</button>
+          </div>
+        </div>
+        <div id="importResult" style="font-size:12px;color:var(--green);margin:6px 0;"></div>
+        <div id="adminRecordList" style="max-height:70vh;overflow-y:auto;"></div>
+      </div>
+
+      <!-- 全部用户 -->
+      <div class="card" id="tab-users" style="padding:20px;display:none;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>全部用户（<span id="userCount">0</span>）</span>
+          <input class="input" id="userSearch" placeholder="按名字/ID 搜索用户" style="width:220px;padding:6px 10px;font-size:13px;">
+        </div>
+        <div id="adminUserList" style="max-height:70vh;overflow-y:auto;"></div>
+      </div>
+
+      <!-- 赛事管理 -->
+      <div class="card" id="tab-tournaments" style="padding:20px;display:none;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>赛事管理（<span id="tnCount">0</span>）</span>
+          <span id="tnStats" style="font-size:12px;color:var(--text-dim);"></span>
+        </div>
+        <div style="margin-bottom:18px;">
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">🕐 待审核</div>
+          <div id="tnPendingList"></div>
+        </div>
+        <div style="margin-bottom:18px;">
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">▶️ 进行中</div>
+          <div id="tnActiveList"></div>
+        </div>
+        <div>
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">📜 历史</div>
+          <div id="tnHistoryList" style="max-height:40vh;overflow-y:auto;"></div>
+        </div>
+      </div>
+
+      <!-- 操作审计（PLAN §K4） -->
+      <div class="card" id="tab-audit" style="padding:20px;display:none;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>操作审计（<span id="auditCount">0</span>）</span>
+          <button class="btn btn-ghost btn-sm" id="btnRefreshAudit">刷新</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">管理员的全部写操作记录（最近 200 条）：封禁/解封、改名、重置、资料修改、删除等</div>
+        <div id="auditList" style="max-height:70vh;overflow-y:auto;"></div>
+      </div>
+
+      <!-- 用户详情弹层 -->
+      <div class="modal-overlay" id="userDetailModal" style="display:none;">
+        <div class="card" style="width:720px;max-width:94vw;max-height:86vh;overflow:auto;padding:24px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <div style="font-size:20px;font-weight:800;" id="detailUserName"></div>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('userDetailModal').style.display='none'">关闭</button>
+          </div>
+          <div id="detailBody"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/settings.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/nav.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,118 @@
+/**
+ * api.js — WS / REST 封装
+ *
+ * 提供：
+ *  - WS 连接管理（自动重连、断线 60 秒内恢复）
+ *  - 消息发送（send）
+ *  - 事件订阅（on(type, handler)）
+ *  - REST 请求工具（get/post）
+ *
+ * WS 路径：ws(s)://host/ws?guest=<guestId>
+ */
+(function (global) {
+  class Client {
+    constructor() {
+      this.ws = null;
+      this.handlers = {};   // type -> [fn]
+      this.reconnectTimer = null;
+      this.connected = false;
+      this.messageQueue = [];
+      this.reconnectAttempts = 0;
+    }
+
+    connect(guestId) {
+      if (this.ws && this.ws.readyState === 1) return;
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const url = `${proto}://${location.host}/ws?guest=${encodeURIComponent(guestId)}`;
+      try {
+        this.ws = new WebSocket(url);
+      } catch (_) { return; }
+      this.ws.onopen = () => {
+        this.connected = true;
+        this.reconnectAttempts = 0;
+        // 清空积压消息
+        const q = this.messageQueue;
+        this.messageQueue = [];
+        q.forEach((m) => this.send(m));
+        this.emit('open');
+      };
+      this.ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (_) { return; }
+        // hello 携带服务端 identify() 的权威身份/名字 → 记下 playerId（大厅判断
+        // 「进行中对局」里哪些是自己对局用，服务端 guestId 对账号用户≠playerId），
+        // 并把权威名字写回 localStorage/导航，解决客户端与服务端名字不一致的混乱
+        if (msg.type === 'hello' && msg.data) {
+          if (msg.data.playerId) this.playerId = msg.data.playerId;
+          if (msg.data.name && global.NAV && global.NAV.updateUserName) {
+            try { global.NAV.updateUserName(msg.data.name); } catch (_) {}
+          }
+        }
+        this.emit(msg.type, msg.data, msg);
+      };
+      this.ws.onclose = () => {
+        this.connected = false;
+        this.emit('close');
+        this.scheduleReconnect(guestId);
+      };
+      this.ws.onerror = () => { this.emit('error'); };
+    }
+
+    scheduleReconnect(guestId) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectAttempts++;
+      // 指数退避，上限 10 秒
+      const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 10000);
+      this.reconnectTimer = setTimeout(() => this.connect(guestId), delay);
+    }
+
+    isConnected() { return this.connected; }
+
+    send(msg) {
+      if (this.ws && this.ws.readyState === 1) {
+        this.ws.send(JSON.stringify(msg));
+      } else {
+        this.messageQueue.push(msg);
+      }
+    }
+
+    on(type, fn) {
+      if (!this.handlers[type]) this.handlers[type] = [];
+      this.handlers[type].push(fn);
+      return () => this.off(type, fn);
+    }
+
+    off(type, fn) {
+      const arr = this.handlers[type] || [];
+      const i = arr.indexOf(fn);
+      if (i >= 0) arr.splice(i, 1);
+    }
+
+    emit(type, data, raw) {
+      (this.handlers[type] || []).slice().forEach((fn) => {
+        try { fn(data, raw); } catch (e) { console.error('[api] handler error', type, e); }
+      });
+    }
+  }
+
+  // REST 工具
+  async function get(path) {
+    const res = await fetch(path);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function post(path, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  // 全局单例
+  global.API = new Client();
+  global.ApiUtils = { get, post };
+})(window);

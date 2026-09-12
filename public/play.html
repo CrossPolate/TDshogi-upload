@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>对局 · TDShogi</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/board.css">
+</head>
+<body>
+  <header class="nav"></header>
+
+  <main class="container">
+    <div id="roomTop" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <div style="font-size:14px;color:var(--text-dim);">
+        <span id="roomCodeLabel"></span>
+        <span id="spectatorTag" style="display:none;margin-left:12px;background:var(--bg-3);padding:3px 10px;border-radius:6px;color:var(--gold-light);font-size:12px;">👁 观战中</span>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" id="btnViewpoint" style="display:none;" title="切换观战视角（先手 / 后手）">🔄 视角·先手</button>
+        <button class="btn btn-ghost btn-sm" id="btnSound" title="音效开关">🔊 音效</button>
+        <button class="btn btn-ghost btn-sm" id="btnLeave">退出对局</button>
+      </div>
+    </div>
+
+    <div class="play-layout">
+      <div class="play-main">
+        <!-- 感想战工具条（终局自动进入，PLAN §G v6） -->
+        <div id="demoBar" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;margin-bottom:10px;background:var(--bg-2);border:1px solid rgba(201,162,39,0.35);border-radius:10px;">
+          <span id="demoStatus" style="font-size:13px;font-weight:700;color:var(--gold-light);">🎤 感想战中</span>
+          <span id="turnHint" style="font-size:12px;color:var(--text-dim);"></span>
+          <button class="btn btn-primary btn-sm" id="btnDemoClaim" style="display:none;">🙋 我来演示</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoTransfer" style="display:none;">🤝 交给对方</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoUndo" style="display:none;">↩️ 待った</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoClear" style="display:none;">🗑 清空推演</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoLatest" style="display:none;">⏭ 回到最新</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoRematch" style="display:none;">🔁 再来一局</button>
+          <button class="btn btn-ghost btn-sm" id="btnFreeMode" style="display:none;">✋ 自由摆棋</button>
+          <span style="font-size:11px;color:var(--text-dim);margin-left:auto;">按规则行棋 · 不计入棋谱</span>
+        </div>
+
+        <!-- 上方玩家栏（对面）—— 由 play.js 按视角动态渲染 -->
+        <div class="player-bar" id="topPlayerBar">
+          <div>
+            <div class="name" id="topName">—</div>
+            <div class="rating" id="topRating"></div>
+          </div>
+          <div class="player-clock" id="topClock">10:00</div>
+        </div>
+
+        <!-- 棋盘区：左=对手持驹，中=棋盘，右=自己持驹（由 play.js 按视角摆放） -->
+        <div class="board-area">
+          <div class="hand-row" id="oppHand">
+            <span class="hand-label">持驹</span>
+            <div class="hand-pieces" id="oppHandPieces"></div>
+          </div>
+          <div class="board-wrap" id="boardContainer"></div>
+          <div class="hand-row" id="myHand">
+            <span class="hand-label">持驹</span>
+            <div class="hand-pieces" id="myHandPieces"></div>
+          </div>
+        </div>
+
+        <!-- 下方玩家栏（自己） -->
+        <div class="player-bar" id="bottomPlayerBar">
+          <div>
+            <div class="name" id="bottomName">—</div>
+            <div class="rating" id="bottomRating"></div>
+          </div>
+          <div class="player-clock" id="bottomClock">10:00</div>
+        </div>
+      </div>
+
+      <!-- 右侧面板 -->
+      <div class="play-side">
+        <div class="panel">
+          <h3>棋谱</h3>
+          <div class="move-list" id="moveList"></div>
+        </div>
+        <div class="panel">
+          <h3>观众（<span id="spectatorCount">0</span>）</h3>
+          <div id="spectatorList" style="font-size:13px;min-height:20px;color:var(--text);"><div style="color:var(--text-dim);font-size:12px;">暂无观众</div></div>
+        </div>
+        <div class="panel">
+          <h3>操作</h3>
+          <div style="display:flex;flex-direction:column;gap:10px;">
+            <button class="btn btn-danger" id="btnResign">认输</button>
+            <button class="btn btn-ghost" id="btnDeclare" style="display:none;"
+              title="入玉宣言：玉在敌阵 + 敌阵内 10 枚以上 + 点数先手 28 / 后手 27 以上，且自己手番、未被王手 → 宣言方胜（AJSA 规则）">🏯 入玉宣言</button>
+            <button class="btn btn-primary" id="btnRematch" style="display:none;">再来一局</button>
+          </div>
+        </div>
+        <!-- 聊天：§R2 kibitz 分区（全部 / 对局 / 观战），并按发言者身份配色区分 -->
+        <div class="panel">
+          <h3>聊天</h3>
+          <div class="chat-tabs" id="chatTabs">
+            <button class="chat-tab active" data-tab="all">全部</button>
+            <button class="chat-tab" data-tab="players">对局</button>
+            <button class="chat-tab" data-tab="spectators">观战</button>
+          </div>
+          <div class="chat-box" id="chatBox"></div>
+          <div style="display:flex;gap:6px;margin-top:8px;">
+            <input class="input" id="chatInput" placeholder="说点什么…" style="padding:6px 10px;font-size:13px;">
+            <button class="btn btn-primary btn-sm" id="btnChatSend" style="flex-shrink:0;">发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 升变弹层 -->
+  <div class="promote-overlay" id="promoteOverlay">
+    <div class="promote-box">
+      <h3>是否升变？</h3>
+      <div class="promote-actions">
+        <button class="btn btn-ghost btn-lg" id="btnNoPromote">不成</button>
+        <button class="btn btn-primary btn-lg" id="btnPromote">成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 胜负横幅 -->
+  <div class="banner" id="banner">
+    <div id="bannerText" style="font-size:28px;font-weight:900;margin-bottom:16px;font-family:var(--font-serif);"></div>
+    <div style="display:flex;gap:12px;justify-content:center;">
+      <button class="btn btn-primary" id="bannerRematch">再来一局</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('banner').classList.remove('show')">关闭</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/settings.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/nav.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/pieces.js"></script>
+  <script src="js/piece-kinds.js"></script>
+  <script src="js/board.js"></script>
+  <script src="js/sound.js"></script>
+  <script src="js/hovercard.js"></script>
+  <script src="js/freeboard.js"></script>
+  <script src="js/play-clock.js"></script>
+  <script src="js/play-chat.js"></script>
+  <script src="js/play-demo.js"></script>
+  <script src="js/play.js"></script>
+</body>
+</html>

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>对战 · TDShogi</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="nav"></header>
+
+  <main class="container">
+    <div class="section-title" style="font-size:24px;">对战大厅</div>
+
+    <div class="lobby-grid">
+      <!-- 快速匹配 -->
+      <div class="card lobby-card">
+        <h3>⚔️ 快速匹配</h3>
+        <p>一键匹配在线对手，两人即开，实时对局。</p>
+        <div style="font-size:12px;color:var(--text-dim);margin:10px 0 14px;">⏱ 10 分钟包干（标准比赛）</div>
+        <div id="matchControls">
+          <button class="btn btn-primary btn-lg" id="btnQuickMatch" style="width:100%;">开始匹配</button>
+        </div>
+        <div class="match-wait" id="matchWait">
+          <div class="spinner"></div>
+          <div>正在寻找对手…<br><span style="font-size:12px;color:var(--text-dim);">点击下方按钮取消</span></div>
+          <button class="btn btn-ghost" id="btnCancelMatch" style="margin-top:12px;">取消匹配</button>
+        </div>
+      </div>
+
+      <!-- 创建房间 -->
+      <div class="card lobby-card">
+        <h3>🏠 创建房间</h3>
+        <p>生成 6 位房间码，邀请好友加入对局。</p>
+        <div style="margin:14px 0;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">比赛时间</div>
+          <select class="select" id="roomTimeControl" style="width:100%;">
+            <option value="10:00">10 分钟包干（标准比赛）</option>
+            <option value="15+60">15 分钟 + 60 秒读秒</option>
+            <option value="10+30">10 分钟 + 30 秒读秒</option>
+            <option value="10sec">10 秒快棋</option>
+          </select>
+        </div>
+        <!-- 私人房间（PLAN §T2）：休闲模式——不计 ELO，经验值照常加 -->
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:8px;">
+          <input type="checkbox" id="roomPrivate" style="width:16px;height:16px;cursor:pointer;">
+          <span>🔒 私人房间 <span style="color:var(--text-dim);font-size:12px;">（不计 ELO，经验照常 · 不开放观战）</span></span>
+        </label>
+        <div id="roomPasswordWrap" style="display:none;margin:0 0 14px;">
+          <input class="input" id="roomPassword" placeholder="房间密码（4-8 位，可留空表示不设密码）" maxlength="8" style="width:100%;">
+        </div>
+
+        <button class="btn btn-ghost btn-lg" id="btnCreateRoom" style="width:100%;">创建房间</button>
+        <div id="roomCreated" style="display:none;margin-top:16px;text-align:center;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">房间码</div>
+          <div id="roomCode" style="font-size:34px;font-weight:900;letter-spacing:6px;color:var(--gold-light);font-family:var(--font-serif);"></div>
+          <button class="btn btn-sm btn-ghost" id="btnCopyCode" style="margin-top:10px;">复制房间码</button>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:10px;">等待对手加入后自动开局…</div>
+        </div>
+      </div>
+
+      <!-- 加入房间 -->
+      <div class="card lobby-card">
+        <h3>🔑 加入房间</h3>
+        <p>输入好友提供的 6 位房间码加入对局。</p>
+        <input class="input" id="joinCode" placeholder="输入房间码，如 AB3X7Q" maxlength="6" style="width:100%;text-transform:uppercase;letter-spacing:4px;margin-bottom:12px;">
+        <!-- 私人房间密码：仅在服务端回「需要密码」后出现（PLAN §T2），平时不占版面 -->
+        <div id="joinPasswordWrap" style="display:none;margin-bottom:12px;">
+          <input class="input" id="joinPassword" placeholder="该房间需要密码" maxlength="8" style="width:100%;">
+        </div>
+        <button class="btn btn-primary btn-lg" id="btnJoinRoom" style="width:100%;">加入房间</button>
+        <!-- 凭房间码观战（PLAN §T2）：私人房观战需密码；赛事房/普通房直接进 -->
+        <button class="btn btn-ghost" id="btnSpectateRoom" style="width:100%;margin-top:8px;">👁 观战（用房间码）</button>
+      </div>
+    </div>
+
+    <!-- 进行中对局（观战） -->
+    <div class="card" style="padding:22px;">
+      <div class="section-title">进行中的对局（观战）</div>
+      <div id="activeGames"></div>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/settings.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/nav.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/hovercard.js"></script>
+  <script src="js/lobby.js"></script>
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>个人页面 · TDShogi</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="nav"></header>
+
+  <main class="container">
+    <!-- 账号区：未登录 → 注册/登录表单；已登录 → 账号信息 + 登出 -->
+    <div class="card" id="accountCard" style="padding:24px;margin-bottom:24px;">
+      <div class="section-title" style="font-size:18px;">🔐 账号</div>
+
+      <!-- 未登录 -->
+      <div id="accountNotLogged">
+        <div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;">
+          当前为游客身份。注册账号后，你的对局、积分与棋谱将绑定到账号，可在任意浏览器登录继续。注册会保留当前游客的全部数据。
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;" class="account-grid">
+          <!-- 注册 -->
+          <div>
+            <div style="font-size:14px;font-weight:700;margin-bottom:10px;color:var(--gold-light);">注册新账号</div>
+            <input class="input" id="regUsername" placeholder="用户名（2-16 字符）" style="margin-bottom:8px;">
+            <input type="password" class="input" id="regPassword" placeholder="密码（至少 4 位）" style="margin-bottom:8px;">
+            <input type="password" class="input" id="regPassword2" placeholder="确认密码" style="margin-bottom:8px;">
+            <button class="btn btn-primary" id="btnRegister" style="width:100%;">注册并保留游客数据</button>
+          </div>
+          <!-- 登录 -->
+          <div>
+            <div style="font-size:14px;font-weight:700;margin-bottom:10px;color:var(--gold-light);">已有账号登录</div>
+            <input class="input" id="loginUsername" placeholder="用户名" style="margin-bottom:8px;">
+            <input type="password" class="input" id="loginPassword" placeholder="密码" style="margin-bottom:8px;">
+            <button class="btn btn-ghost" id="btnLogin" style="width:100%;">登录</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 已登录 -->
+      <div id="accountLogged" style="display:none;">
+        <div style="display:flex;align-items:center;gap:14px;">
+          <div class="profile-avatar" id="accountAvatar" style="width:56px;height:56px;font-size:24px;">棋</div>
+          <div style="flex:1;">
+            <div style="font-size:20px;font-weight:800;font-family:var(--font-serif);" id="accountName">—</div>
+            <div style="color:var(--text-dim);font-size:12px;margin-top:2px;">已登录账号 · ID: <span id="accountId"></span></div>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="btnLogout">退出登录</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 身份卡 -->
+    <div class="card profile-head">
+      <div class="profile-avatar" id="avatar">棋</div>
+      <div style="flex:1;">
+        <div style="font-size:24px;font-weight:800;font-family:var(--font-serif);" id="pName">无名棋士</div>
+        <div style="color:var(--text-dim);font-size:13px;margin-top:4px;" id="pRoleLabel">游客账号 · ID: <span id="pId"></span></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          <input class="input" id="renameInput" placeholder="修改名字（12 字内）" style="max-width:220px;">
+          <button class="btn btn-ghost btn-sm" id="btnRename">改名</button>
+        </div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:40px;font-weight:900;color:var(--gold-light);font-family:var(--font-serif);" id="pRating">1500</div>
+        <div style="color:var(--text-dim);font-size:13px;">ELO 积分</div>
+        <div style="margin-top:6px;font-size:14px;font-weight:700;color:var(--gold-light);" id="pLevel">Lv.0</div>
+        <div style="color:var(--text-dim);font-size:12px;" id="pExp">经验 0</div>
+      </div>
+    </div>
+
+    <!-- 我的资料（仅登录账号；PLAN §F） -->
+    <div class="card" id="myProfileCard" style="padding:22px;margin-bottom:28px;display:none;">
+      <div class="section-title">📋 我的资料</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;" class="profile-edit-grid">
+        <div>
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">
+            手机号 <span style="color:var(--gold-light);">（不公开显示，仅管理员可见）</span>
+          </div>
+          <input class="input" id="editPhone" placeholder="11 位手机号，留空清除" maxlength="11">
+        </div>
+        <div>
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">棋风（公开显示）</div>
+          <select class="select" id="editStyle" style="width:100%;">
+            <option>不设定</option>
+            <option>居飞车·急战</option>
+            <option>居飞车·持久战</option>
+            <option>振飞车</option>
+            <option>力战型</option>
+            <option>奇袭型</option>
+            <option>接受型</option>
+          </select>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);margin-top:12px;">
+        注册日期：<span id="createdAtLabel" style="color:var(--text);">—</span>
+      </div>
+      <button class="btn btn-primary" id="btnSaveProfile" style="margin-top:14px;">保存资料</button>
+    </div>
+
+    <!-- 数据统计 -->
+    <div class="stat-grid">
+      <div class="card stat-card"><div class="num" id="sGames">0</div><div class="label">对局数</div></div>
+      <div class="card stat-card"><div class="num" id="sWins">0</div><div class="label">胜</div></div>
+      <div class="card stat-card"><div class="num" id="sLosses">0</div><div class="label">负</div></div>
+      <div class="card stat-card"><div class="num" id="sDraws">0</div><div class="label">平</div></div>
+    </div>
+
+    <!-- ELO 走势 -->
+    <div class="card" style="padding:22px;margin-bottom:28px;">
+      <div class="section-title">ELO 走势</div>
+      <div style="height:120px;display:flex;align-items:flex-end;gap:3px;" id="eloChart"></div>
+    </div>
+
+    <!-- 最近对局 -->
+    <div class="card" style="padding:22px;">
+      <div class="section-title">最近对局</div>
+      <div id="recentRecords"></div>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/settings.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/nav.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/profile.js"></script>
+</body>
+</html>
