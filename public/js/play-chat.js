@@ -147,5 +147,18 @@
     api.on('spectator_update', (d) => renderSpectators(d.spectators || []));
   }
 
-  window.PlayChat = { init, renderSpectators };
+  /**
+   * 系统消息写入聊天区（PLAN §U3）。
+   *
+   * 背景：弹窗（toast）**2.5 秒就消失**，玩家低头看棋盘就错过了。
+   * 需求要求重要提示**同时**进聊天区留痕。本函数只管"写进去"，
+   * **什么时候该写由调用方决定**——有些提示（如"本页已断开"）进聊天毫无意义，
+   * 那属于 play.js 的 `notify()` 的取舍，不在这里判断。
+   */
+  function system(text) {
+    if (!text) return;
+    appendChat({ name: '系统', text: String(text), sys: true });
+  }
+
+  window.PlayChat = { init, renderSpectators, system };
 })();

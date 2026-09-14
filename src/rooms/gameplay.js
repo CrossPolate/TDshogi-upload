@@ -174,6 +174,10 @@ module.exports = function applyGameplay(X) {
         if (w) ratings.addExp(w.playerId, 1, 'game');
       } catch (_) {}
       // 保存棋谱
+      // ⚠️ 赛事棋谱**强制公开**（T6/需求 12）——判定放在这里、而不是靠调用方传参：
+      // 只要这局属于某个赛事，就必须能被所有人查看（赛事详情页要展示全部对局）。
+      // 写在落盘路径上，将来新增的建房入口也不会漏掉这条规则。
+      const tournamentId = room.tournamentId || null;
       const record = saveRecord({
         startSfen: game.startSfen,
         moves: game.moves,
@@ -185,6 +189,8 @@ module.exports = function applyGameplay(X) {
         playerIds: { b: b ? b.playerId : null, w: w ? w.playerId : null },
         winnerId,
         durationSec: Math.round((Date.now() - room.createdAt) / 1000),
+        tournamentId,
+        visibility: tournamentId ? 'public' : undefined,
       });
       room.recordId = record.id;
       // 赛事回调

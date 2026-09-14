@@ -132,9 +132,30 @@ function saveRecord(data) {
     // §L 公开棋谱广场：默认私有；meta 为展示用可编辑信息（管理员维护）
     visibility: data.visibility === 'public' ? 'public' : 'private',
     meta: data.meta || null,
+    // 赛事归属（T6/需求 12）：赛事对局落盘时带上，详情页据此聚合"本赛事全部棋谱"
+    tournamentId: data.tournamentId || null,
   };
   putRecord(record);
   return record;
+}
+
+/**
+ * 某赛事的全部棋谱（**摘要**，不含整谱 —— 见 PLAN §Q7-2，别在这里拉整谱）。
+ *
+ * T6/需求 12：赛事棋谱**强制公开**，且是在落盘路径里判定（rooms 侧看 `tournamentId`），
+ * 不靠调用方记得传 `visibility`。所以这里**不再做可见性过滤**——能进到这张表里
+ * 的赛事棋谱本来就都是公开的。
+ *
+ * @param {string} tournamentId
+ * @param {number} [limit=100]
+ */
+function listByTournament(tournamentId, limit = 100) {
+  if (!tournamentId) return [];
+  try {
+    return dbListSummaries({ tournamentId, limit });
+  } catch (_) {
+    return [];
+  }
 }
 
 function listRecords(limit = 200) {
@@ -653,6 +674,7 @@ module.exports = {
   listRecords,
   getRecord,
   listPlayerRecords,
+  listByTournament,   // T6：某赛事的全部棋谱（摘要，强制公开）
   recentSummaries,
   searchRecords,
   exportKif,

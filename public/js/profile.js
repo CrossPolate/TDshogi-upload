@@ -212,7 +212,13 @@
       el.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">暂无对局</div>';
       return;
     }
-    el.innerHTML = records.map((r) => {
+    // 只显示最近 10 局（2026-09-13 用户要求）：个人页是**概览**而非棋谱列表——
+    // 想看全部请去棋谱页（那里有检索与分页）。全量铺开只会让页面很长且没人往下滚。
+    // 这里自己按时间倒序再截取，**不依赖服务端返回顺序**（否则换个排序就悄悄显示成最旧的 10 局）。
+    const list = records.slice()
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+      .slice(0, 10);
+    el.innerHTML = list.map((r) => {
       const names = r.names || ['先手', '後手'];
       const mineIsB = r.playerIds && r.playerIds.b === guest.id;
       const result = r.result === 'b' ? '先手胜' : r.result === 'w' ? '后手胜' : (r.resultDetail || '和棋');

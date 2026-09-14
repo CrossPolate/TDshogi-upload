@@ -112,7 +112,34 @@
     return res.json();
   }
 
+  /**
+   * 带身份的 POST（2026-09-13）——用于**管理类**写操作（赛事审批等）。
+   *
+   * ⚠️ 身份走 **token 头**，不是 `?player=<id>` 查询参数：
+   * 后者是公开查询用的宽松通道，任何人都能填别人的 id，拿它做鉴权等于没有鉴权。
+   * ⚠️ 这里**不做权限判断**。客户端"隐藏按钮"只是体验，可被绕过——
+   * 真正的拦截在服务端（赛事是 `tournaments.canManage()`），未授权一律 403。
+   *
+   * @param {string} path
+   * @param {object} [body]
+   * @param {string} [accountToken] 账号会话令牌（通常是 `guest.id`）
+   */
+  async function postAuthed(path, body, accountToken) {
+    const h = { 'Content-Type': 'application/json' };
+    if (accountToken) h['x-account-token'] = accountToken;
+    try {
+      const at = localStorage.getItem(window.NAV && window.NAV.ADMIN_KEY);
+      if (at) h['x-admin-token'] = at;
+    } catch (_) { /* 隐私模式读不到存储：当作没有管理员身份 */ }
+
+    const res = await fetch(path, { method: 'POST', headers: h, body: JSON.stringify(body || {}) });
+    let data = {};
+    try { data = await res.json(); } catch (_) { /* 非 JSON 响应（如 502 网关页） */ }
+    if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+    return data;
+  }
+
   // 全局单例
   global.API = new Client();
-  global.ApiUtils = { get, post };
+  global.ApiUtils = { get, post, postAuthed };
 })(window);

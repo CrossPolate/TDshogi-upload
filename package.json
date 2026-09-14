@@ -1,6 +1,6 @@
 {
   "name": "tdshogi",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "TDShogi 在线将棋对战平台 - 轻量级 Node.js 实时对局",
   "main": "server.js",
   "type": "commonjs",

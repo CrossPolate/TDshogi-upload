@@ -43,6 +43,19 @@
   const $ = (id) => window.UI.$(id);
   function toast(msg) { return window.UI.toast(msg); }
 
+  /**
+   * 重要提示（PLAN §U3）：**弹窗 + 聊天区留痕**。
+   *
+   * 背景：弹窗 2.5 秒就消失，玩家低头看棋盘就错过了；聊天区能回看。
+   * 所以**信息类**提示（对局开始 / 结束、对手请求再来一局、服务端报错）走这里；
+   * **断线类**（"此身份已在其他窗口登录"）刻意仍用 `toast` ——
+   * 页面都断了，往聊天区写一条没人会看的消息只会误导。
+   */
+  function notify(msg) {
+    toast(msg);
+    if (window.PlayChat) window.PlayChat.system(msg);
+  }
+
   // ==================================================================
   // 渲染
   // ==================================================================
@@ -243,6 +256,17 @@
   window.PlayClock.init({
     getState: function () { return state; },
     getViewpoint: function () { return currentViewpoint(); },
+    // §U2：每次棋钟刷新时同步「危险外框」。
+    // ⚠️ 需求明确「观战者不显示」，而 PlayClock.isDanger() 只报告**时间事实**
+    // （当前手番方是否读秒 ≤10 秒）——"必须是本人且轮到本人"这条判断必须在这里做：
+    // 观战者 mySeat 为 null，天然被排除；若把判断挪进棋钟，观战者会跟着变红。
+    onTick: function (st) {
+      if (!fb) return;
+      fb.setDanger(
+        mySeat !== null && !!st && st.status === 'PLAYING'
+        && st.turn === mySeat && window.PlayClock.isDanger()
+      );
+    },
   });
 
   // ==================================================================
@@ -543,18 +567,18 @@
   // 对局事件
   // ==================================================================
   api.on('game_over', (data) => {
-    toast('对局结束：' + (data.resultDetail || ''));
+    notify('对局结束：' + (data.resultDetail || ''));
     if (window.Sound) window.Sound.playEnd();
     // 终局不跳页——state 推送（含 demo）会触发自动进入感想战模式
   });
   api.on('game_start', (data) => {
-    toast('对局开始！');
+    notify('对局开始！');
     if (window.Sound) window.Sound.playStart();
   });
   // 对手请求再来一局：提示并高亮「再来一局」按钮
   api.on('rematch_requested', (data) => {
     const name = (data && data.requesterName) || '对手';
-    toast(`${name} 请求再来一局，点击「再来一局」应战`);
+    notify(`${name} 请求再来一局，点击「再来一局」应战`);
     const btn = $('btnRematch');
     const bannerBtn = $('bannerRematch');
     btn.style.display = 'inline';
@@ -569,12 +593,21 @@
     }, 4000);
   });
   api.on('error', (data) => {
-    if (data && data.message) toast(data.message);
+    if (data && data.message) notify(data.message);
     // 私人房观战需要密码（PLAN §T2）：本页没有密码输入框 → 提示后回大厅的
     // 「👁 观战」入口补填密码（那里有房间码与密码框）。否则用户只会停在一片空白对局页。
     if (data && data.needPassword) {
       setTimeout(() => { location.href = 'lobby.html'; }, 1200);
     }
+  });
+
+  // 服务端明确回执「没有可进入的房间」（历史 bug 修复，2026-09-13）：
+  // 从大厅点一张"自己是选手"的卡片时走的是 request_state（不带 spectate），
+  // 若那局已结束 / 房间已销毁，服务端原先**静默不响应** → 页面一片白且没有任何提示。
+  // 现在改为明确告知 + 送返大厅（与上面 needPassword 的处理风格一致）。
+  api.on('no_room', () => {
+    notify('该对局已结束或不存在，即将返回大厅');
+    setTimeout(() => { location.href = 'lobby.html'; }, 1600);
   });
   // 同身份在别处登录：本页被顶替，提示并停止操作
   api.on('replaced', () => {

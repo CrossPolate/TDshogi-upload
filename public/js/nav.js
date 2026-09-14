@@ -57,7 +57,8 @@
     { id: 'home', label: '首页', href: 'index.html' },
     { id: 'lobby', label: '对战', href: 'lobby.html' },
     { id: 'history', label: '棋谱', href: 'history.html' },
-    { id: 'gallery', label: '棋谱广场', href: 'gallery.html' },
+    // 棋谱广场**不再占顶部导航**（2026-09-13 用户要求：导航省空间），
+    // 入口移到棋谱页标题右侧的角落按钮（见 history.html）。
     { id: 'tournaments', label: '赛事', href: 'tournaments.html' },
     { id: 'profile', label: '个人页面', href: 'profile.html' },
   ];

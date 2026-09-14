@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>赛事详情 · TDShogi</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="nav"></header>
+
+  <main class="container">
+    <!-- 加载中 / 错误（赛事不存在、id 缺失）都走这里 -->
+    <div id="tnLoading" style="color:var(--text-dim);font-size:13px;padding:20px 0;">加载中…</div>
+
+    <div id="tnBody" style="display:none;">
+      <!-- 头部：名称 / 状态 / 主办 / 赛制 / 人数 / 冠军 -->
+      <div class="card" id="tnHead" style="padding:24px;margin-bottom:20px;"></div>
+
+      <!-- 我的操作区：报名 / 我的报名状态 / 进入我的对局 -->
+      <div id="tnMyArea" style="margin-bottom:20px;"></div>
+
+      <!-- 管理区：主办人（批准报名 / 踢人 / 开赛 / 取消成绩 / 取消赛事）+ 管理员（设冠军） -->
+      <div id="tnManageArea" style="margin-bottom:20px;"></div>
+
+      <!-- 申请信息：举办理由与四个时间 -->
+      <div class="card" id="tnInfo" style="padding:20px;margin-bottom:20px;"></div>
+
+      <!-- 参赛名单（含待批准的报名者，主办人可直接在此处置） -->
+      <div class="card" id="tnRoster" style="padding:20px;margin-bottom:20px;"></div>
+
+      <!-- 对阵表 -->
+      <div class="card" id="tnBracketCard" style="padding:20px;margin-bottom:20px;"></div>
+
+      <!-- 赛事棋谱（T6/需求 12）：强制公开，所有用户可看 -->
+      <div class="card" id="tnRecordsCard" style="padding:20px;margin-bottom:20px;"></div>
+
+      <!-- 重赛申请（T6/需求 12）：参赛者可申请，主办人/管理员裁决 -->
+      <div class="card" id="tnRematchCard" style="padding:20px;margin-bottom:20px;"></div>
+
+      <!-- 变更记录：谁在什么时候做了什么（最近 50 条） -->
+      <div class="card" id="tnLogs" style="padding:20px;"></div>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/settings.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/nav.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/hovercard.js"></script>
+  <script src="js/tournament.js"></script>
+</body>
+</html>

@@ -34,6 +34,7 @@ const { requestId, adminEntryGate } = require('./src/http/middleware');
 const registerPublic = require('./src/http/routes/public');
 const registerRecords = require('./src/http/routes/records');
 const registerAccounts = require('./src/http/routes/accounts');
+const registerTournaments = require('./src/http/routes/tournaments');
 const registerAdmin = require('./src/http/routes/admin');
 
 const PORT = process.env.PORT || 3000;
@@ -73,6 +74,7 @@ app.use(express.static(PUBLIC_DIR, {
 registerPublic(app);
 registerRecords(app);
 registerAccounts(app);
+registerTournaments(app); // T3/T6：赛事管理（报名审批 / 踢人 / 开赛 / 取消成绩 / 重赛裁决）
 registerAdmin(app);
 
 // ==================================================================
@@ -102,6 +104,13 @@ server.listen(PORT, () => {
   } catch (err) {
     log.error('backup', '自动备份启动失败', { err });
   }
+  // 游客数据清理（PLAN §U5）：超期未登录的游客会话，及其"双方皆为游客"的棋谱。
+  // ⚠️ 删除不可逆——首次上线建议先用 `CLEANUP_DRY_RUN=1` 启动一次，看清清单再放开。
+  try {
+    require('./src/cleanup').startAutoCleanup();
+  } catch (err) {
+    log.error('cleanup', '游客清理启动失败', { err });
+  }
   // 清理过期的登录/审计日志（保留期与容量上限见 src/audit.js）
   try {
     const pruned = audit.prune();
@@ -110,6 +119,19 @@ server.listen(PORT, () => {
     }
   } catch (err) {
     log.error('audit', '日志清理失败', { err });
+  }
+  // 赛事赛后自动存档（T6/需求 11）：启动补一次（进程重启期间可能已过窗口）+ 每小时检查。
+  // ⚠️ 放在 listen 回调里、与其他定时器同处——放模块顶层会在 **require 时**就跑，
+  // 那时数据库/缓存还没初始化，也违背"服务真正起来后再开定时器"的语义。
+  try {
+    const tournaments = require('./src/tournaments');
+    tournaments.autoArchiveDue();
+    const archiveTimer = setInterval(() => {
+      try { tournaments.autoArchiveDue(); } catch (err) { log.error('tournament', '自动存档失败', { err }); }
+    }, 3600 * 1000);
+    if (archiveTimer.unref) archiveTimer.unref(); // 不阻止进程退出
+  } catch (err) {
+    log.error('tournament', '自动存档定时器启动失败', { err });
   }
   // 恢复上次运行未结束的对局（快照重启恢复）
   const restored = protocol.rooms.restoreSnapshots();

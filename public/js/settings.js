@@ -26,6 +26,12 @@
     dragToMove: false,          // 触屏拖拽走子；关闭时用「点选两步」避免误触
     highlightLastMove: true,    // 上一步落点高亮
     spectatorNotices: true,     // §R3：聊天区显示「XX 进入/离开观战」
+    // §U4 音效细分。v1 只有 'default'（sound.js 的程序化合成音，零素材）；
+    // 将来实装真实音频时在这里加 'file:xxx'，面板与读取链路都不用改。
+    soundMinute: 'default',     // 本时整分钟提醒音（§U1）
+    soundByoyomi: 'default',    // 读秒音（每 10 秒报时 + 最后 10 秒逐秒）
+    soundMove: 'default',       // 棋驹落子/吃子音
+    bgm: 'off',                 // 对局 BGM（需求要求**默认关闭**）
   };
 
   /** 设置项元数据（面板渲染的唯一来源） */
@@ -42,6 +48,16 @@
       hint: '在聊天区显示「XX 进入/离开观战」；人多时可关掉避免刷屏' },
     { group: '棋子', key: 'atlas', type: 'select', label: '棋子图集',
       options: [['kinki', 'kinki'], ['ryoko', 'ryoko']] },
+    // §U4 音效与 BGM。选项暂只有「默认」——sound.js 是 Web Audio 实时合成（零素材）；
+    // 后续实装真实音频时在此加选项（如 ['file:minute-1', '钟声']），读取链路无需改动。
+    { group: '音效', key: 'soundMinute', type: 'select', label: '分钟提醒音',
+      options: [['default', '默认（合成音）']], hint: '本时剩余每跨过一个整分钟响一声' },
+    { group: '音效', key: 'soundByoyomi', type: 'select', label: '读秒音',
+      options: [['default', '默认（合成音）']], hint: '读秒每 10 秒报时；最后 10 秒逐秒' },
+    { group: '音效', key: 'soundMove', type: 'select', label: '落子音',
+      options: [['default', '默认（合成音）']], hint: '含吃子（音色更沉）' },
+    { group: '音效', key: 'bgm', type: 'select', label: '对局 BGM',
+      options: [['off', '关闭']], hint: '默认关闭；曲目后续实装' },
   ];
 
   let cache = null;

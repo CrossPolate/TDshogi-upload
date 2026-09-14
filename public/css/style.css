@@ -822,6 +822,24 @@ a { color: inherit; text-decoration: none; }
 
 /* ---- FreeBoard 拖拽幽灵（freeboard.js 动态创建，此前从未有过样式定义：
        没有 fixed 定位，幽灵会静止在文档流里而不是跟随指针）---- */
+/* §U2：读秒 ≤10 秒的「危险外框」（仅本方可见 —— 是否显示由 play.js 判定，观战者一律不显示）。
+   ⚠️ 用 outline 而不是 border：border 会改变盒子尺寸，导致棋盘整体位移一下——
+   偏偏是在时间最紧的时候抖一下，体验很糟；outline 不参与布局，还能靠 outline-offset 做出外框感。 */
+.shogi-board.fb-danger {
+  outline: 3px solid #e5484d;
+  outline-offset: 3px;
+  border-radius: 6px;
+  animation: fb-danger-pulse 1.1s ease-in-out infinite;
+}
+@keyframes fb-danger-pulse {
+  0%, 100% { outline-color: rgba(229, 72, 77, 0.4); }
+  50% { outline-color: rgba(229, 72, 77, 1); }
+}
+/* 尊重系统「减少动态效果」：脉动对部分用户是干扰而非帮助 */
+@media (prefers-reduced-motion: reduce) {
+  .shogi-board.fb-danger { animation: none; outline-color: #e5484d; }
+}
+
 .fb-drag-ghost {
   position: fixed;
   z-index: 500;

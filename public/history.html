@@ -12,7 +12,11 @@
   <header class="nav"></header>
 
   <main class="container">
-    <div class="section-title" style="font-size:24px;">棋谱管理</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+  <div class="section-title" style="font-size:24px;margin:0;">棋谱管理</div>
+  <!-- 棋谱广场入口（2026-09-13 用户要求）：从顶部导航挪到这里，给导航省空间 -->
+  <a class="btn btn-ghost btn-sm" href="gallery.html" title="浏览公开棋谱">🌐 棋谱广场 →</a>
+</div>
 
     <div class="replay-layout">
       <div>
@@ -38,6 +42,8 @@
             <button class="btn btn-ghost btn-sm" id="btnResetSearch">重置</button>
           </div>
           <div id="recordList" style="max-height:65vh;overflow-y:auto;"></div>
+        <!-- 分页条（2026-09-13）：列表最多 20 条/页，避免棋谱一多就把页面撑爆 -->
+        <div id="recordPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
         </div>
         <div style="font-size:12px;color:var(--text-dim);margin-top:8px;">
           点击任意棋谱进入「复盘器」，可前进/后退、加书签、写评论、保存变着，并导出 KIF/CSA。

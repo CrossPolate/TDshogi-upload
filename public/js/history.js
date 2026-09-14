@@ -45,6 +45,7 @@
   // 结果由服务端按本连接身份过滤后下发
   window.API.on('record_search_result', (d) => {
     records = (d && d.records) || [];
+    listPage = 1; // 新结果 → 回到第 1 页（否则会停在上次页码上，看起来像"检索没生效"）
     document.getElementById('recordCount').textContent = records.length ? `${records.length} 局` : '';
     renderList();
   });
@@ -53,9 +54,20 @@
     const el = document.getElementById('recordList');
     if (!records.length) {
       el.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">暂无匹配的对局。完成对局后可在此检索与复盘。</div>';
+      // 空结果也要清掉分页条，否则会留着上一次的「第 1 / 5 页」
+      window.UI.paginate({ items: [], container: 'recordPager' });
       return;
     }
-    el.innerHTML = records.map((r) => {
+    // 分页（2026-09-13）：棋谱可能上千条，全量渲染会把页面与滚动条一起撑爆
+    const pg = window.UI.paginate({
+      items: records,
+      page: listPage,
+      size: 20,
+      container: 'recordPager',
+      onPage: (n) => { listPage = n; renderList(); },
+    });
+    listPage = pg.page; // 页码被夹回时（检索后条数变少）同步回来
+    el.innerHTML = pg.slice.map((r) => {
       const names = r.names || ['先手', '後手'];
       const myResult = resultText(r, names);
       const opening = r.opening ? `<span style="color:var(--gold-light);font-size:11px;">开局 ${esc(r.opening)}</span>` : '';
@@ -83,5 +95,6 @@
   });
 
   let records = [];
+  let listPage = 1; // 棋谱列表当前页（每页 20 条，见 renderList）
   loadRecords();
 })();

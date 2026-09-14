@@ -159,4 +159,27 @@ module.exports = function registerAdmin(app) {
   app.post('/api/admin/tournaments/:id/approve', tournamentAction('approve'));
   app.post('/api/admin/tournaments/:id/reject', tournamentAction('reject'));
   app.post('/api/admin/tournaments/:id/cancel', tournamentAction('cancel'));
+
+  // ---- T6 赛后存档（需求 11）----
+  // ⚠️ 走 `adminWrite`（= `adminOnly` + 审计落盘），**不要**自己写 `checkAdmin`：
+  // 绕开审计后，"谁把这场存档了/改了冠军"事后就查不到了。
+
+  // 存档赛事：存档后主办人只读，管理员仍可编辑（每次编辑留痕）
+  app.post('/api/admin/tournaments/:id/archive', adminWrite((req) => {
+    const r = tournaments.archiveTournament(req.params.id, { id: null, isAdmin: true });
+    return { ok: r.ok, error: r.error, action: 'tournament.archive', tournament: r.tournament };
+  }));
+
+  // 编辑已存档赛事：仅 `archived`，且字段收窄到结论性信息（冠军 / 备注）
+  app.post('/api/admin/tournaments/:id/edit', adminWrite((req, body) => {
+    const r = tournaments.editArchived(
+      req.params.id, body.field, body.value,
+      { id: null, isAdmin: true }, body.note
+    );
+    return {
+      ok: r.ok, error: r.error, action: 'tournament.edit',
+      audit: { field: body.field, from: null, to: body.value == null ? null : String(body.value).slice(0, 80) },
+      tournament: r.tournament,
+    };
+  }));
 };

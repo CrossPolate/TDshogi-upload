@@ -28,7 +28,14 @@
   let byoyomiDuration = 0;
   let lastTickTs = Date.now();
   let lastTickSecond = -1;  // 读秒音效：记录上次"嗒"的秒数（跨秒触发）
+  // §U1 提醒边界：**按座位分别记**——用一个变量的话，换手时数值会从
+  // "我方剩余"跳到"对方剩余"，表现为凭空跨过若干个整分钟，一口气连响好几声。
+  let lastMinuteMark = { b: -1, w: -1 };   // 本时：上次已提醒的"剩余整分钟数"
+  let lastByoyomiMark = { b: -1, w: -1 };  // 读秒：上次已报时的"剩余整十秒数"
   let timer = null;
+  // §U2：每次刷新显示后的回调 (state) => void —— play.js 用它同步"危险外框"等派生 UI。
+  // 挂在这里而不是让 play.js 自己开定时器：棋钟本来就每 500ms 在跑，没必要再来一个。
+  let onTick = null;
 
   // 公共工具（PLAN §M5）：实现统一在 util.js，此处只转发
   function $(id) { return window.UI.$(id); }
@@ -58,6 +65,9 @@
     const lowMe = inByoyomi[mySeatH] ? localByoyomi[mySeatH] <= 10000 : localClocks[mySeatH] <= 10000;
     $('topClock').classList.toggle('low', lowOpp && state && state.turn === oppSeat);
     $('bottomClock').classList.toggle('low', lowMe && state && state.turn === mySeatH);
+    // §U2：把"该不该红框"交给 play.js —— 它才知道我是选手还是观战者。
+    // 回调里做的是幂等的 class toggle，500ms 一次的开销可以忽略。
+    if (onTick) { try { onTick(state); } catch (_) { /* 派生 UI 出错不该拖垮棋钟 */ } }
   }
 
   /**
@@ -66,6 +76,11 @@
    * 把这段逻辑从 tick 里拎出来，是为了让它**不依赖定时器也能被验证**——
    * 时间算错是用户立刻能感知的错误，不能只靠"跑起来看着对"。
    * 非 PLAYING（未开局 / 已终局）不扣时，由本函数自行判断，调用方无需关心。
+   *
+   * §U1 在此加入**两级时间提醒**（三种音两两可区分）：
+   *   - 本时每跨过一个整分钟 → `playMinuteWarning()`（低、长）
+   *   - 读秒每跨过 10 秒（60/50/40/30/20）→ `playByoyomiMark()`（中频双音）
+   *   - 读秒 ≤10 秒 → `playByoyomi()`（高频短「嗒」，原有）
    */
   function advance(dtMs) {
     const state = getState();
@@ -73,6 +88,17 @@
     const turn = state.turn;
     if (inByoyomi[turn] && byoyomiDuration > 0) {
       localByoyomi[turn] = Math.max(0, localByoyomi[turn] - dtMs);
+
+      // §U1：读秒每跨过 10 秒报时一次。
+      // **刻意不含 10 秒**——那一拍交给下面的逐秒「嗒」，否则两个音会叠在一起。
+      const mark = Math.ceil(localByoyomi[turn] / 10000);
+      if (lastByoyomiMark[turn] === -1) {
+        lastByoyomiMark[turn] = mark; // 首次只记录、不补响（进对局/换手瞬间不该出声）
+      } else if (mark !== lastByoyomiMark[turn]) {
+        if (mark >= 2 && mark <= 6 && window.Sound) window.Sound.playByoyomiMark();
+        lastByoyomiMark[turn] = mark;
+      }
+
       // 读秒 ≤10 秒：每秒「嗒」（跨秒边界触发，含 10 与 1）
       const sec = Math.ceil(localByoyomi[turn] / 1000);
       if (sec >= 1 && sec <= 10 && sec !== lastTickSecond) {
@@ -82,7 +108,45 @@
       if (sec > 10) lastTickSecond = -1;
     } else {
       localClocks[turn] = Math.max(0, localClocks[turn] - dtMs);
+
+      // §U1：本时每跨过一个整分钟提醒一次（mm = 剩余整分钟数）
+      // ⚠️ 条件用 `mm >= 0` 而不是 `>= 1`：`Math.ceil` 使 mm=1 覆盖 (0, 60000]，
+      // 从 1:00 走到 0:00 时 mm 由 1 变 0 —— 这一跨也是"跨过一个整分钟"，
+      // 用 >=1 会把最后一分钟那条提醒吞掉。mm=0 之后不再变化，不会重复响。
+      const mm = Math.ceil(localClocks[turn] / 60000);
+      if (lastMinuteMark[turn] === -1) {
+        lastMinuteMark[turn] = mm; // 首次只记录、不补响
+      } else if (mm !== lastMinuteMark[turn]) {
+        if (mm >= 0 && window.Sound) window.Sound.playMinuteWarning();
+        lastMinuteMark[turn] = mm;
+      }
     }
+  }
+
+  /**
+   * 重置全部提醒边界为"下一条服务端消息到达时的值"。
+   *
+   * **收到任何时间校准后都必须调用**：本地与服务端时钟存在偏差，
+   * 不重置就会表现为"凭空跨过几个整分钟"，一口气连响好几声。
+   */
+  function resetMarks() {
+    lastMinuteMark = { b: -1, w: -1 };
+    lastByoyomiMark = { b: -1, w: -1 };
+    lastTickSecond = -1;
+  }
+
+  /**
+   * 当前手番方是否处于「读秒 ≤10 秒」的危险状态（PLAN §U2，供棋盘红框使用）。
+   *
+   * ⚠️ 这里只回答**时间事实**，不判断"是不是自己"——那是调用方的责任：
+   * 需求明确要求**观战者不显示红框**，而观战者（`mySeat === null`）只能由
+   * `play.js` 排除。把这条判断挪进来，观战者也会跟着变红。
+   */
+  function isDanger() {
+    const state = getState();
+    if (!state || state.status !== 'PLAYING') return false;
+    const turn = state.turn;
+    return !!(inByoyomi[turn] && byoyomiDuration > 0 && localByoyomi[turn] <= 10000);
   }
 
   /** 本地棋钟 tick（每 500ms） */
@@ -109,6 +173,7 @@
       localByoyomi = state.curByoyomi ? { ...state.curByoyomi } : { b: 0, w: 0 };
       byoyomiDuration = state.byoyomi || 0;
     }
+    resetMarks(); // §U1：以服务端时间为新基准，避免时间跳变连响
     update();
   }
 
@@ -127,6 +192,7 @@
     }
     if (data.byoyomi != null) byoyomiDuration = data.byoyomi;
     lastTickTs = Date.now();
+    resetMarks(); // §U1：每手都可能重新读秒（60/30 秒起步），边界必须跟着重置
     update();
   }
 
@@ -143,11 +209,14 @@
     const o = opts || {};
     if (typeof o.getState === 'function') getState = o.getState;
     if (typeof o.getViewpoint === 'function') getViewpoint = o.getViewpoint;
+    if (typeof o.onTick === 'function') onTick = o.onTick; // §U2：同步危险外框等派生 UI
     start();
   }
 
   window.PlayClock = {
     init, syncFromState, syncFromServer, resetTick, update, start, stop,
-    advance, // 单测用：不经定时器直接推进 dtMs
+    advance,    // 单测用：不经定时器直接推进 dtMs
+    isDanger,   // §U2 棋盘红框用：当前手番方是否读秒 ≤10 秒（调用方需自行排除观战者）
+    resetMarks, // 单测用：重置提醒边界
   };
 })();

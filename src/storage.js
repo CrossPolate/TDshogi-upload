@@ -105,6 +105,8 @@ const RECORD_SUMMARY_COLUMNS = [
   ['result', 'TEXT'], ['resultDetail', 'TEXT'], ['moveCount', 'INTEGER'], ['opening', 'TEXT'],
   ['pub', 'INTEGER'], ['visibility', 'TEXT'], ['source', 'TEXT'], ['timeControl', 'TEXT'],
   ['rated', 'INTEGER'], ['winnerId', 'TEXT'], ['durationSec', 'INTEGER'], ['meta', 'TEXT'],
+  // 赛事棋谱归属（T6，2026-09-13）：详情页据此聚合"本赛事全部棋谱"
+  ['tournamentId', 'TEXT'],
 ];
 
 /** 给已存在的老库补摘要列与索引（幂等，可重复调用） */
@@ -118,6 +120,7 @@ function ensureRecordColumns() {
     CREATE INDEX IF NOT EXISTS idx_records_playerB ON records(playerB);
     CREATE INDEX IF NOT EXISTS idx_records_playerW ON records(playerW);
     CREATE INDEX IF NOT EXISTS idx_records_pub ON records(pub, createdAt);
+    CREATE INDEX IF NOT EXISTS idx_records_tournamentId ON records(tournamentId, createdAt);
   `);
 }
 
@@ -259,6 +262,7 @@ function summaryValues(rec) {
     winnerId: rec.winnerId || null,
     durationSec: rec.durationSec || null,
     meta: rec.meta ? JSON.stringify(rec.meta) : null,
+    tournamentId: rec.tournamentId || null,
   };
 }
 
@@ -284,24 +288,25 @@ function rowToSummary(r) {
     winnerId: r.winnerId,
     durationSec: r.durationSec,
     meta,
+    tournamentId: r.tournamentId || null,
   };
 }
 
 const SUMMARY_SELECT = `SELECT id, playerB, playerW, nameB, nameW, result, resultDetail,
   moveCount, opening, createdAt, rated, visibility, source, timeControl, winnerId,
-  durationSec, meta FROM records`;
+  durationSec, meta, tournamentId FROM records`;
 
 function putRecord(rec) {
   const v = summaryValues(rec);
   getDb().prepare(`INSERT OR REPLACE INTO records
     (id, data, createdAt, playerB, playerW, nameB, nameW, result, resultDetail,
-     moveCount, opening, pub, visibility, source, timeControl, rated, winnerId, durationSec, meta)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+     moveCount, opening, pub, visibility, source, timeControl, rated, winnerId, durationSec, meta, tournamentId)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(
       rec.id, JSON.stringify(rec), rec.createdAt || Date.now(),
       v.playerB, v.playerW, v.nameB, v.nameW, v.result, v.resultDetail,
       v.moveCount, v.opening, v.pub, v.visibility, v.source, v.timeControl,
-      v.rated, v.winnerId, v.durationSec, v.meta
+      v.rated, v.winnerId, v.durationSec, v.meta, v.tournamentId
     );
 }
 
@@ -320,7 +325,7 @@ function listRecords(limit = 500) {
  * 摘要列表（PLAN §Q7-2）：只读标量列，完全不触碰 data 里的整谱。
  * @param {{playerId?:string|null, pub?:boolean|null, limit?:number, offset?:number}} opts
  */
-function listSummaries({ playerId = null, pub = null, limit = 100, offset = 0 } = {}) {
+function listSummaries({ playerId = null, pub = null, tournamentId = null, limit = 100, offset = 0 } = {}) {
   const conds = [];
   const params = [];
   if (playerId) {
@@ -330,6 +335,10 @@ function listSummaries({ playerId = null, pub = null, limit = 100, offset = 0 } 
   if (pub !== null && pub !== undefined) {
     conds.push('pub = ?');
     params.push(pub ? 1 : 0);
+  }
+  if (tournamentId) {
+    conds.push('tournamentId = ?');
+    params.push(tournamentId);
   }
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
   const rows = getDb()
@@ -367,7 +376,8 @@ function backfillRecordSummaries() {
     playerB=@playerB, playerW=@playerW, nameB=@nameB, nameW=@nameW, result=@result,
     resultDetail=@resultDetail, moveCount=@moveCount, opening=@opening, pub=@pub,
     visibility=@visibility, source=@source, timeControl=@timeControl, rated=@rated,
-    winnerId=@winnerId, durationSec=@durationSec, meta=@meta WHERE id=@id`);
+    winnerId=@winnerId, durationSec=@durationSec, meta=@meta,
+    tournamentId=@tournamentId WHERE id=@id`);
   const tx = d.transaction((list) => {
     for (const r of list) {
       let rec;
@@ -378,7 +388,7 @@ function backfillRecordSummaries() {
         : {
           playerB: null, playerW: null, nameB: null, nameW: null, result: null, resultDetail: null,
           moveCount: 0, opening: null, pub: 0, visibility: 'private', source: null, timeControl: null,
-          rated: 1, winnerId: null, durationSec: null, meta: null, id: r.id,
+          rated: 1, winnerId: null, durationSec: null, meta: null, tournamentId: null, id: r.id,
         });
     }
   });
@@ -474,6 +484,25 @@ function listSessions() {
   return rows.map((r) => JSON.parse(r.data));
 }
 
+/**
+ * 删除会话（PLAN §U5 游客清理用）。
+ * @returns {number} 实际删除行数（0 = 不存在）
+ */
+function deleteSession(id) {
+  return getDb().prepare('DELETE FROM sessions WHERE id = ?').run(id).changes;
+}
+
+/**
+ * 删除棋谱（PLAN §U5 游客清理用）。
+ *
+ * ⚠️ 只删 `records` 表里的行。棋谱的**导出文件**（RECORDS_DIR 下的 .kif/.csa，若有）
+ * 属于历史遗留产物，不在本函数的职责内——清理逻辑若要一并清，需自行处理。
+ * @returns {number} 实际删除行数（0 = 不存在）
+ */
+function deleteRecord(id) {
+  return getDb().prepare('DELETE FROM records WHERE id = ?').run(id).changes;
+}
+
 // ---------------- gamesnapshots：进行中对局快照（重启恢复） ----------------
 function putGameSnapshot(roomId, data) {
   getDb().prepare('INSERT OR REPLACE INTO gamesnapshots (roomId, data, savedAt) VALUES (?, ?, ?)')
@@ -526,10 +555,12 @@ module.exports = {
   backfillRecordSummaries,
   searchRecords,
   countRecords,
+  deleteRecord, // §U5 游客清理
   sessionExists,
   getSessionById,
   putSession,
   listSessions,
+  deleteSession, // §U5 游客清理
   // gamesnapshots
   putGameSnapshot,
   getGameSnapshot,

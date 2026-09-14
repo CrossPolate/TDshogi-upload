@@ -167,6 +167,133 @@
     return { text, cls: (r.result === 'b' || r.result === 'w') ? 'result-win' : 'result-draw' };
   }
 
+  // ==================================================================
+  // 列表分页（前台通用，2026-09-13）
+  // ==================================================================
+  /**
+   * 把「全量数组 + 当前页」切成该页数据，并把分页条渲染进容器。
+   *
+   * 为什么放 util.js：棋谱页 / 赛事页 / 管理后台都要分页——
+   * **同一份翻页逻辑抄三遍，迟早只改两处**（`resultText` 当年的重复就是这么来的）。
+   *
+   * 只做「切片 + 渲染分页条」，**不碰业务列表的渲染**：调用方拿到 `slice` 自己画。
+   * 翻页按钮走 `addEventListener` 而非 inline onclick —— 分页条里不该出现拼接的字符串事件。
+   *
+   * @param {object} o
+   * @param {Array}  o.items              全量数据
+   * @param {number} [o.page=1]           当前页（1 起；越界会**自动夹回**合法范围）
+   * @param {number} [o.size=20]          每页条数
+   * @param {Element|string} [o.container] 分页条容器（元素或 id；省略则只切片不渲染）
+   * @param {(page:number)=>void} [o.onPage] 翻页回调
+   * @returns {{slice:Array, page:number, totalPages:number, total:number}}
+   */
+  function paginate(o) {
+    const opts = o || {};
+    const items = opts.items || [];
+    const size = Math.max(1, opts.size || 20);
+    const total = items.length;
+    const totalPages = Math.max(1, Math.ceil(total / size));
+    // 页码夹回合法范围：检索后数据变少时不该停在空页上（表现为「一片空白但没说为什么」）
+    const page = Math.min(Math.max(1, opts.page || 1), totalPages);
+    const slice = items.slice((page - 1) * size, page * size);
+
+    const box = typeof opts.container === 'string'
+      ? document.getElementById(opts.container)
+      : opts.container;
+    if (box) {
+      const info = '<span style="font-size:12px;color:var(--text-dim);">';
+      if (totalPages <= 1) {
+        box.innerHTML = total ? `${info}共 ${total} 条</span>` : '';
+      } else {
+        box.innerHTML =
+          `<button class="btn btn-ghost btn-sm" data-pg="${page - 1}"${page <= 1 ? ' disabled' : ''}>上一页</button>` +
+          `${info}第 ${page} / ${totalPages} 页 · 共 ${total} 条</span>` +
+          `<button class="btn btn-ghost btn-sm" data-pg="${page + 1}"${page >= totalPages ? ' disabled' : ''}>下一页</button>`;
+        if (typeof opts.onPage === 'function') {
+          Array.prototype.forEach.call(box.querySelectorAll('button[data-pg]'), (btn) => {
+            btn.addEventListener('click', () => {
+              if (btn.disabled) return;
+              opts.onPage(Number(btn.getAttribute('data-pg')));
+            });
+          });
+        }
+      }
+    }
+    return { slice, page, totalPages, total };
+  }
+
+  // ==================================================================
+  // 赛事对阵图（2026-09-13：列表页与详情页共用）
+  // ==================================================================
+  /**
+   * 把满二叉树形态的 `bracket` 按层级分列画出来。
+   *
+   * 为什么放 util.js：列表页与详情页要画**同一棵树**——
+   * 抄两份的结果必然是一边修了另一边没修（`resultText` 的老教训）。
+   *
+   * @param {object} t 赛事（`publicInfo` 形态：需 size / bracket / players）
+   * @param {object} [o]
+   * @param {string}  [o.myId]     自己的玩家 id → 高亮并给「进入对局」
+   * @param {boolean} [o.detail]   详情页模式：把「空位 / 轮空」也标出来
+   * @returns {string} HTML 片段；无对阵表时返回空串
+   */
+  function bracketHtml(t, o) {
+    const opts = o || {};
+    const nodes = (t && t.bracket) || [];
+    if (!nodes.length) return '';
+
+    // 参赛者名字：开赛后看 players；轮空位在 players 里没有，用 pair 递归不上溯，
+    // 所以这里以 players 为准、entrants 兜底（详情页在报名阶段也能显示名字）。
+    const nameOf = (id) => {
+      if (!id) return null;
+      const p = (t.players || []).find((x) => x.id === id)
+        || (t.entrants || []).find((x) => x.id === id);
+      return p ? p.name : null;
+    };
+
+    // 满二叉树按层切：第 d 层起点 2^d - 1、个数 2^d
+    const depth = Math.round(Math.log2(t.size || nodes.length + 1));
+    const levels = [];
+    for (let d = 0; d <= depth; d++) {
+      const start = Math.pow(2, d) - 1;
+      levels.push(nodes.slice(start, start + Math.pow(2, d)));
+    }
+
+    const cols = levels.map((levelNodes) => {
+      const cells = levelNodes.map((n) => {
+        const isLeaf = !n.pair;
+        const inMatch = !!(n.matchId && n.players);
+        const p1 = inMatch ? nameOf(n.players[0]) : null;
+        const p2 = inMatch ? nameOf(n.players[1]) : null;
+        const winnerName = nameOf(n.winnerId);
+        const mine = opts.myId && inMatch && n.players.indexOf(opts.myId) >= 0;
+
+        let body;
+        if (inMatch) {
+          const tag = mine
+            ? `<a class="btn btn-primary btn-sm" href="play.html?room=${encodeURIComponent(n.matchId)}&join=1" style="margin-top:6px;">进入对局</a>`
+            : '<div style="font-size:11px;color:var(--gold-light);margin-top:6px;">对局进行中</div>';
+          body = `<div class="p">${esc(p1 || '?')} vs ${esc(p2 || '?')}</div>${tag}`;
+        } else if (winnerName) {
+          body = `<div class="p winner">${esc(winnerName)} 晋级</div>`;
+        } else if (isLeaf) {
+          const nm = n.name || nameOf(n.playerId);
+          body = nm
+            ? `<div class="p"${n.playerId ? ` data-player-id="${esc(n.playerId)}"` : ''}>${esc(nm)}</div>`
+            : (opts.detail ? '<div class="p" style="color:var(--text-dim);">空位</div>' : '<div class="p" style="color:var(--text-dim);">待定</div>');
+        } else {
+          body = '<div class="p" style="color:var(--text-dim);">待定</div>';
+        }
+
+        const border = n.winnerId ? 'border-color:var(--gold);' : '';
+        return `<div class="bracket-match" style="${border}">${body}</div>`;
+      }).join('');
+      return `<div class="bracket-col">${cells}</div>`;
+    }).join('');
+
+    return `<div class="bracket">${cols}</div>`;
+  }
+
   global.debugLog = debugLog;
-  global.UI = { $, esc, toast, debugLog, resultText };
+  global.UI = { $, esc, toast, debugLog, resultText, paginate, bracketHtml };
 })(window);

@@ -142,6 +142,72 @@
     osc.stop(t0 + 0.05);
   }
 
+  /**
+   * 整分钟提醒（PLAN §U1）：本时剩余每跨过一个整分钟响一次。
+   *
+   * 音色刻意与读秒「嗒」拉开距离——**低、长、圆润**（正弦，660→440Hz，0.35s）。
+   * 这条音是「提示」而不是「催促」：玩家还有好几分钟，不该被高频短音打扰。
+   */
+  function playMinuteWarning() {
+    if (!enabled) return;
+    const ac = ensureCtx();
+    if (!ac) return;
+    const t0 = ac.currentTime;
+    const master = ac.createGain();
+    master.gain.value = MASTER * 0.8;
+    master.connect(ac.destination);
+
+    const osc = ac.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(660, t0);
+    osc.frequency.exponentialRampToValueAtTime(440, t0 + 0.18);
+    const g = ac.createGain();
+    env(g, t0, 0.9, 0.35); // 明显长于读秒音
+    osc.connect(g).connect(master);
+    osc.start(t0);
+    osc.stop(t0 + 0.4);
+  }
+
+  /**
+   * 读秒报时（PLAN §U1）：读秒阶段每跨过 10 秒响一次（60/50/40/30/20）。
+   *
+   * 音色介于两者之间——**三角波双音「叮-咚」**（1100→880Hz，间隔 0.1s）：
+   * 比整分钟提醒急促（时间更紧了），但比逐秒「嗒」舒缓（还不是最后关头）。
+   */
+  function playByoyomiMark() {
+    if (!enabled) return;
+    const ac = ensureCtx();
+    if (!ac) return;
+    const t0 = ac.currentTime;
+    const master = ac.createGain();
+    master.gain.value = MASTER * 0.7;
+    master.connect(ac.destination);
+
+    [1100, 880].forEach((f, i) => {
+      const osc = ac.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = f;
+      const g = ac.createGain();
+      const t = t0 + i * 0.1;
+      env(g, t, 0.55, 0.12);
+      osc.connect(g).connect(master);
+      osc.start(t);
+      osc.stop(t + 0.14);
+    });
+  }
+
+  /**
+   * 读取音色方案（PLAN §U4）。
+   *
+   * v1 只有 `default`（上面的程序化合成）；预留 `file:<name>` 形式，
+   * 将来实装真实音频时从 `public/audio/` 加载，**调用方无需改动**。
+   * Settings 未加载时一律回退 default（不抛错）。
+   */
+  function variant(key) {
+    if (!global.Settings) return 'default';
+    try { return global.Settings.get(key) || 'default'; } catch (_) { return 'default'; }
+  }
+
   /** 对局开始：上扬双音 */
   function playStart() {
     if (!enabled) return;
@@ -208,6 +274,8 @@
 
   global.Sound = {
     playMove, playCapture, playByoyomi, playStart, playEnd,
+    playMinuteWarning, playByoyomiMark, // PLAN §U1：整分钟提醒 / 读秒每 10 秒报时
+    variant,                            // PLAN §U4：音色方案读取（v1 恒为 default）
     setEnabled, applyEnabled, isEnabled, ensureCtx,
   };
 })(window);

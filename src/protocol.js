@@ -294,7 +294,16 @@ class Protocol {
             if (bound && bound.ok) state = r.getRoomStateForClient(clientId);
           }
         }
-        if (state) this._send(clientId, { type: 'state', data: state });
+        if (state) {
+          this._send(clientId, { type: 'state', data: state });
+        } else {
+          // ⚠️ **必须明确回执**：静默不响应会让前端停在空白页干等（用户只能看到一片白）。
+          // 触发场景（2026-09-13 定位）：从大厅点一张"自己是选手"的对局卡片 →
+          // 前台不带 spectate → 走 request_state → 但该局已结束/房间已销毁 →
+          // reconnect / bindToActiveGame 全失败 → 原先这里什么都不发 → 页面全白。
+          // 这条历史 bug 拖了很久，就是因为它是**静默**失败：日志里连个错都没有。
+          this._send(clientId, { type: 'no_room', data: { roomId: (data && data.roomId) || null } });
+        }
         break;
       }
       case 'chat': {
@@ -330,7 +339,18 @@ class Protocol {
           this._error(clientId, '创建赛事需要登录正式账号，请在个人页注册/登录');
           break;
         }
-        const res = tournaments.createTournament(data && data.name, data && data.size, { id: player.playerId, name: player.name });
+        // T1/T2：透传建赛申请表字段。**服务端会再校验一遍**（时间自洽性、赛制、人数档位），
+        // 前端校验只防手滑，防不了直接构造 WS 消息的人。
+        const res = tournaments.createTournament(data && data.name, data && data.size,
+          { id: player.playerId, name: player.name }, {
+            reason: data && data.reason,
+            registerStart: data && data.registerStart,
+            registerEnd: data && data.registerEnd,
+            matchStart: data && data.matchStart,
+            matchEnd: data && data.matchEnd,
+            format: data && data.format,
+            requireApproval: data && data.requireApproval,
+          });
         if (res.ok) {
           this._send(clientId, { type: 'tournament_created', data: res.tournament });
         } else {
@@ -341,7 +361,12 @@ class Protocol {
       case 'join_tournament': {
         const res = tournaments.joinTournament(data && data.id, { id: player.playerId, name: player.name });
         if (res.ok) {
-          this._send(clientId, { type: 'tournament_joined', data: res.tournament });
+          // T3：两段式报名——`pending` 表示"只是提交了申请，还没被批准"，
+          // 前端据此给不同提示（否则会给用户"已经参赛了"的错觉）。
+          this._send(clientId, {
+            type: 'tournament_joined',
+            data: Object.assign({}, res.tournament, { pending: !!res.pending, started: !!res.started }),
+          });
         } else {
           this._error(clientId, res.error);
         }

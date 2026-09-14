@@ -155,6 +155,18 @@ function listAccounts() {
   return Object.values(getCache()).map(publicInfo);
 }
 
+/**
+ * 账号**原始**记录（含 `guestId` 等非公开字段），仅供服务端内部逻辑使用。
+ *
+ * 为什么单独开一个而不是改 `listAccounts()`：后者走 `publicInfo()`，会剔除隐私字段——
+ * 而 §U5 的游客清理**必须**知道"这个游客后来注册了没有"，依据正是 `account.guestId`
+ * （`register()` 里注释写明"迁移后仍保留用于追溯"）。
+ * ⚠️ 返回值**绝不可**直接下发到客户端。
+ */
+function listAccountsRaw() {
+  return Object.values(getCache());
+}
+
 // ---------------- 个人资料（PLAN §F）----------------
 
 // 棋风预设（公开字段）
@@ -319,6 +331,7 @@ module.exports = {
   issueToken,
   getAccount,
   listAccounts,
+  listAccountsRaw, // §U5 游客清理用：含 guestId 等非公开字段，仅服务端内部
   publicInfo,
   getOwnProfile,
   updateProfile,

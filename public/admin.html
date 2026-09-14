@@ -44,6 +44,8 @@
         </div>
         <div id="importResult" style="font-size:12px;color:var(--green);margin:6px 0;"></div>
         <div id="adminRecordList" style="max-height:70vh;overflow-y:auto;"></div>
+        <!-- 分页条（PLAN §W1 / 需求 13）：内容由 admin.js 的 renderPaged 填充 -->
+        <div id="recordPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
       </div>
 
       <!-- 全部用户 -->
@@ -53,6 +55,7 @@
           <input class="input" id="userSearch" placeholder="按名字/ID 搜索用户" style="width:220px;padding:6px 10px;font-size:13px;">
         </div>
         <div id="adminUserList" style="max-height:70vh;overflow-y:auto;"></div>
+        <div id="userPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
       </div>
 
       <!-- 赛事管理 -->
@@ -64,14 +67,18 @@
         <div style="margin-bottom:18px;">
           <div style="font-size:13px;font-weight:700;margin-bottom:8px;">🕐 待审核</div>
           <div id="tnPendingList"></div>
+          <div id="tnPendingPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:8px;flex-wrap:wrap;"></div>
         </div>
         <div style="margin-bottom:18px;">
           <div style="font-size:13px;font-weight:700;margin-bottom:8px;">▶️ 进行中</div>
           <div id="tnActiveList"></div>
+          <div id="tnActivePager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:8px;flex-wrap:wrap;"></div>
         </div>
         <div>
           <div style="font-size:13px;font-weight:700;margin-bottom:8px;">📜 历史</div>
-          <div id="tnHistoryList" style="max-height:40vh;overflow-y:auto;"></div>
+          <!-- 分页后不需要长滚动条（需求 13：一页只显示 20 个） -->
+          <div id="tnHistoryList"></div>
+          <div id="tnHistoryPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:8px;flex-wrap:wrap;"></div>
         </div>
       </div>
 
@@ -83,6 +90,7 @@
         </div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">管理员的全部写操作记录（最近 200 条）：封禁/解封、改名、重置、资料修改、删除等</div>
         <div id="auditList" style="max-height:70vh;overflow-y:auto;"></div>
+        <div id="auditPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
       </div>
 
       <!-- 用户详情弹层 -->
