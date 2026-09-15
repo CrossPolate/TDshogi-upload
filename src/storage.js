@@ -460,6 +460,43 @@ function searchRecords(q = {}) {
   return rows.map(rowToSummary);
 }
 
+/**
+ * 手动 WAL checkpoint（把 `-wal` 里已提交的内容并回主库，并截断该文件）。
+ *
+ * ## 为什么需要
+ * WAL 模式下写入先进 `-wal`，SQLite 只在自动 checkpoint（默认 1000 页）或**最后一个连接关闭**时
+ * 才并回主库。本服务是**长期运行的单连接**，"最后一个连接关闭"几乎不会发生，
+ * 于是一次大事务（如批量导入棋谱）留下的 `-wal` 会一直挂在磁盘上——
+ * 实测出现过 `-wal`(4MB) 比主库(128KB) 还大 30 倍。
+ *
+ * ## ⚠️ 它不是"备份的一部分"（这点容易搞反）
+ * **备份不需要它**：`src/backup.js` 用的是 `VACUUM INTO`，走一次读事务拿**一致性快照**，
+ * 本身就把 WAL 里未合并的内容算进去了。所以"不 checkpoint 会丢备份"是**错的**。
+ * 这里做它只是为了让 `-wal` 不白占空间、崩溃后回放更快。
+ *
+ * @returns {boolean} 成功与否（失败只记日志，不影响服务）
+ */
+function checkpointWal() {
+  try {
+    getDb().pragma('wal_checkpoint(TRUNCATE)');
+    return true;
+  } catch (err) {
+    log.error('storage', 'WAL checkpoint 失败', { err });
+    return false;
+  }
+}
+
+/**
+ * ⚠️ **已废弃（PLAN §M4，2026-09-15）**：会话的**唯一来源是 kv**（`sessions/<id>.json`，
+ * 由 `auth.identify` / `auth.upsertSession` 写入）。
+ *
+ * 这里的 `sessions` **表**是历史遗留的第二条路，此前只有 `accounts.migrateGuestData` 在用
+ * （而且因为与 kv 不互通，迁移实际是无效的）。该调用已改为 `auth.getSessionRaw` / `auth.saveSession`。
+ *
+ * **不要在新代码里用它**：读它拿不到真正在用的会话；
+ * 真正需要读会话请用 `auth.listSessions()` / `auth.getSessionRaw()`。
+ * 保留函数体只是为了不破坏可能的外部引用与老数据，后续清理时可整表删除。
+ */
 function sessionExists(id) {
   return !!getDb().prepare('SELECT 1 FROM sessions WHERE id = ?').get(id);
 }
@@ -555,6 +592,7 @@ module.exports = {
   backfillRecordSummaries,
   searchRecords,
   countRecords,
+  checkpointWal, // WAL 截断（备份后顺手做，避免 -wal 白占空间）
   deleteRecord, // §U5 游客清理
   sessionExists,
   getSessionById,

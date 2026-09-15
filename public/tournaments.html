@@ -15,7 +15,7 @@
     <div class="card" style="padding:24px;margin-bottom:28px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;">
       <div>
         <div class="section-title" style="margin-bottom:6px;">棋手赛事</div>
-        <div style="font-size:13px;color:var(--text-dim);">单败淘汰赛 · 报名满员自动开赛 · 赛事对局不计 ELO</div>
+        <div style="font-size:13px;color:var(--text-dim);">单败淘汰 / 瑞士制 · 报名满员自动开赛 · 赛事对局不计 ELO</div>
       </div>
       <!-- 「我的赛事」紧挨创建按钮（2026-09-13 用户要求）：我的赛事 = 我主办的 + 我参赛/报名的 -->
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
@@ -75,10 +75,28 @@
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">赛制</div>
           <select class="select" id="tFormat" style="width:100%;">
             <option value="single-elimination" selected>单败淘汰</option>
-            <option value="swiss" disabled>瑞士制（待实装）</option>
+            <option value="swiss">瑞士制（积分编排）</option>
             <option value="round-robin" disabled>循环赛（待实装）</option>
           </select>
         </div>
+        <!-- 轮数（仅瑞士制）：不填则按人数自动给建议值 -->
+        <div style="flex:1;" id="tRoundsWrap">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">轮数（瑞士制）</div>
+          <select class="select" id="tRounds" style="width:100%;">
+            <option value="">按人数自动（推荐）</option>
+            <option value="3">3 轮</option>
+            <option value="4">4 轮</option>
+            <option value="5">5 轮</option>
+            <option value="6">6 轮</option>
+            <option value="7">7 轮</option>
+            <option value="8">8 轮</option>
+            <option value="9">9 轮</option>
+          </select>
+        </div>
+      </div>
+      <div id="tSwissHint" style="font-size:12px;color:var(--text-dim);margin-top:8px;display:none;">
+        瑞士制按积分逐轮配对（强者遇强者、不重复对阵），没有淘汰——输一两场仍有机会。
+        人数为奇数时，每轮积分最低且未轮空过的一人轮空（视同胜）。
       </div>
 
       <div style="font-size:12px;color:var(--text-dim);margin:14px 0 6px;">举办理由（10–200 字，管理员据此审核）</div>

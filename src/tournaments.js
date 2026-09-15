@@ -28,6 +28,9 @@ const log = require('./logger');
 
 const { readJson, writeJson } = require('./storage');
 const { genId } = require('./auth');
+// T8：瑞士制的配对与积分是**纯函数**（`src/swiss.js`），与赛事状态解耦——
+// 配对算法的正确性靠那 12 项单测钉死，这里只负责"把状态喂进去、把结果存下来"。
+const swiss = require('./swiss');
 
 function loadTournaments() {
   const data = readJson('tournaments.json', {});
@@ -45,8 +48,12 @@ function persist() {
 
 // 4–32 且为 2 的幂（Q3 用户确认）：保证对阵树是完美二叉树，不会出现「首轮轮空位」的复杂情形
 const SIZE_OPTIONS = [4, 8, 16, 32];
-// 赛制：当前仅单败淘汰，其余待实装（需求 9 原文："其他待实装"）
-const FORMATS = ['single-elimination'];
+// 赛制（T8）：单败淘汰 + 瑞士制。循环赛需求原文未要求，暂不做。
+const FORMATS = ['single-elimination', 'swiss'];
+const FORMAT_LABELS = { 'single-elimination': '单败淘汰', swiss: '瑞士制（积分编排）' };
+/** 瑞士制轮数区间：少于 3 轮区分度太差，多于 9 轮对 32 人档也没有必要 */
+const MIN_SWISS_ROUNDS = 3;
+const MAX_SWISS_ROUNDS = 9;
 
 /** 把可能是字符串/空值的时间字段归一化为时间戳或 null */
 function numOrNull(v) {
@@ -111,6 +118,17 @@ function createTournament(name, size, owner, opts) {
   const format = o.format || 'single-elimination';
   if (!FORMATS.includes(format)) return { ok: false, error: '暂不支持该赛制' };
 
+  // 瑞士制总轮数（T8）：不填则按人数给建议值（max(3, ceil(log2(n)))）。
+  // ⚠️ 必须在这里定死并存下来——轮数是赛程的一部分，中途改会让已打的轮次失去意义。
+  let totalRounds = null;
+  if (format === 'swiss') {
+    const wanted = Math.round(Number(o.totalRounds) || 0);
+    totalRounds = wanted || swiss.suggestRounds(size);
+    if (totalRounds < MIN_SWISS_ROUNDS || totalRounds > MAX_SWISS_ROUNDS) {
+      return { ok: false, error: `瑞士制轮数需在 ${MIN_SWISS_ROUNDS}~${MAX_SWISS_ROUNDS} 之间` };
+    }
+  }
+
   const regStart = numOrNull(o.registerStart);
   const regEnd = numOrNull(o.registerEnd);
   const matchStart = numOrNull(o.matchStart);
@@ -144,7 +162,18 @@ function createTournament(name, size, owner, opts) {
     // 从没报过名的人，也让"未满员轮空"的判定失真。想下棋就自己去报名。
     entrants: [],
     players: [],   // [{id, name}]
+
+    // ---- 单败淘汰 ----
     bracket: [],   // 对阵表（平铺树），见 makeBracket
+
+    // ---- 瑞士制（T8）----
+    // ⚠️ 瑞士制**没有淘汰树**：每轮重新按积分配对，所以不能复用 `bracket`。
+    // `rounds[i] = { round, pairs:[[idA,idB]], byes:[id], results:{'a|b':winnerId},
+    //                matchIds:[roomId], degraded, reason }`
+    // `matchIds` 与 `pairs` 同下标一一对应（建房失败的位置是 null）。
+    totalRounds,
+    rounds: [],
+    currentRound: 0,   // 0 = 尚未开赛
 
     championId: null,
     championManual: false, // 是否为主办人/管理员手动指定（需求 10）
@@ -203,15 +232,34 @@ function rejectTournament(id, reason = '', reviewer = 'admin') {
 function cancelTournament(id, reason = '') {
   const t = getCache()[id];
   if (!t) return { ok: false, error: '赛事不存在' };
-  const matchIds = (t.bracket || []).map((n) => n.matchId).filter(Boolean);
+  const matchIds = liveMatchIds(t);
   // 状态机已限定"只能从 registration / playing 取消"，finished/archived 一律拒绝——
   // 这正是需求 11「主办人结束后不能取消赛事」在数据层的落实（与 canManage 同一口径）。
   const r = transition(t, 'cancelled', { byRole: 'system', action: 'cancel', detail: { reason } });
   if (!r.ok) return r;
   t.rejectReason = String(reason || '').slice(0, 200);
   for (const n of t.bracket || []) n.matchId = null;
+  for (const rec of t.rounds || []) rec.matchIds = (rec.matchIds || []).map(() => null);
   persist();
   return { ok: true, tournament: publicInfo(t), matchIds };
+}
+
+/**
+ * 本赛事**当前仍在进行**的房间 id。
+ *
+ * ⚠️ 必须按赛制分路：淘汰赛的房间挂在 `bracket` 节点上，而**瑞士制没有 bracket**，
+ * 房间在各轮的 `matchIds` 里。只看 `bracket` 的后果是——取消瑞士制赛事**一个房间都不解散**，
+ * 参赛者还在里面下棋，赛事却已经不是"进行中"了。
+ */
+function liveMatchIds(t) {
+  if ((t.format || 'single-elimination') === 'swiss') {
+    const out = [];
+    for (const rec of t.rounds || []) {
+      for (const mid of rec.matchIds || []) if (mid) out.push(mid);
+    }
+    return out;
+  }
+  return (t.bracket || []).map((n) => n.matchId).filter(Boolean);
 }
 
 /** 已通过审核的报名人数 = 实际参赛人数（T3：名额按这个算，不是按报名总数） */
@@ -371,6 +419,11 @@ function voidPlayer(tournamentId, playerId, actor) {
   if (!canManage(t, actor, 'void_player')) return { ok: false, error: '没有权限' };
   if (!(t.players || []).some((p) => p.id === playerId)) {
     return { ok: false, error: '该选手不在参赛名单中' };
+  }
+
+  // T8：瑞士制没有"上游"可清，改判的后果也不同（见 voidPlayerSwiss 的注释）
+  if ((t.format || 'single-elimination') === 'swiss') {
+    return voidPlayerSwiss(t, playerId, actor);
   }
 
   let affected = 0;
@@ -561,11 +614,16 @@ function requestRematch(tournamentId, matchId, reason, player) {
   if (!player || !player.id) return { ok: false, error: '需要登录' };
   if (normalizeStatus(t.status) !== 'playing') return { ok: false, error: '赛事不在进行中，无法申请重赛' };
 
-  const node = (t.bracket || []).find((n) => n.matchId === matchId || n.lastMatchId === matchId);
-  if (!node) return { ok: false, error: '这一场不属于该赛事' };
+  const info = matchParticipants(t, matchId);
+  if (!info) return { ok: false, error: '这一场不属于该赛事' };
+  if (info.players.indexOf(player.id) < 0) return { ok: false, error: '只有本场参赛者可以申请重赛' };
 
-  const both = node.lastPlayers || node.players || [];
-  if (both.indexOf(player.id) < 0) return { ok: false, error: '只有本场参赛者可以申请重赛' };
+  // ⚠️ 瑞士制只允许对**当前轮**申请重赛：前面轮次的结果是后面配对的依据，
+  // 改掉它会让"已经开打甚至打完的后续轮次"失去依据（那些房间还活着，收回代价很大）。
+  // 与其做一个半吊子的"改历史"，不如明确拒绝。
+  if (info.round != null && info.round < (t.currentRound || 0)) {
+    return { ok: false, error: `只能对当前第 ${t.currentRound} 轮申请重赛（之前的轮次是后续配对的依据）` };
+  }
 
   const list = t.rematches || (t.rematches = []);
   if (list.some((r) => r.matchId === matchId && r.status === 'pending')) {
@@ -574,7 +632,9 @@ function requestRematch(tournamentId, matchId, reason, player) {
 
   const rm = {
     id: `rm${Date.now().toString(36)}${(list.length + 1).toString(36)}`,
-    nodeIndex: node.index,
+    nodeIndex: info.index != null ? info.index : null,
+    round: info.round != null ? info.round : null,
+    pair: info.players.slice(), // 存下这一场是谁打谁（瑞士制没有节点可查）
     matchId,
     byId: player.id,
     byName: player.name || null,
@@ -585,10 +645,76 @@ function requestRematch(tournamentId, matchId, reason, player) {
   list.push(rm);
   addLog(t, {
     byId: player.id, byName: player.name, byRole: 'player',
-    action: 'rematch-request', detail: { matchId, node: node.index },
+    action: 'rematch-request', detail: { matchId, node: rm.nodeIndex, round: rm.round },
   });
   persist();
   return { ok: true, rematch: rm, tournament: publicInfo(t) };
+}
+
+/**
+ * 定位"这一场是谁打谁"。
+ *
+ * 抽出来是为了让**申请人资格判定只有一份**：淘汰赛从 `lastPlayers` 取
+ *（对局结束后 `players` 会被清空），瑞士制从该轮的 `lastPair` / `pairs` 取。
+ * 两条赛制各写一遍资格判定，迟早有一条忘核对——那就是"谁都能申诉别人对局"的漏洞。
+ *
+ * @returns {{players:string[], index?:number, round?:number}|null}
+ */
+function matchParticipants(t, matchId) {
+  if (!matchId) return null;
+  if ((t.format || 'single-elimination') === 'swiss') {
+    for (const rec of t.rounds || []) {
+      // 先查 `matchPairs`：赛后 `matchIds` 已被清空，只有它还留着"这一场是谁打谁"
+      const mp = rec.matchPairs || {};
+      if (mp[matchId]) return { players: mp[matchId].slice(), round: rec.round };
+      const i = (rec.matchIds || []).indexOf(matchId); // 兜底：老数据没有 matchPairs
+      if (i >= 0 && rec.pairs[i]) return { players: rec.pairs[i].slice(), round: rec.round };
+    }
+    return null;
+  }
+  const node = (t.bracket || []).find((n) => n.matchId === matchId || n.lastMatchId === matchId);
+  if (!node) return null;
+  return { players: (node.lastPlayers || node.players || []).slice(), index: node.index };
+}
+
+/**
+ * 批准瑞士制重赛：抹掉那一场的赛果并重建房间。
+ *
+ * ⚠️ **不做"丢弃后续轮次"那件事**：调用前已经限制过"只能对当前轮申请"，
+ * 所以当前轮之后本来就没有轮次。少了那个前提，这里就得去收掉已经开打的房间——
+ * 那是另一个量级的复杂度，不如把规则收紧。
+ *
+ * 重置后本轮会变成"未凑齐"，等这一场重打完自然会推进（`maybeAdvanceSwiss`）。
+ */
+function approveSwissRematch(t, rm) {
+  const rec = (t.rounds || []).find((r) => r.round === rm.round);
+  if (!rec) return { ok: false, error: '该轮次已不存在' };
+  if (rec.round !== (t.currentRound || 0)) {
+    return { ok: false, error: '只能重赛当前轮' };
+  }
+  // 申请时是 playing，但主办人可能拖到赛事收尾后才裁决。
+  // 这里**直接拒绝**而不是把 finished 退回 playing：瑞士制的冠军是按名次算出来的，
+  // 退回意味着冠军要被收回，而"已经宣布的冠军被悄悄撤掉"比"拒绝重赛"伤害更大。
+  if (normalizeStatus(t.status) !== 'playing') {
+    return { ok: false, error: '赛事已收尾，无法重赛' };
+  }
+
+  const pair = rm.pair || [];
+  const key = swiss.pairKey(pair[0], pair[1]);
+  const pi = (rec.pairs || []).findIndex(([a, b]) => swiss.pairKey(a, b) === key);
+  if (pi < 0) return { ok: false, error: '这一场已不在该轮次中' };
+
+  delete rec.results[key];
+  rec.matchIds[pi] = null;
+
+  const pa = (t.players || []).find((x) => x.id === pair[0]) || { id: pair[0], name: '?' };
+  const pb = (t.players || []).find((x) => x.id === pair[1]) || { id: pair[1], name: '?' };
+  const res = matchFactory ? matchFactory(t.id, [pa, pb]) : null;
+  rec.matchIds[pi] = (res && res.roomId) ? res.roomId : null;
+  if (!rec.matchIds[pi]) {
+    log.error('tournament', '重赛建房失败', { tournamentId: t.id, round: rec.round, pair });
+  }
+  return { ok: true };
 }
 
 /**
@@ -614,33 +740,248 @@ function decideRematch(tournamentId, rematchId, decision, actor, note) {
   rm.note = String(note || '').slice(0, 200);
 
   if (rm.status === 'approved') {
-    const node = (t.bracket || []).find((n) => n.index === rm.nodeIndex);
-    if (!node) return { ok: false, error: '对阵节点已不存在' };
+    if ((t.format || 'single-elimination') === 'swiss') {
+      // 瑞士制：抹掉该场赛果 + 重建房（没有节点/上游可清，见 approveSwissRematch）
+      const sr = approveSwissRematch(t, rm);
+      if (!sr.ok) {
+        // 判定失败就别把状态改成 approved——否则这条申请会变成"批准了但没生效"
+        rm.status = 'pending';
+        rm.decidedAt = null;
+        rm.decidedById = null;
+        rm.note = '';
+        return sr;
+      }
+    } else {
+      const node = (t.bracket || []).find((n) => n.index === rm.nodeIndex);
+      if (!node) return { ok: false, error: '对阵节点已不存在' };
 
-    node.winnerId = null;
-    node.playerId = null;
-    node.matchId = null;
-    node.players = (node.lastPlayers || []).slice(); // 交回 assignNextMatches 重算
-    node.lastMatchId = null;
-    clearUpstream(t, node.index);
+      node.winnerId = null;
+      node.playerId = null;
+      node.matchId = null;
+      node.players = (node.lastPlayers || []).slice(); // 交回 assignNextMatches 重算
+      node.lastMatchId = null;
+      clearUpstream(t, node.index);
 
-    // 冠军可能正是由这条路径产生的 → 退掉，赛事回到进行中
-    if (t.championId) {
-      t.championId = null;
-      t.championManual = false;
-      t.endedAt = null;
-      if (normalizeStatus(t.status) === 'finished') t.status = 'playing';
+      // 冠军可能正是由这条路径产生的 → 退掉，赛事回到进行中
+      if (t.championId) {
+        t.championId = null;
+        t.championManual = false;
+        t.endedAt = null;
+        if (normalizeStatus(t.status) === 'finished') t.status = 'playing';
+      }
+      assignNextMatches(t); // 重新建房
     }
-    assignNextMatches(t); // 重新建房
   }
 
   addLog(t, {
     byId: actor.id, byRole: roleOf(t, actor),
     action: rm.status === 'approved' ? 'rematch-approve' : 'rematch-reject',
-    detail: { rematchId, node: rm.nodeIndex, note: rm.note },
+    detail: { rematchId, node: rm.nodeIndex, round: rm.round, note: rm.note },
   });
   persist();
   return { ok: true, tournament: publicInfo(t), rematch: rm };
+}
+
+// ==================================================================
+// 瑞士制（T8）：逐轮配对与推进
+//
+// 与单败淘汰的根本差异：**没有淘汰树**。每轮按当前积分重新配对，
+// 所以既不能复用 `bracket`，也不能复用 `assignNextMatches` 那套"从下往上传播"的推进。
+// 配对与积分算法的实现全在 `src/swiss.js`（纯函数 + 12 项单测），这里只做状态读写。
+// ==================================================================
+
+/** 把 `t.rounds` 转成 swiss.js 需要的形态（**去掉房间 id 等非算法字段**） */
+function swissRounds(t) {
+  return (t.rounds || []).map((r) => ({
+    round: r.round, pairs: r.pairs, byes: r.byes, results: r.results,
+  }));
+}
+
+/**
+ * 当前名次表（瑞士制积分榜）。
+ *
+ * ⚠️ 出口做**显式整形**：`computeStandings` 内部用 `Set` 记对手（`playedIds`），
+ * 直接下发会被 `JSON.stringify` 丢掉，调用方拿到的是残缺对象；
+ * 而且内部字段名（`opponents`/`playedIds`）不适合当接口契约。
+ */
+function swissStandings(t) {
+  const table = swiss.computeStandings(t.players || [], swissRounds(t));
+  return swiss.rankStandings(Array.from(table.values())).map((e, i) => ({
+    rank: i + 1,
+    id: e.id,
+    name: e.name || null,
+    score: e.score,
+    sos: e.sos || 0,        // 对手分（同分时的第一判据）
+    played: (e.opponents || []).length,
+    byes: e.byes || 0,
+    wins: e.wins || 0,
+    draws: e.draws || 0,
+    losses: e.losses || 0,
+  }));
+}
+
+/** 本轮是否每一场都有结果了（轮空不需要结果，它直接得 1 分） */
+function swissRoundDone(rec) {
+  return (rec.pairs || []).every(([a, b]) => !!rec.results[swiss.pairKey(a, b)]);
+}
+
+/**
+ * 开一轮：按当前名次配对、建房，并把这一轮记进 `t.rounds`。
+ *
+ * @param {number} roundNo 1 起
+ */
+function startSwissRound(t, roundNo) {
+  const table = swiss.computeStandings(t.players || [], swissRounds(t));
+  const paired = swiss.pairRound({ standings: table });
+
+  const rec = {
+    round: roundNo,
+    pairs: paired.pairs,
+    byes: paired.byes,
+    results: {},
+    matchIds: [],
+    // ⚠️ `matchIds` 会在每场打完后清空（防重复回调），所以"这一场是谁打谁"要**另留一份**：
+    // 重赛申请必须在赛后还能定位到场次与选手，而那时 `matchIds` 已经找不到它了。
+    matchPairs: {},
+    degraded: !!paired.degraded,
+    reason: paired.reason || null,
+  };
+
+  for (const id of paired.byes) {
+    const p = (t.players || []).find((x) => x.id === id);
+    addLog(t, {
+      byRole: 'system', action: 'bye',
+      detail: { round: roundNo, playerId: id, name: p ? p.name : null },
+    });
+  }
+
+  paired.pairs.forEach(([a, b], i) => {
+    const pa = (t.players || []).find((x) => x.id === a) || { id: a, name: '?' };
+    const pb = (t.players || []).find((x) => x.id === b) || { id: b, name: '?' };
+    const res = matchFactory ? matchFactory(t.id, [pa, pb]) : null;
+    rec.matchIds[i] = (res && res.roomId) ? res.roomId : null;
+    if (rec.matchIds[i]) rec.matchPairs[rec.matchIds[i]] = [a, b];
+    else {
+      // 建房失败不能让整轮**静默卡住**：没有房就永远等不到结果，这里必须留下痕迹
+      log.error('tournament', `瑞士制第 ${roundNo} 轮建房失败`, { tournamentId: t.id, players: [a, b] });
+    }
+  });
+
+  t.rounds = (t.rounds || []).concat([rec]);
+  t.currentRound = roundNo;
+  addLog(t, {
+    byRole: 'system', action: 'swiss-round',
+    detail: {
+      round: roundNo, matches: paired.pairs.length, byes: paired.byes.length,
+      degraded: rec.degraded,
+    },
+  });
+  return rec;
+}
+
+/**
+ * 瑞士制收尾：按名次定冠军。
+ *
+ * ⚠️ **并列第一不静默**：瑞士制没有淘汰，完全可能出现同分。
+ * 这里按 `rankStandings` 的顺序（积分 → 对手分 → 参赛序）取第一，
+ * 并用 `championTie` 标注是否与第二同分——详情页会写明"与第二名同分，按对手分裁定"。
+ * 假装没有并列会让人以为那是干净的第一。
+ */
+function finishSwiss(t) {
+  const ranked = swissStandings(t);
+  const top = ranked[0] || null;
+  t.championId = top ? top.id : null;
+  t.championTie = !!(ranked[0] && ranked[1] && ranked[0].score === ranked[1].score);
+  const r = transition(t, 'finished', {
+    byRole: 'system', action: 'finish',
+    detail: { championId: t.championId, tie: t.championTie, rounds: t.currentRound },
+  });
+  if (!r.ok) {
+    // 状态机不允许（理论上 playing→finished 是合法的）——记下来而不是吞掉
+    log.error('tournament', '瑞士制收尾失败', { tournamentId: t.id, error: r.error });
+  }
+  return r.ok;
+}
+
+/**
+ * 当前轮已打完就推进；已收尾的赛事不动。
+ *
+ * 抽出来是因为有**两个**触发点：对局结束、以及成绩改判（取消选手成绩 / 重赛批准）——
+ * 后两者改完赛果后本轮同样可能刚好凑齐，必须也能推进。
+ */
+function maybeAdvanceSwiss(t) {
+  if (normalizeStatus(t.status) !== 'playing') return;
+  const rec = (t.rounds || [])[t.rounds.length - 1];
+  if (!rec || !swissRoundDone(rec)) return;
+  if (rec.round >= (t.totalRounds || 0)) finishSwiss(t);
+  else startSwissRound(t, rec.round + 1);
+}
+
+/**
+ * 瑞士制下"取消选手成绩"：把他**已参与的每一场都判对手胜**。
+ *
+ * ⚠️ 与淘汰赛的差别：淘汰赛要清"上游"（通往决赛那条路）；
+ * 瑞士制没有上游，但**改分会改变名次 → 影响后续对阵**。
+ * 处理方式：已打完的轮次**保留**（那是既成事实，重排名次不会让它们消失），
+ * 而"当前轮刚好凑齐"时照常推进（`maybeAdvanceSwiss`）。
+ */
+function voidPlayerSwiss(t, playerId, actor) {
+  let affected = 0;
+  for (const rec of t.rounds || []) {
+    for (let i = 0; i < (rec.pairs || []).length; i++) {
+      const [a, b] = rec.pairs[i];
+      if (a !== playerId && b !== playerId) continue;
+      const foe = a === playerId ? b : a;
+      rec.results[swiss.pairKey(a, b)] = foe; // 判对手胜
+      rec.matchIds[i] = null;                 // 该场已判负：房间作废，不能留着"进行中"
+      rec.voided = rec.voided || [];
+      if (rec.voided.indexOf(playerId) < 0) rec.voided.push(playerId);
+      affected++;
+    }
+  }
+
+  if (t.championId === playerId) { t.championId = null; t.championTie = false; }
+  t.championManual = false;
+  addLog(t, {
+    byId: actor.id, byRole: roleOf(t, actor),
+    action: 'void-player', detail: { playerId, affected },
+  });
+
+  maybeAdvanceSwiss(t);
+  persist();
+  return { ok: true, tournament: publicInfo(t), affected };
+}
+
+/** 瑞士制的对局结束：记赛果 → 整轮打完才配下一轮 → 轮数跑完按名次收尾 */
+function swissOnMatchFinished(t, matchId, winnerId) {
+  let rec = null;
+  let idx = -1;
+  for (const r of t.rounds || []) {
+    const i = (r.matchIds || []).indexOf(matchId);
+    if (i >= 0) { rec = r; idx = i; break; }
+  }
+  if (!rec) return { ok: false, error: '对局不属于该赛事' };
+
+  const [a, b] = rec.pairs[idx];
+  rec.results[swiss.pairKey(a, b)] = winnerId;
+  // 重赛申诉要靠它定位（`matchIds` 马上会被清空，与 bracket 路径的 lastMatchId 同理）
+  rec.lastMatchId = matchId;
+  rec.lastPair = [a, b];
+  rec.matchIds[idx] = null;
+
+  addLog(t, {
+    byRole: 'system', action: 'match-result',
+    detail: { round: rec.round, matchId, winnerId },
+  });
+
+  if (!swissRoundDone(rec)) {
+    persist();
+    return { ok: true, tournament: publicInfo(t) };
+  }
+
+  maybeAdvanceSwiss(t); // 本轮凑齐 → 配下一轮，或按名次收尾
+  persist();
+  return { ok: true, tournament: publicInfo(t), finished: normalizeStatus(t.status) === 'finished' };
 }
 
 /**
@@ -689,10 +1030,21 @@ function startTournament(tournamentId, logEntry) {
   if (!r.ok) return r;
 
   t.players = approved;
-  // 未满员也允许开赛：`makeBracket` 会让多余的叶位留空（playerId = null），
-  // 由 `assignNextMatches` 的轮空分支直接判晋级（T3）。
-  t.bracket = makeBracket(t.size, approved);
-  assignNextMatches(t);
+
+  if ((t.format || 'single-elimination') === 'swiss') {
+    // 瑞士制（T8）：**没有对阵树**，开赛就是"配第一轮"。
+    // 人数不必是 2 的幂——配对算法自己会处理奇数（最低分且未轮空者轮空）。
+    t.bracket = [];
+    t.rounds = [];
+    t.currentRound = 0;
+    startSwissRound(t, 1);
+  } else {
+    // 未满员也允许开赛：`makeBracket` 会让多余的叶位留空（playerId = null），
+    // 由 `assignNextMatches` 的轮空分支直接判晋级（T3）。
+    t.bracket = makeBracket(t.size, approved);
+    assignNextMatches(t);
+  }
+
   persist();
   return { ok: true, tournament: publicInfo(t) };
 }
@@ -784,6 +1136,10 @@ function onMatchFinished(tournamentId, matchId, winnerId) {
   if (!t) return { ok: false, error: '赛事不存在' };
   // 赛事已被管理员取消：对局回调静默忽略（房间解散与本回调存在竞态）
   if (t.status === 'cancelled') return { ok: true, ignored: true };
+  // T8：瑞士制是逐轮配对推进，与淘汰树的"向上传播"完全不同，走另一条路径
+  if ((t.format || 'single-elimination') === 'swiss') {
+    return swissOnMatchFinished(t, matchId, winnerId);
+  }
   // 找到包含该 matchId 的节点，填入胜者
   let node = t.bracket.find((n) => n.matchId === matchId);
   if (!node) return { ok: false, error: '对局不属于该赛事' };
@@ -999,6 +1355,16 @@ function publicInfo(t) {
     playerCount: players.length,
     bracket: t.bracket || [],
 
+    // ---- 赛制与瑞士制（T8）----
+    formatLabel: FORMAT_LABELS[t.format || 'single-elimination'] || null,
+    totalRounds: t.totalRounds || null,
+    currentRound: t.currentRound || 0,
+    // ⚠️ 只给瑞士制下发 rounds / standings：淘汰赛没有这两个概念，
+    // 而 `standings` 每次都要重跑一遍积分计算（列表页会批量调 publicInfo）。
+    rounds: (t.format === 'swiss') ? (t.rounds || []) : [],
+    standings: (t.format === 'swiss') ? swissStandings(t) : [],
+    championTie: !!t.championTie,
+
     championId: t.championId || null,
     championManual: !!t.championManual,
     rematches: t.rematches || [],
@@ -1023,6 +1389,118 @@ function publicInfo(t) {
     // （见 `src/http/routes/tournaments.js` 的 `adminEditLog` 处理），这里原样带上。
     adminEditLog: (t.adminEditLog || []).slice(-50),
   };
+}
+
+// ==================================================================
+// 赛事荣誉（个人页"赛事荣誉栏"）
+//
+// 赛事结果是**公开信息**，所以这里算出来的东西可以直接下发给任何人，
+// 不需要走隐私白名单（`privacy.stripPrivate` 也不会误伤：键名与 PRIVATE_KEYS 无交集）。
+// ==================================================================
+
+/** 名次 → 文案 */
+const PLACE_LABEL = { 1: '冠军', 2: '亚军', 3: '四强' };
+
+/**
+ * 某人在该赛事中的**名次**（1 冠军 / 2 亚军 / 3 四强 / null 无名次）。
+ *
+ * ⚠️ 两种赛制的名次来源完全不同，必须分路：
+ *  - **淘汰赛**：冠军看 `championId`；亚军 = 决赛的另一位选手；
+ *    四强 = 半决赛（根的左右子树）的参赛者。
+ *    ⚠️ 对局结束后 `node.players` 会被清空（见 `onMatchFinished`），
+ *    所以只能读 `lastPlayers`——拿 `players` 反推会全部落空；
+ *  - **瑞士制**：没有淘汰，名次由积分榜（`swissStandings`）给出。
+ *    只认前四——8 人档的第 5 名谈不上"荣誉"。
+ *
+ * @returns {number|null}
+ */
+function placeOf(t, playerId) {
+  if (!t || !playerId) return null;
+
+  // ⚠️ 未结束的赛事**没有名次**：半决赛还在打的人不等于"四强"，
+  // 决赛还没开始更谈不上冠亚军。不判状态的话，进行中的赛事会被算成"满员四强"。
+  const st = normalizeStatus(t.status);
+  if (st !== 'finished' && st !== 'archived') return null;
+
+  if (t.championId === playerId) return 1;
+
+  if ((t.format || 'single-elimination') === 'swiss') {
+    const row = swissStandings(t).find((x) => x.id === playerId);
+    if (!row) return null;
+    return row.rank <= 2 ? row.rank : (row.rank <= 4 ? 3 : null);
+  }
+
+  const bracket = t.bracket || [];
+  const root = bracket[0];
+  if (!root) return null;
+
+  // 亚军：决赛的两位选手，除去冠军
+  const finalists = root.lastPlayers || (root.matchId ? root.players : null) || [];
+  if (finalists.indexOf(playerId) >= 0) return 2;
+
+  // 四强：半决赛节点（根的左右子树）的参赛者
+  const semiPlayers = [];
+  for (const i of root.pair || []) {
+    const n = bracket[i];
+    if (!n) continue;
+    const ps = n.lastPlayers || n.players || null;
+    if (ps) semiPlayers.push.apply(semiPlayers, ps);
+    else if (n.playerId) semiPlayers.push(n.playerId); // 轮空晋级的人没有 lastPlayers
+  }
+  return semiPlayers.indexOf(playerId) >= 0 ? 3 : null;
+}
+
+/**
+ * 某玩家的赛事荣誉。
+ *
+ * ⚠️ **只统计 `finished` / `archived`**：进行中的赛事还没有结论，
+ * 写进"荣誉"会误导（这也是"荣誉"与"参赛记录"的区别）。
+ * `cancelled` / `rejected` / `pending_approval` 一律不算参赛。
+ *
+ * @param {string} playerId
+ * @param {number} [limit=20] 荣誉明细上限（个人页是概览，不铺全量）
+ * @returns {{stats:object, items:Array}}
+ */
+function honorsOf(playerId, limit = 20) {
+  const stats = { joined: 0, finished: 0, titles: 0, runnerUps: 0, top4: 0, winRate: 0 };
+  if (!playerId) return { stats, items: [] };
+
+  const items = [];
+  for (const t of Object.values(getCache())) {
+    const st = normalizeStatus(t.status);
+    if (st === 'cancelled' || st === 'rejected' || st === 'pending_approval') continue;
+
+    const joined = (t.players || []).some((p) => p.id === playerId)
+      || (t.entrants || []).some((e) => e.id === playerId && e.status === 'approved');
+    if (!joined) continue;
+    stats.joined++;
+
+    if (st !== 'finished' && st !== 'archived') continue; // 还没打完：只计入"参赛"
+    stats.finished++;
+
+    const place = placeOf(t, playerId);
+    if (place === 1) stats.titles++;
+    else if (place === 2) stats.runnerUps++;
+    else if (place === 3) stats.top4++;
+    if (!place) continue; // 拿到参赛次数但没有名次 → 不进荣誉明细
+
+    items.push({
+      tournamentId: t.id,
+      name: t.name,
+      place,
+      placeLabel: PLACE_LABEL[place] || '',
+      size: t.size,
+      format: t.format || 'single-elimination',
+      formatLabel: FORMAT_LABELS[t.format || 'single-elimination'] || null,
+      playerCount: (t.players || []).length,
+      endedAt: t.endedAt || t.archivedAt || null,
+      manual: !!t.championManual, // 冠军由管理员人工裁定 → 详情页会标注
+    });
+  }
+
+  items.sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0));
+  stats.winRate = stats.finished ? Math.round((stats.titles / stats.finished) * 100) : 0;
+  return { stats, items: items.slice(0, limit) };
 }
 
 module.exports = {
@@ -1063,4 +1541,13 @@ module.exports = {
   ACTION_ROLES,
   SIZE_OPTIONS,
   FORMATS,
+  // ---- T8：瑞士制 ----
+  swissStandings,     // 名次表（详情页与测试用）
+  matchParticipants,  // "这一场是谁打谁"（重赛资格判定复用）
+  honorsOf,           // 赛事荣誉（个人页）
+  placeOf,            // 单赛事名次（荣誉计算用）
+  PLACE_LABEL,
+  FORMAT_LABELS,
+  MIN_SWISS_ROUNDS,
+  MAX_SWISS_ROUNDS,
 };

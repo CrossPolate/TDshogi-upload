@@ -26,14 +26,37 @@
     <div id="adminPanel" style="display:none;">
       <!-- 标签切换 -->
       <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">
-        <button class="btn btn-primary btn-sm tab-btn active" data-tab="records">全部棋谱</button>
+        <button class="btn btn-primary btn-sm tab-btn active" data-tab="overview">📊 总览</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="records">全部棋谱</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="users">全部用户</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="tournaments">赛事管理</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="announcements">📢 公告</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="rooms">🕹 对局干预</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="audit">操作审计</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="ipbans">🚫 IP 封禁</button>
+      </div>
+
+      <!-- 总览仪表盘（§C1）：进后台第一眼看到全局 -->
+      <div class="card" id="tab-overview" style="padding:20px;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>平台总览</span>
+          <button class="btn btn-ghost btn-sm" id="btnRefreshOverview">刷新</button>
+        </div>
+        <div id="ovStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px;"></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px;">
+          <div>
+            <div style="font-size:13px;font-weight:700;margin-bottom:8px;">🕒 最近管理操作</div>
+            <div id="ovAudit"></div>
+          </div>
+          <div>
+            <div style="font-size:13px;font-weight:700;margin-bottom:8px;">⚔️ 最新对局</div>
+            <div id="ovBattles"></div>
+          </div>
+        </div>
       </div>
 
       <!-- 全部棋谱 -->
-      <div class="card" id="tab-records" style="padding:20px;">
+      <div class="card" id="tab-records" style="padding:20px;display:none;">
         <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
           <span>全部棋谱（<span id="recordCount">0</span>）</span>
           <div style="display:flex;gap:8px;">
@@ -91,6 +114,70 @@
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">管理员的全部写操作记录（最近 200 条）：封禁/解封、改名、重置、资料修改、删除等</div>
         <div id="auditList" style="max-height:70vh;overflow-y:auto;"></div>
         <div id="auditPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
+      </div>
+
+      <!-- IP 封禁（PLAN §X） -->
+      <div class="card" id="tab-ipbans" style="padding:20px;display:none;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>IP 封禁（<span id="ipbCount">0</span>）</span>
+          <button class="btn btn-ghost btn-sm" id="btnRefreshIpBan">刷新</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;line-height:1.7;">
+          封禁同时作用于<b>网页</b>与 <b>WebSocket（对局通道）</b>。
+          ⚠️ 家庭 / 学校 / 公司常共用出口 IP，封一个可能误伤一大片——
+          建议<b>优先封账号</b>，其次才用短时 IP 封禁。
+        </div>
+        <div id="ipbMyIp" style="font-size:12px;color:var(--text-dim);margin-bottom:10px;"></div>
+        <div class="card" style="padding:14px;margin-bottom:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;background:var(--bg-2);">
+          <label style="font-size:12px;">IP 或网段<br>
+            <input class="input" id="ipbIp" placeholder="203.0.113.7 或 203.0.113.0/24" style="width:230px;padding:6px 10px;font-size:13px;"></label>
+          <label style="font-size:12px;">理由（必填）<br>
+            <input class="input" id="ipbReason" placeholder="如：刷接口 / 开小号" style="width:210px;padding:6px 10px;font-size:13px;"></label>
+          <label style="font-size:12px;">时长<br>
+            <select class="input" id="ipbHours" style="padding:6px 10px;font-size:13px;"></select></label>
+          <button class="btn btn-primary btn-sm" id="btnIpBan">🚫 封禁</button>
+        </div>
+        <div id="ipbList" style="max-height:60vh;overflow-y:auto;"></div>
+        <div id="ipbPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
+      </div>
+
+      <!-- 公告管理（§C5）：此前只能手改 data/announcements.json -->
+      <div class="card" id="tab-announcements" style="padding:20px;display:none;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>公告管理（<span id="anCount">0</span>）</span>
+          <button class="btn btn-ghost btn-sm" id="btnRefreshAnn">刷新</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
+          公告展示在首页与大厅。置顶的排在最前，其余按发布时间倒序。
+        </div>
+        <div class="card" style="padding:14px;margin-bottom:16px;background:var(--bg-2);">
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+            <label style="font-size:12px;">标题<br>
+              <input class="input" id="anTitle" placeholder="公告标题" style="width:240px;padding:6px 10px;font-size:13px;"></label>
+            <label style="font-size:12px;display:flex;align-items:center;gap:6px;padding-bottom:6px;">
+              <input type="checkbox" id="anPinned"> 置顶
+            </label>
+            <button class="btn btn-primary btn-sm" id="btnAnnAdd">＋ 发布公告</button>
+            <button class="btn btn-ghost btn-sm" id="btnAnnCancelEdit" style="display:none;">取消编辑</button>
+          </div>
+          <label style="font-size:12px;display:block;margin-top:10px;">内容<br>
+            <textarea class="input" id="anContent" rows="3" placeholder="公告内容" style="width:100%;padding:8px 10px;font-size:13px;resize:vertical;"></textarea></label>
+          <div id="anEditHint" style="font-size:12px;color:var(--gold-light);margin-top:6px;display:none;"></div>
+        </div>
+        <div id="anList"></div>
+        <div id="anPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
+      </div>
+
+      <!-- 对局干预（§C6）：看在线房间并强制解散 / 强制下线 -->
+      <div class="card" id="tab-rooms" style="padding:20px;display:none;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>在线房间（<span id="rmCount">0</span>）</span>
+          <button class="btn btn-ghost btn-sm" id="btnRefreshRooms">刷新</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
+          含私人房（大厅看不到的那种）。⚠️ 强制解散会立刻中断对局，房内的人会收到提示。
+        </div>
+        <div id="rmList" style="max-height:65vh;overflow-y:auto;"></div>
       </div>
 
       <!-- 用户详情弹层 -->

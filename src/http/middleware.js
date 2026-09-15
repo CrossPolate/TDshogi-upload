@@ -15,7 +15,74 @@
 
 const audit = require('../audit');
 const log = require('../logger');
+const net = require('../net');
+const ipban = require('../ipban');
 const { checkAdmin, protocol } = require('./context');
+
+/**
+ * 安全响应头（PLAN §Q7 余项，2026-09-15）。
+ *
+ * ## 为什么这里**没有** CSRF 防护
+ * 本项目的凭证**全部走请求头**（`x-admin-token` / `x-account-token`），
+ * **不使用 Cookie**——浏览器不会自动携带它们，第三方站点无法伪造"带凭证的请求"，
+ * 所以 CSRF 面天然不存在。
+ * ⚠️ **将来若改成用 Cookie 存 token，必须同步补 CSRF token**（届时这条注释就是提醒）。
+ *
+ * ## 各头的作用
+ *  - `X-Content-Type-Options: nosniff` —— 禁止浏览器猜类型（挡"上传的 .png 其实是 HTML"这类）；
+ *  - `X-Frame-Options` + `frame-ancestors` —— 防点击劫持（管理后台尤其需要）；
+ *  - `Referrer-Policy` —— 跨站时不泄露完整 URL（对局/复盘页 URL 里带 room/record id）；
+ *  - `Content-Security-Policy` —— ⚠️ 保留 `'unsafe-inline'` 是**被迫的**：
+ *    页面里有大量 inline `onclick` / `style`（历史写法），一旦收紧会直接打挂整个前端。
+ *    现阶段它的实际价值是**兜住外链脚本**：`script-src` 只允许本站。
+ *    等 inline 写法清理干净后，再把 `'unsafe-inline'` 去掉（那时 CSP 才真正形成防线）。
+ */
+function securityHeaders(req, res, next) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    // ⚠️ Google Fonts 必须显式放行：`public/css/style.css` 用 `@import` 引了
+    // Noto Serif SC / Noto Sans SC。收紧 CSP 时漏掉这两个 host，字体会**静默回退到系统字体**
+    // —— 没有任何报错，只是全站排版悄悄变了样（本次就是这样被发现的）。
+    // `@import` 取的是 CSS，走 `style-src`；真正的字体文件在 gstatic 上，走 `font-src`。
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    "connect-src 'self' ws: wss:", // WS 是对局主通道，必须放行
+    "frame-ancestors 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+  ].join('; '));
+  next();
+}
+
+/**
+ * IP 封禁门（PLAN §X4 的**第一个生效点**）。
+ *
+ * ⚠️ 挂载位置：**`requestId` 之后、限流之前**。
+ *  - 在 `requestId` 之后 → 被封时日志能带上 requestId，用户报障时可对账；
+ *  - 在限流之前 → 被封的 IP 不该继续消耗限流计数，也不该污染限流统计。
+ *
+ * ⚠️ 它**只挡 HTTP**。WS 那侧由 `server.js` 的 `verifyClient` 拦——
+ * **两个都要有，只挡一处等于没封**（WS 才是对局主通道）。
+ */
+function ipBanGate(req, res, next) {
+  const ip = req.clientIp || net.clientIp(req);
+  const r = ipban.check(ip);
+  if (r.banned) {
+    if (req.log) {
+      req.log.warn('ipban', '拒绝已封禁 IP 的请求', {
+        ip, reason: r.record.reason, path: req.originalUrl || req.url,
+      });
+    }
+    // 明确告知、不静默：静默会让被封者反复重试（刷日志），也让用户以为"网站坏了"
+    return res.status(403).json({ error: '该网络地址已被禁止访问本站', banned: true });
+  }
+  next();
+}
 
 /** 管理后台入口门禁用的 key（未设置时保持开放，避免把自己锁在门外） */
 const ADMIN_ENTRY_KEY = process.env.ADMIN_ENTRY_KEY || '';
@@ -105,4 +172,7 @@ function tournamentAction(action) {
   return [adminOnly, h]; // 同 adminWrite：返回数组，调用处不变，鉴权走同一个 adminOnly
 }
 
-module.exports = { requestId, adminEntryGate, adminOnly, adminWrite, tournamentAction, ADMIN_ENTRY_KEY };
+module.exports = {
+  requestId, securityHeaders, adminEntryGate, adminOnly, adminWrite,
+  tournamentAction, ADMIN_ENTRY_KEY, ipBanGate,
+};

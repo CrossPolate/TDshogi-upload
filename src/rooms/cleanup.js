@@ -27,6 +27,28 @@ module.exports = function applyCleanup(X) {
      * @param {string} roomId
      * @param {string} reason 用于日志
      */
+    /**
+     * 管理员强制解散房间（§C6 实时干预）。
+     *
+     * 公开包装：HTTP 路由**不应该**直接调 `_dissolveRoom`——那是内部方法，
+     * "拆房间要同时清掉哪些绑定 / 定时器 / 快照"的知识必须留在这一层，
+     * 否则又会散到别处去（§M1 刚把它收敛回来）。
+     *
+     * @returns {{ok:boolean, error?:string, info?:{roomId:string, players:string}}}
+     */
+    adminCloseRoom(roomId) {
+      const room = this._room(roomId);
+      if (!room) return { ok: false, error: '房间不存在或已结束' };
+      const info = {
+        roomId,
+        players: ['b', 'w']
+          .map((s) => (room.players[s] ? room.players[s].name : null))
+          .filter(Boolean).join(' vs '),
+      };
+      this._dissolveRoom(roomId, 'admin_close');
+      return { ok: true, info };
+    },
+
     _dissolveRoom(roomId, reason = 'dissolve') {
       const room = this._room(roomId);
       if (!room) return;

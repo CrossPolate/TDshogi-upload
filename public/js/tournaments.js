@@ -1,4 +1,4 @@
-/**
+﻿/**
  * tournaments.js — 赛事页：我要创建赛事（需登录正式账号）、报名、对阵表渲染
  *
  * 页面只分两段展示：进行中的赛事（open/playing）与往期赛事（finished）。
@@ -75,6 +75,18 @@
     return Number.isFinite(t) ? t : null;
   }
 
+  // 赛制切换：轮数只对瑞士制有意义（淘汰赛的轮数是人数决定的）
+  const formatSel = document.getElementById('tFormat');
+  const roundsWrap = document.getElementById('tRoundsWrap');
+  const swissHint = document.getElementById('tSwissHint');
+  function syncFormatFields() {
+    const isSwiss = formatSel.value === 'swiss';
+    roundsWrap.style.display = isSwiss ? '' : 'none';
+    swissHint.style.display = isSwiss ? '' : 'none';
+  }
+  formatSel.addEventListener('change', syncFormatFields);
+  syncFormatFields();
+
   document.getElementById('btnSubmitCreate').addEventListener('click', () => {
     const name = document.getElementById('tName').value.trim();
     const size = parseInt(document.getElementById('tSize').value, 10);
@@ -85,6 +97,9 @@
     const matchStart = tsOf('tMatchStart');
     const matchEnd = tsOf('tMatchEnd');
     const requireApproval = document.getElementById('tRequireApproval').checked;
+    // 空字符串 = "按人数自动"，交给服务端给建议值（前端不重复实现那个公式）
+    const roundsRaw = document.getElementById('tRounds').value;
+    const totalRounds = roundsRaw ? parseInt(roundsRaw, 10) : null;
 
     // 前端校验只防手滑——服务端会再验一遍（`createTournament` 里的 validateSchedule），
     // 因为前端校验拦不住"直接构造 WS 消息"的人。
@@ -99,6 +114,8 @@
       data: {
         name, size, format, reason,
         registerStart, registerEnd, matchStart, matchEnd, requireApproval,
+        // 只有瑞士制才带轮数；淘汰赛服务端会忽略它
+        totalRounds: format === 'swiss' ? totalRounds : null,
       },
     });
   });
@@ -146,6 +163,20 @@
           : t.status === 'archived' ? '已存档'
             : t.status === 'rejected' ? '已拒绝'
               : t.status === 'cancelled' ? '已取消' : '已结束';
+  }
+
+  /**
+   * 状态行：状态 · 人数 [· 轮次]。
+   *
+   * ⚠️ 瑞士制必须带上轮次：光看"进行中"看不出打到哪了，
+   * 而"第 3/5 轮"才是参赛者关心的信息。
+   */
+  function metaLine(t) {
+    const parts = [statusText(t), `${joinedCount(t)}/${t.size} 人`];
+    if (t.format === 'swiss' && t.totalRounds) {
+      parts.push(`第 ${t.currentRound || 0}/${t.totalRounds} 轮`);
+    }
+    return parts.join(' · ');
   }
 
   // 各列表的当前页（2026-09-13 分页：每页 20 条，避免赛事一多把页面撑爆）
@@ -221,7 +252,7 @@
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
           <span style="font-weight:700;">${esc(t.name)}</span>
           ${hostedTag}
-          <span style="font-size:12px;color:var(--text-dim);">${statusText(t)} · ${joinedCount(t)}/${t.size} 人</span>
+          <span style="font-size:12px;color:var(--text-dim);">${metaLine(t)}</span>
         </div>
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:12px;color:var(--gold-light);">${champ}</span>
@@ -298,38 +329,11 @@
     return hit ? `<span style="font-size:13px;color:${hit[1]};">${hit[0]}</span>` : '';
   }
 
-  /**
-   * 主办人操作面板（T3）：待批准列表 + 批准/拒绝 + 手动开赛。
-   *
-   * 只在**报名阶段**显示：开赛后名单就冻结了，再批人也没有位置可进（T4 的
-   * 「取消选手成绩」才是那时的正确操作）。
-   */
-  function ownerPanelOf(t) {
-    if (t.ownerId !== myPlayerId || t.status !== 'registration') return '';
-    const entrants = t.entrants || [];
-    const pending = entrants.filter((e) => e.status === 'pending');
-    const approvedN = joinedCount(t);
-    const rows = pending.map((e) => `
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;margin-bottom:4px;">
-        <span data-player-id="${esc(e.id)}">${esc(e.name)}</span>
-        <span style="display:flex;gap:6px;">
-          <button class="btn btn-primary btn-sm" onclick="tournamentDecide('${t.id}','${e.id}','approve')">批准</button>
-          <button class="btn btn-ghost btn-sm" onclick="tournamentDecide('${t.id}','${e.id}','reject')">拒绝</button>
-        </span>
-      </div>`).join('');
-    return `
-      <div style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px;">
-        <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">
-          🎛 主办人操作 · 已批准 <b>${approvedN}/${t.size}</b>
-          ${t.requireApproval ? '' : '（免审核：报名即参赛）'}
-          ${pending.length ? `· <span style="color:var(--gold-light);">待批准 ${pending.length}</span>` : ''}
-        </div>
-        ${rows || '<div style="font-size:12px;color:var(--text-dim);">暂无待批准的报名。</div>'}
-        <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="tournamentStart('${t.id}')">
-          ▶️ 开始比赛（未满员也可，多出的位置自动轮空）
-        </button>
-      </div>`;
-  }
+  // ⚠️ 主办人的管理操作（批准/拒绝/踢人/开始比赛）**只在赛事详情页**
+  //（`tournament.html` → `js/tournament.js` 的管理面板）。
+  // 这里曾经也有一份 `ownerPanelOf()`：列表页每张卡片都挂一套审批按钮，
+  // 于是"办赛管理"散落在两个页面，改一处忘一处，用户也说不清该去哪儿操作。
+  // 列表页现在只负责"看"——要管理就点「查看详情 / 管理 →」。
 
   function renderCard(t) {
     const entrants = t.entrants || [];
@@ -345,7 +349,7 @@
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
           <div style="font-weight:700;font-size:17px;">${esc(t.name)}</div>
           <div style="display:flex;gap:12px;align-items:center;">
-            <span style="font-size:13px;color:var(--text-dim);">${statusText(t)} · ${joinedCount(t)}/${t.size} 人</span>
+            <span style="font-size:13px;color:var(--text-dim);">${metaLine(t)}</span>
             ${joinAreaOf(t)}
           </div>
         </div>
@@ -356,7 +360,6 @@
         <div style="margin-top:10px;">
           <a class="btn btn-ghost btn-sm" href="tournament.html?id=${encodeURIComponent(t.id)}">查看详情 / 管理 →</a>
         </div>
-        ${ownerPanelOf(t)}
       </div>
     `;
   }
@@ -374,44 +377,14 @@
   };
 
   // ==================================================================
-  // 赛事管理（T3）：批准报名 / 踢人 / 手动开赛
+  // 赛事管理（T3）**已整体移到详情页**
   //
-  // ⚠️ 身份走 **token 头**，不是 `?player=<id>` 查询参数——
-  // 后者是公开查询用的宽松通道，任何人都能填别人的 id，拿它做管理鉴权等于没鉴权。
-  // ⚠️ 权限判定的唯一实现在服务端 `tournaments.canManage()`；这里只负责发起请求。
+  // 早先这里还有 `authedPost()` 与 `tournamentDecide/Kick/Start` 三个全局函数，
+  // 供列表页卡片上的审批按钮用。现在列表页不再承担管理职责，这几个函数
+  // **已随 `ownerPanelOf()` 一起删除**——留着就是"两份管理入口"，
+  // 迟早出现"一边改了 token 头、另一边没改"。
+  // 详情页的实现见 `public/js/tournament.js`（统一走 `ApiUtils.postAuthed`）。
   // ==================================================================
-
-  // 带身份的提交**统一在 `ApiUtils.postAuthed`**（2026-09-13）：详情页也要用同一套，
-  // 各写一份就会出现"一边改了 token 头、另一边没改"。
-  function authedPost(path, body) {
-    return window.ApiUtils.postAuthed(path, body, guest.id);
-  }
-
-  window.tournamentDecide = async (id, playerId, decision) => {
-    try {
-      const d = await authedPost(`/api/tournaments/${encodeURIComponent(id)}/entrants/${encodeURIComponent(playerId)}`,
-        { decision });
-      toast(decision === 'approve' ? '已批准报名' : '已拒绝报名');
-      if (d && d.started) toast('名额已满，赛事自动开始！');
-      loadTournaments();
-    } catch (e) { toast(e.message); }
-  };
-
-  window.tournamentKick = async (id, playerId) => {
-    try {
-      await authedPost(`/api/tournaments/${encodeURIComponent(id)}/kick`, { playerId });
-      toast('已移出该报名者');
-      loadTournaments();
-    } catch (e) { toast(e.message); }
-  };
-
-  window.tournamentStart = async (id) => {
-    try {
-      await authedPost(`/api/tournaments/${encodeURIComponent(id)}/start`, {});
-      toast('赛事已开始');
-      loadTournaments();
-    } catch (e) { toast(e.message); }
-  };
 
   // 公共工具（PLAN §M5）：实现统一在 util.js，此处只转发
   function esc(s) { return window.UI.esc(s); }

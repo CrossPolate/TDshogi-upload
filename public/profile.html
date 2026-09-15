@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
-  <title>个人页面 · TDShogi</title>
+  <title>个人 · TDShogi</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -106,6 +106,14 @@
       <div class="card stat-card"><div class="num" id="sWins">0</div><div class="label">胜</div></div>
       <div class="card stat-card"><div class="num" id="sLosses">0</div><div class="label">负</div></div>
       <div class="card stat-card"><div class="num" id="sDraws">0</div><div class="label">平</div></div>
+    </div>
+
+    <!-- 赛事荣誉（2026-09-15 用户要求）：冠军/亚军/四强与参赛统计。
+         只统计**已结束**的赛事——进行中的还没结论，写进"荣誉"会误导。 -->
+    <div class="card" id="honorsCard" style="padding:22px;margin-bottom:28px;">
+      <div class="section-title">🏆 赛事荣誉</div>
+      <div id="honorsStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:10px;"></div>
+      <div id="honorsList" style="margin-top:6px;"></div>
     </div>
 
     <!-- ELO 走势 -->

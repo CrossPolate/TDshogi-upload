@@ -184,6 +184,7 @@
       document.getElementById('sDraws').textContent = p.draws;
       renderEloChart(p.history || []);
       renderRecords(data.records || []);
+      renderHonors(data.honors);
     } catch (e) {
       console.error(e);
     }
@@ -204,6 +205,58 @@
       const color = h.rating >= 1500 ? 'var(--gold)' : 'var(--text-dim)';
       return `<div style="flex:1;height:${hgt}%;background:${color};border-radius:3px 3px 0 0;min-width:4px;" title="${h.rating}"></div>`;
     }).join('');
+  }
+
+  /**
+   * 赛事荣誉（2026-09-15）。
+   *
+   * ⚠️ 数据由**服务端算好**（`tournaments.honorsOf`），这里只负责画。
+   * "什么算荣誉"（名次判定、只统计已结束、并列如何处理）是业务规则——
+   * 放前端会与赛事模块各写一套，迟早对不上（同一份逻辑抄两处的老教训）。
+   */
+  function renderHonors(honors) {
+    const statBox = document.getElementById('honorsStats');
+    const listBox = document.getElementById('honorsList');
+    if (!statBox || !listBox) return;
+
+    const s = (honors && honors.stats) || {};
+    const items = (honors && honors.items) || [];
+
+    const cells = [
+      ['夺冠', s.titles || 0, 'var(--gold-light)'],
+      ['亚军', s.runnerUps || 0, ''],
+      ['四强', s.top4 || 0, ''],
+      ['参赛赛事', s.joined || 0, ''],
+      ['夺冠率', `${s.winRate || 0}%`, ''],
+    ];
+    statBox.innerHTML = cells.map(([label, num, color]) => `
+      <div style="text-align:center;padding:10px 6px;border:1px solid var(--border);border-radius:8px;">
+        <div style="font-size:20px;font-weight:800;font-family:var(--font-serif);${color ? `color:${color};` : ''}">${esc(String(num))}</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">${esc(label)}</div>
+      </div>`).join('');
+
+    if (!items.length) {
+      listBox.innerHTML = `<div style="color:var(--text-dim);font-size:13px;margin-top:14px;">${
+        s.joined ? '参赛过，但还没拿到名次——打进四强就会出现在这里。'
+          : '还没有参加过赛事。去「赛事」页报名，或自己办一场吧！'
+      }</div>`;
+      return;
+    }
+
+    const medal = { 1: '🥇', 2: '🥈', 3: '🥉' };
+    listBox.innerHTML = items.map((it) => `
+      <a href="tournament.html?id=${encodeURIComponent(it.tournamentId)}"
+         style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--border);text-decoration:none;color:inherit;">
+        <span style="display:flex;align-items:center;gap:8px;min-width:0;">
+          <span style="font-size:15px;">${medal[it.place] || '·'}</span>
+          <span style="font-size:13px;font-weight:700;color:var(--gold-light);">${esc(it.placeLabel)}</span>
+          <span style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(it.name)}</span>
+        </span>
+        <span style="font-size:11px;color:var(--text-dim);white-space:nowrap;">
+          ${esc(it.formatLabel || '')} · ${it.playerCount}/${it.size} 人${
+  it.manual ? ' · 人工裁定' : ''}${it.endedAt ? ` · ${new Date(it.endedAt).toLocaleDateString('zh-CN')}` : ''}
+        </span>
+      </a>`).join('');
   }
 
   function renderRecords(records) {
@@ -234,8 +287,8 @@
     }).join('');
   }
 
-  // 公共工具（PLAN §M5）：实现统一在 util.js，此处只转发
-  function esc(s) { return window.UI.esc(s); }
-
+  // ⚠️ 这里曾**重复声明**了一个 `esc()`（文件上方已有）。函数声明在同一作用域里
+  // 会**静默覆盖**（不报错、不警告），两份实现一旦漂移，就只有后者生效——
+  // 排查时会看到"改了没反应"。已删除，只保留文件上方那一处。
   loadProfile();
 })();

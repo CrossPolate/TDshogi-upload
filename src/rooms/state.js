@@ -161,6 +161,34 @@ module.exports = function applyState(X) {
      * 大厅「进行中对局」列表（REST 轮询用）。
      * 私人房间不出现（PLAN §T2）——这个列表就是给陌生人点进去观战用的。
      */
+    /**
+     * 管理后台的在线房间列表（§C6 实时干预）。
+     *
+     * 与 `activeGames()` 的差异是**刻意的**：
+     *  - 那个只列**非私人**房间（它的用途是"给陌生人点进去观战"），后台必须看到**全部**，
+     *    包括密码房——否则"有人开了房但没人能进去"这类问题根本无从排查；
+     *  - 那个只有展示字段，后台还要"谁在里面、连没连着、是不是私人房"，才能判断该不该干预。
+     */
+    adminRooms() {
+      return [...this.rooms.values()].map((r) => ({
+        roomId: r.id,
+        code: r.code,
+        status: r.status,
+        isPrivate: !!r.isPrivate,
+        rated: !!r.rated,
+        tournamentId: r.tournamentId || null,
+        createdAt: r.createdAt || null,
+        moveCount: (r.game && Array.isArray(r.game.moves)) ? r.game.moves.length : 0,
+        players: ['b', 'w'].map((seat) => {
+          const p = r.players[seat];
+          return p
+            ? { seat, name: p.name || null, id: p.playerId || null, connected: p.connected !== false }
+            : null;
+        }).filter(Boolean),
+        spectators: this.spectatorCount ? this.spectatorCount(r.id) : 0,
+      })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); // 新的在前
+    },
+
     activeGames() {
       // 进行中对局 + 感想战中的房间（终局后未清理，type='reviewing' 复盘中，可继续观战）
       // 私人房间不出现（PLAN §T2）：这个列表就是给陌生人点进去观战用的

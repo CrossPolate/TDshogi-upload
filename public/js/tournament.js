@@ -145,7 +145,9 @@
           <div style="font-size:13px;color:var(--text-dim);">
             ${isOwner ? '<span style="color:var(--gold-light);">👑 我是主办人</span> · ' : ''}
             主办：<span data-player-id="${esc(T.ownerId || '')}">${esc(T.ownerName || '未知')}</span
-            > · 单败淘汰制 · ${joinedCount(T)}/${T.size} 人
+            > · ${esc(T.formatLabel || '单败淘汰')} · ${joinedCount(T)}/${T.size} 人${
+  // 瑞士制的"打到哪了"光看状态看不出来，把轮次一并显示
+  (T.format === 'swiss' && T.totalRounds) ? ` · 第 ${T.currentRound || 0}/${T.totalRounds} 轮` : ''}
           </div>
         </div>
         <div style="display:flex;align-items:center;gap:10px;">
@@ -234,11 +236,14 @@
     if (!canAny) { box.innerHTML = ''; return; }
 
     const s = T.status;
-    const pendingN = (T.entrants || []).filter((e) => e.status === 'pending').length;
+    const pendingList = (T.entrants || []).filter((e) => e.status === 'pending');
     const approvedN = joinedCount(T);
     const actions = [];
 
-    if (caps.assign_round) {
+    // ⚠️ 「开始比赛」必须限定在**报名阶段**：`caps.assign_round` 只表示"这个角色有权开赛"，
+    // 与当前状态无关——不判状态的话，比赛已经开始（甚至结束）了按钮还在，
+    // 点下去必然撞到状态机报错。
+    if (caps.assign_round && s === 'registration') {
       actions.push(`<button class="btn btn-primary btn-sm" id="btnStartTn">
         ▶️ 开始比赛${approvedN < T.size ? `（未满员也可，${T.size - approvedN} 个位置自动轮空）` : ''}</button>`);
     }
@@ -252,12 +257,31 @@
       actions.push('<button class="btn btn-ghost btn-sm" id="btnEditNoteTn">✏️ 编辑备注</button>');
     }
 
+    // ---- 待批准报名（T3）----
+    // ⚠️ 这块**直接放在管理面板里**，而不是只在下方名单里放按钮：
+    // 早先面板上只写一句"见下方名单"，主办人得往下滚动去找——
+    // 而"批准报名"恰恰是报名阶段最高频的操作，应该伸手就能点到。
+    const approveBox = (caps.decide_entrant && pendingList.length) ? `
+        <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
+            <div style="font-size:13px;color:var(--gold-light);">🕐 待批准报名（${pendingList.length}）</div>
+            <button class="btn btn-primary btn-sm" id="btnApproveAll">全部批准</button>
+          </div>
+          ${pendingList.map((e) => `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:4px 0;font-size:13px;">
+              <span data-player-id="${esc(e.id)}">${esc(e.name)}</span>
+              <span style="display:flex;gap:6px;">
+                <button class="btn btn-primary btn-sm" data-act="approve" data-pid="${esc(e.id)}">批准</button>
+                <button class="btn btn-ghost btn-sm" data-act="reject" data-pid="${esc(e.id)}">拒绝</button>
+              </span>
+            </div>`).join('')}
+        </div>` : '';
+
     const tips = [];
-    if (caps.decide_entrant && pendingN) tips.push(`有 <b>${pendingN}</b> 人待批准（见下方名单）`);
     if (caps.void_player && s === 'playing') tips.push('取消选手成绩：该选手所有对局判对手胜，并重算后续轮次');
     if (caps.set_champion && s !== 'archived') tips.push('设置冠军为<b>管理员专属</b>操作');
-    if (caps.archive) tips.push(`存档后主办人只读；系统也会在结束后 ${'24'} 小时自动存档`);
-    if (caps.edit_archived) tips.push('已存档赛事仅管理员可编辑，且**每次编辑都会留痕**');
+    if (caps.archive) tips.push('存档后主办人只读；系统也会在结束后 24 小时自动存档');
+    if (caps.edit_archived) tips.push('已存档赛事仅管理员可编辑，且每次编辑都会留痕');
 
     box.innerHTML = `
       <div class="card" style="padding:18px 20px;border:1px solid var(--gold);">
@@ -268,6 +292,7 @@
           <div style="display:flex;gap:8px;flex-wrap:wrap;">${actions.join('')}</div>
         </div>
         ${tips.length ? `<div style="font-size:12px;color:var(--text-dim);margin-top:8px;line-height:1.7;">${tips.join('<br>')}</div>` : ''}
+        ${approveBox}
       </div>`;
 
     const startBtn = el('btnStartTn');
@@ -285,6 +310,17 @@
         post(`/api/tournaments/${encodeURIComponent(T.id)}/cancel`, { reason }, '赛事已取消');
       });
     }
+    // 管理面板里的「批准 / 拒绝」：**作用域限定在面板内部**，
+    // 名单里的同名按钮由 `renderRoster` 自己绑——两处都写 `document.querySelectorAll`
+    // 会把回调重复绑到对方按钮上（点一下触发两次请求）。
+    box.querySelectorAll('button[data-act]').forEach((btn) => {
+      btn.addEventListener('click', () => rosterAction(btn.getAttribute('data-act'), btn.getAttribute('data-pid')));
+    });
+    const allBtn = el('btnApproveAll');
+    if (allBtn) {
+      allBtn.addEventListener('click', () => approveAll(pendingList.map((e) => e.id)));
+    }
+
     const archiveBtn = el('btnArchiveTn');
     if (archiveBtn) {
       archiveBtn.addEventListener('click', () => {
@@ -313,13 +349,17 @@
   // ==================================================================
   function renderInfo() {
     const rows = [
-      ['赛制', '单败淘汰制'],
+      // ⚠️ 别再写死"单败淘汰制"：T8 起有瑞士制了，赛制必须取服务端下发的标签
+      ['赛制', T.formatLabel || '单败淘汰'],
       ['人数档位', `${T.size} 人`],
       ['报名时间', `${fmtTime(T.registerStart)} ~ ${fmtTime(T.registerEnd)}`],
       ['比赛时间', `${fmtTime(T.matchStart)} ~ ${fmtTime(T.matchEnd)}`],
       ['报名审核', T.requireApproval ? '需主办人审核' : '免审核（报名即参赛）'],
       ['提交时间', fmtTime(T.createdAt)],
     ];
+    if (T.format === 'swiss' && T.totalRounds) {
+      rows.splice(1, 0, ['轮次', `共 ${T.totalRounds} 轮${T.currentRound ? `（已进行到第 ${T.currentRound} 轮）` : ''}`]);
+    }
     const reason = T.reason
       ? `<div style="margin-top:12px;font-size:13px;line-height:1.8;"><span style="color:var(--text-dim);">举办理由：</span><br>${esc(T.reason)}</div>`
       : '';
@@ -352,12 +392,10 @@
     if (entrants.length) {
       body = entrants.map((e) => {
         const hit = label[e.status] || [esc(e.status), 'var(--text-dim)'];
-        // 主办人可操作项：待批准 → 批准/拒绝；未开赛 → 踢出；已开赛 → 取消成绩
+        // 名单里的操作 = **针对某个人"事后"的动作**（踢出 / 取消成绩 / 设冠军）。
+        // ⚠️「批准 / 拒绝」刻意**不在这里**——它们属于"待办队列"，统一放在上方的管理面板。
+        // 两处都摆同一组按钮，页面上就会同时出现两个相邻的「批准」，纯属干扰。
         const btns = [];
-        if (caps.decide_entrant && e.status === 'pending') {
-          btns.push(`<button class="btn btn-primary btn-sm" data-act="approve" data-pid="${esc(e.id)}">批准</button>`);
-          btns.push(`<button class="btn btn-ghost btn-sm" data-act="reject" data-pid="${esc(e.id)}">拒绝</button>`);
-        }
         if (caps.kick_player && !isPlaying && e.status !== 'kicked') {
           btns.push(`<button class="btn btn-ghost btn-sm" data-act="kick" data-pid="${esc(e.id)}" style="color:var(--red-light);">踢出</button>`);
         }
@@ -393,6 +431,31 @@
     });
   }
 
+  /**
+   * 批量批准报名（管理面板上的「全部批准」）。
+   *
+   * ⚠️ **逐个发请求**，不做"一次批一批"的服务端接口：名额与权限判定必须每次都真的走一遍
+   * （批准到最后一个可能正好满员、自动开赛，后面几个就该被服务端正常拒绝）。
+   * 在前端做"批量捷径"等于绕开这些判定。
+   */
+  async function approveAll(ids) {
+    if (!ids.length) return;
+    if (!confirm(`确定批准这 ${ids.length} 人的报名？`)) return;
+    let ok = 0;
+    for (const pid of ids) {
+      // okMsg 传空串：逐条弹提示会刷屏，最后统一报一次结果
+      const res = await post(
+        `/api/tournaments/${encodeURIComponent(T.id)}/entrants/${encodeURIComponent(pid)}`,
+        { decision: 'approve' }, '');
+      if (res) ok++;
+    }
+    if (ok < ids.length) {
+      toast(`已批准 ${ok} 人，其余 ${ids.length - ok} 人未成功（可能名额已满或赛事已开始）`);
+    } else {
+      toast(`已批准 ${ok} 人`);
+    }
+  }
+
   async function rosterAction(act, playerId) {
     const id = encodeURIComponent(T.id);
     if (act === 'approve' || act === 'reject') {
@@ -416,8 +479,15 @@
   // ==================================================================
   // 对阵表
   // ==================================================================
+  /** 与后端 `swiss.pairKey` 同构：一对选手的稳定键（与先后顺序无关） */
+  function pairKey(a, b) {
+    return String(a) < String(b) ? `${a}|${b}` : `${b}|${a}`;
+  }
+
   function renderBracketCard() {
     const card = el('tnBracketCard');
+    // T8：瑞士制没有淘汰树，用"轮次列表 + 名次表"呈现
+    if (T.format === 'swiss') { renderSwissCard(card); return; }
     if (!(T.bracket || []).length) {
       card.style.display = 'none';
       return;
@@ -429,6 +499,89 @@
         金色边框 = 已分出胜负；「空位」= 该位置无人（报名不足时会出现，对手自动轮空晋级）
       </div>
       ${window.UI.bracketHtml(T, { myId: myPlayerId, detail: true })}`;
+  }
+
+  /**
+   * 瑞士制赛程视图（T8）：**轮次列表 + 名次表**。
+   *
+   * ⚠️ 刻意不复用 `UI.bracketHtml`：那是淘汰树的画法（按满二叉树分层），
+   * 而瑞士制每轮按积分重新配对，压根没有树——套上去只会画出一堆"待定"。
+   */
+  function renderSwissCard(card) {
+    const rounds = T.rounds || [];
+    if (!rounds.length) {
+      card.style.display = '';
+      card.innerHTML = `
+        <div class="section-title" style="margin-bottom:10px;">赛程（${esc(T.formatLabel || '瑞士制')}）</div>
+        <div style="color:var(--text-dim);font-size:13px;">
+          尚未开赛。共 ${T.totalRounds || 0} 轮，开赛后每轮按积分重新配对。
+        </div>`;
+      return;
+    }
+    card.style.display = '';
+
+    const roundsHtml = rounds.map((r) => {
+      const isCur = r.round === T.currentRound && T.status === 'playing';
+      const rows = (r.pairs || []).map(([a, b], i) => {
+        const w = (r.results || {})[pairKey(a, b)];
+        const mine = !!myPlayerId && (a === myPlayerId || b === myPlayerId);
+        const roomId = (r.matchIds || [])[i];
+        let tag;
+        if (w) {
+          tag = `<span style="color:var(--gold-light);">${esc(nameOf(w))} 胜</span>`;
+        } else if (roomId) {
+          tag = mine
+            ? `<a class="btn btn-primary btn-sm" href="play.html?room=${encodeURIComponent(roomId)}&join=1">进入对局</a>`
+            : '<span style="color:var(--text-dim);">进行中</span>';
+        } else {
+          tag = '<span style="color:var(--text-dim);">—</span>';
+        }
+        const voided = (r.voided || []).some((v) => v === a || v === b);
+        return `
+          <div style="display:flex;justify-content:space-between;gap:10px;padding:4px 0;font-size:12px;${mine ? 'font-weight:700;' : ''}">
+            <span>${esc(nameOf(a))} vs ${esc(nameOf(b))}${voided ? ' <span style="color:var(--red-light);font-size:11px;">（成绩取消）</span>' : ''}</span>
+            <span>${tag}</span>
+          </div>`;
+      }).join('');
+      const byes = (r.byes || []).length
+        ? `<div style="font-size:12px;color:var(--text-dim);padding:4px 0;">轮空：${(r.byes || []).map((id) => esc(nameOf(id))).join('、')}（视同胜，得 1 分）</div>`
+        : '';
+      return `
+        <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;${isCur ? 'border-color:var(--gold);' : ''}">
+          <div style="font-size:13px;font-weight:700;margin-bottom:6px;">
+            第 ${r.round} 轮${isCur ? ' <span style="font-size:11px;color:var(--gold-light);">进行中</span>' : ''}
+            ${r.degraded ? '<span style="font-size:11px;color:var(--red-light);">（配对经过退让，可能有重复对阵）</span>' : ''}
+          </div>
+          ${rows}${byes}
+        </div>`;
+    }).join('');
+
+    const standings = T.standings || [];
+    const rankRows = standings.map((s) => `
+      <div style="display:grid;grid-template-columns:34px 1fr 56px 56px 50px;gap:6px;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.05);${s.id === myPlayerId ? 'font-weight:700;' : ''}">
+        <span style="color:var(--gold-light);">${s.rank}</span>
+        <span data-player-id="${esc(s.id)}">${esc(s.name || '—')}</span>
+        <span>${s.score} 分</span>
+        <span style="color:var(--text-dim);">${s.sos}</span>
+        <span style="color:var(--text-dim);">${s.wins}-${s.draws}-${s.losses}</span>
+      </div>`).join('');
+
+    card.innerHTML = `
+      <div class="section-title" style="margin-bottom:4px;">赛程（${esc(T.formatLabel || '瑞士制')} · 共 ${T.totalRounds} 轮）</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
+        每轮按积分重新配对：强者遇强者、不重复对阵（没有淘汰，输一两场仍有机会）。
+        当前第 ${T.currentRound || 0} 轮${T.status === 'playing' ? '' : '（已结束）'}。
+      </div>
+      ${roundsHtml}
+      <div class="section-title" style="margin:16px 0 4px;">名次表</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">
+        排序：积分 → 对手分（SOS）→ 参赛顺序。胜 1 分、和 0.5 分、轮空 1 分。
+        ${T.championTie ? '<span style="color:var(--gold-light);">⚠️ 与第二名同分，按对手分裁定</span>' : ''}
+      </div>
+      <div style="display:grid;grid-template-columns:34px 1fr 56px 56px 50px;gap:6px;font-size:11px;color:var(--text-dim);padding-bottom:4px;border-bottom:1px solid var(--border);">
+        <span>名次</span><span>选手</span><span>积分</span><span>对手分</span><span>胜-和-负</span>
+      </div>
+      ${rankRows || '<div style="color:var(--text-dim);font-size:13px;">暂无数据。</div>'}`;
   }
 
   // ==================================================================

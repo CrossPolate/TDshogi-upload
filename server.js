@@ -30,7 +30,7 @@ const audit = require('./src/audit');
 const rateLimit = require('./src/ratelimit');
 const log = require('./src/logger');
 const { protocol, VERSION } = require('./src/http/context');
-const { requestId, adminEntryGate } = require('./src/http/middleware');
+const { requestId, securityHeaders, adminEntryGate, ipBanGate } = require('./src/http/middleware');
 const registerPublic = require('./src/http/routes/public');
 const registerRecords = require('./src/http/routes/records');
 const registerAccounts = require('./src/http/routes/accounts');
@@ -43,6 +43,8 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 ensureDataDirs();
 
 const app = express();
+// 安全响应头（§Q7）：挂在**最前**，保证静态资源、API、错误响应都带上。
+app.use(securityHeaders);
 app.use(express.json());
 // 客户端信息（IP/UA）地基，PLAN §M3：供 §K 的登录记录与管理员审计使用。
 // 未配置 TRUST_PROXY 时不信任任何代理头——否则伪造 X-Forwarded-For 即可伪装 IP。
@@ -51,6 +53,11 @@ app.use(netInfo.attachClientInfo);
 // 请求标识（PLAN §P4）：每个请求分配短 id（响应头 `X-Request-Id` + `req.log`）。
 // 线上报错时用户只要报这个 id，就能在日志里直接定位到那一次请求。
 app.use(requestId);
+// IP 封禁门（PLAN §X4 第一个生效点）。位置是刻意的：
+//  - 在 `requestId` 之后 → 被封的请求也能带上 requestId，用户报障时可对账；
+//  - 在**限流之前** → 被封的 IP 不该继续消耗限流计数，也不该污染限流统计。
+// ⚠️ 这里只挡 HTTP；WS 那侧在同文件的 `verifyClient` 拦，两处都要有。
+app.use(ipBanGate);
 // 速率限制（PLAN §Q7）：/api 全局兜底（宽松，默认 600 次/分钟/IP），
 // 登录与重查询在各自路由上再叠加更严的档位。
 // ⚠️ 限流键为 clientIp（遵守 TRUST_PROXY）——反代部署若未配置 TRUST_PROXY，
@@ -82,7 +89,27 @@ registerAdmin(app);
 // ==================================================================
 const server = http.createServer(app);
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({
+  server,
+  // IP 封禁的**第二个生效点**（PLAN §X4）：在握手阶段就拒绝。
+  //
+  // ⚠️ 少了这里就是**假封禁**：WS 才是对局主通道，只挡 HTTP 的话，
+  // 被封的 IP 照样能连上、照样能下棋——只是刷不出页面而已（看起来"封了"）。
+  verifyClient: (info) => {
+    try {
+      const ip = netInfo.clientIp(info.req);
+      const r = require('./src/ipban').check(ip);
+      if (r.banned) {
+        log.warn('ipban', '拒绝已封禁 IP 的 WebSocket 握手', { ip, reason: r.record.reason });
+        return false;
+      }
+    } catch (err) {
+      // 判定本身出错时**放行**：宁可漏封，也不能因为一个异常把所有人挡在 WS 外面
+      log.error('ipban', 'WS 握手封禁判定异常，已放行', { err });
+    }
+    return true;
+  },
+});
 
 wss.on('connection', (ws, req) => {
   // 解析 guestId（从查询参数）

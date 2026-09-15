@@ -349,6 +349,8 @@ class Protocol {
             matchStart: data && data.matchStart,
             matchEnd: data && data.matchEnd,
             format: data && data.format,
+            // T8：瑞士制总轮数（不填则服务端按人数给建议值）
+            totalRounds: data && data.totalRounds,
             requireApproval: data && data.requireApproval,
           });
         if (res.ok) {
@@ -571,8 +573,11 @@ class Protocol {
     const prof = ratings.profile(playerId);
     const records = require('./records').listPlayerRecords(playerId, 20);
     const session = auth.load(playerId) || { name: '无名棋士' };
+    // 赛事荣誉（个人页"赛事荣誉栏"）：赛事结果本身就是公开信息，不涉及隐私，
+    // 所以放在同一出口一起下发（stripPrivate 的键名黑名单与它无交集）。
+    const honors = tournaments.honorsOf(playerId);
     // 非管理员出口：过隐私白名单（PLAN §K2）
-    return privacy.stripPrivate({ profile: prof, records, name: session.name });
+    return privacy.stripPrivate({ profile: prof, records, name: session.name, honors });
   }
 
   // ==================================================================

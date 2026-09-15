@@ -19,6 +19,9 @@ const ratings = require('../../ratings');
 const tournaments = require('../../tournaments');
 const audit = require('../../audit');
 const rateLimit = require('../../ratelimit');
+const ipban = require('../../ipban');
+const net = require('../../net');
+const announcements = require('../../announcements');
 const { adminOnly, adminWrite, tournamentAction } = require('../middleware');
 const { protocol } = require('../context');
 
@@ -181,5 +184,135 @@ module.exports = function registerAdmin(app) {
       audit: { field: body.field, from: null, to: body.value == null ? null : String(body.value).slice(0, 80) },
       tournament: r.tournament,
     };
+  }));
+
+  // ---------- §X IP 封禁 ----------
+
+  // 列表 + 时长档位 + 请求者自己的 IP（前端据此提示"别把自己封了"）
+  app.get('/api/admin/ipbans', adminOnly, (req, res) => {
+    res.json({
+      bans: ipban.list(),
+      durations: ipban.DURATIONS,
+      myIp: net.clientIp(req),
+    });
+  });
+
+  app.post('/api/admin/ipbans', adminWrite((req, body) => {
+    const b = body || {};
+    const spec = String(b.ip || '').trim();
+
+    // ⚠️ 防自锁（PLAN §X2）：不允许封"把管理员自己也圈进去"的规则。
+    // 一旦封了，管理员连后台都进不来，只能上服务器改库——多数部署根本没这个通道。
+    // ⚠️ 判定必须走位运算：`10.0.0.5` 是否落在 `10.0.0.0/24` 里，字符串比不出来。
+    const myIp = net.clientIp(req);
+    if (ipban.covers(spec, myIp)) {
+      return { ok: false, error: `这条规则会把你自己（${myIp}）也封掉，已阻止`, action: 'ip-ban' };
+    }
+
+    // `hours` 直接透传：`undefined` 走默认 24h、`null` 表示永久（由 ipban.ban 统一解释）
+    const r = ipban.ban(spec, { reason: b.reason, hours: b.hours, byId: 'admin' });
+    return {
+      ok: r.ok, error: r.error, action: 'ip-ban',
+      audit: { ip: spec, reason: b.reason, hours: b.hours === null ? 'forever' : b.hours },
+      record: r.record,
+    };
+  }));
+
+  app.post('/api/admin/ipbans/unban', adminWrite((req, body) => {
+    const r = ipban.unban(body && body.ip);
+    return { ok: r.ok, error: r.error, action: 'ip-unban', audit: { ip: body && body.ip } };
+  }));
+
+  app.post('/api/admin/ipbans/extend', adminWrite((req, body) => {
+    const hours = Number(body && body.hours);
+    const r = ipban.extend(body && body.ip, hours);
+    return {
+      ok: r.ok, error: r.error, action: 'ip-ban-extend',
+      audit: { ip: body && body.ip, hours },
+    };
+  }));
+
+  // ---------- §C1 总览仪表盘 ----------
+  // 一次凑齐"一眼看全局"要用的数字，省掉后台首屏打好几个请求。
+  app.get('/api/admin/overview', adminOnly, (req, res) => {
+    // ⚠️ 复用**公开出口** `homeData()` 的统计局（在线/进行中/等待中）——
+    // 自己再算一遍迟早会与首页口径不一致（§T1 就是为统一这个口径而设的）。
+    const home = protocol.homeData();
+    const bans = ipban.list();
+    res.json({
+      stats: home.stats || {},
+      activeGames: (home.games || []).length,
+      recordsTotal: home.recordsTotal || 0,
+      recentBattles: home.recentBattles || [],
+      userCount: ratings.allUsers().length,
+      tournamentCount: tournaments.listAllTournaments().length,
+      announcementCount: announcements.listAnnouncements().length,
+      banCount: bans.length,
+      activeBanCount: bans.filter((b) => b.active).length,
+      recentAudit: audit.query({ type: 'admin', limit: 8 }),
+    });
+  });
+
+  // ---------- §C5 公告管理 ----------
+  // 此前公告只能手改 data/announcements.json —— 后端本来就有读写能力，后台却一直没有入口。
+
+  app.get('/api/admin/announcements', adminOnly, (req, res) => {
+    res.json({
+      announcements: announcements.listAnnouncements(),
+      limits: {
+        title: announcements.MAX_TITLE,
+        content: announcements.MAX_CONTENT,
+        count: announcements.MAX_COUNT,
+      },
+    });
+  });
+
+  app.post('/api/admin/announcements', adminWrite((req, body) => {
+    const r = announcements.addAnnouncement({ title: body.title, content: body.content, pinned: !!body.pinned });
+    return {
+      ok: r.ok, error: r.error, action: 'announcement.add',
+      audit: { title: String(body.title || '').slice(0, 60) },
+      announcement: r.announcement,
+    };
+  }));
+
+  app.post('/api/admin/announcements/:id/update', adminWrite((req, body) => {
+    const r = announcements.updateAnnouncement(req.params.id, {
+      title: body.title, content: body.content, pinned: body.pinned,
+    });
+    return {
+      ok: r.ok, error: r.error, action: 'announcement.update',
+      audit: { id: req.params.id, pinned: body.pinned },
+      announcement: r.announcement,
+    };
+  }));
+
+  app.post('/api/admin/announcements/:id/delete', adminWrite((req) => {
+    const r = announcements.deleteAnnouncement(req.params.id);
+    return { ok: r.ok, error: r.error, action: 'announcement.delete', audit: { id: req.params.id } };
+  }));
+
+  // ---------- §C6 实时干预 ----------
+
+  // 在线房间列表（含私人房——见 rooms/adminRooms 的注释）
+  app.get('/api/admin/rooms', adminOnly, (req, res) => {
+    res.json({ rooms: protocol.rooms.adminRooms() });
+  });
+
+  // 强制解散房间（房内的人会收到 room_closed）
+  app.post('/api/admin/rooms/:id/close', adminWrite((req) => {
+    const r = protocol.rooms.adminCloseRoom(req.params.id);
+    return {
+      ok: r.ok, error: r.error, action: 'room.close',
+      audit: r.info || { roomId: req.params.id },
+    };
+  }));
+
+  // 强制下线某玩家（踢连接；对局中会走断线判负流程）
+  app.post('/api/admin/kick', adminWrite((req, body) => {
+    const id = body && body.playerId;
+    if (!id) return { ok: false, error: '缺少 playerId', action: 'player.kick' };
+    const kicked = protocol.kickPlayer(id, (body && body.message) || '你已被管理员强制下线');
+    return { ok: true, action: 'player.kick', kicked, audit: { playerId: id, kicked } };
   }));
 };

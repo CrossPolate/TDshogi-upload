@@ -221,4 +221,8 @@ function adminDeleteSession(playerId) {
   return { ok: true };
 }
 
-module.exports = { identify, load, rename, publicInfo, genId, listSessions, upsertSession, getSessionRaw, adminRename, banPlayer, unbanPlayer, adminSetTitle, adminDeleteSession };
+module.exports = {
+  identify, load, rename, publicInfo, genId, listSessions,
+  upsertSession, getSessionRaw, saveSession, // §M4：会话的唯一来源是 kv，迁移也走这两个
+  adminRename, banPlayer, unbanPlayer, adminSetTitle, adminDeleteSession,
+};

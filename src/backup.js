@@ -22,7 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { DATA_DIR, DB_PATH } = require('./storage');
+const { DATA_DIR, DB_PATH, checkpointWal } = require('./storage');
 const log = require('./logger');
 
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
@@ -185,6 +185,12 @@ function runBackup(opts = {}) {
 function startAutoBackup({ intervalMs = 6 * 3600 * 1000, keep, maxBytes, dir } = {}) {
   const tick = () => {
     try {
+      // 顺手截断 WAL：长期运行的单连接下 `-wal` 不会自己收回去，会白占空间。
+      // ⚠️ 与备份的正确性**无关**——备份走 `VACUUM INTO`，本身就把 WAL 内容算进去了
+      //（详见 `storage.checkpointWal` 的注释）。这里只是打扫。
+      // 放在"是否已备份"判断之前：即使今天已备份，也照样打扫一次。
+      checkpointWal();
+
       const latest = latestBackup(dir);
       const today = stamp().slice(0, 8);
       if (latest && backupDay(latest) === today) return; // 今天已有备份
