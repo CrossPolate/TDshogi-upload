@@ -22,6 +22,14 @@ const accounts = require('../../accounts');
 const records = require('../../records');
 const { checkAdmin } = require('../context');
 
+// ⚠️ 写操作的成功响应一律带 `ok: true`，与本项目既有契约保持一致
+//（`/api/admin/*` 与 `/api/register` 都是这个形态）。
+// 曾经这里只回 `{ tournament }`，于是客户端/脚本按 `res.ok` 判断时**全部被判成失败**——
+// 而操作其实成功了（e2e 里表现为"4 条批准失败、赛事却正常开赛了"）。
+// 一个字段的不一致，排查起来比缺字段更贵。
+//
+// 读接口（GET 详情 / 棋谱）保持裸返回：成功与否由 HTTP 状态码表达即可。
+
 /**
  * 解析请求身份。
  *  - `x-admin-token`     → 管理员（`isAdmin: true`）
@@ -95,7 +103,7 @@ module.exports = function registerTournaments(app) {
     const decision = (req.body && req.body.decision) === 'approve' ? 'approve' : 'reject';
     const r = tournaments.decideEntrant(req.params.id, req.params.playerId, decision, actor);
     if (!r.ok) return fail(res, r.error);
-    res.json({ tournament: r.tournament, started: !!r.started });
+    res.json({ ok: true, tournament: r.tournament, started: !!r.started });
   });
 
   // 踢出报名者（T3，仅报名阶段；已开赛请用「取消选手成绩」）
@@ -107,7 +115,7 @@ module.exports = function registerTournaments(app) {
     if (!tournaments.canManage(t, actor, 'kick_player')) return res.status(403).json({ error: '没有权限' });
     const r = tournaments.kickPlayer(req.params.id, req.body && req.body.playerId);
     if (!r.ok) return fail(res, r.error);
-    res.json({ tournament: r.tournament });
+    res.json({ ok: true, tournament: r.tournament });
   });
 
   // 手动开赛（T3）：报名阶段即可开，不必等满员；未满员时首轮自动轮空
@@ -119,7 +127,7 @@ module.exports = function registerTournaments(app) {
     if (!tournaments.canManage(t, actor, 'assign_round')) return res.status(403).json({ error: '没有权限' });
     const r = tournaments.startTournament(req.params.id, { byRole: actor.isAdmin ? 'admin' : 'owner', action: 'start', detail: { manual: true } });
     if (!r.ok) return fail(res, r.error);
-    res.json({ tournament: r.tournament });
+    res.json({ ok: true, tournament: r.tournament });
   });
 
   // 取消选手成绩（T4）：该选手所有对局判对手胜，并重算下游
@@ -128,7 +136,7 @@ module.exports = function registerTournaments(app) {
     if (!actor) return res.status(401).json({ error: '需要登录' });
     const r = tournaments.voidPlayer(req.params.id, req.body && req.body.playerId, actor);
     if (!r.ok) return fail(res, r.error);
-    res.json({ tournament: r.tournament, affected: r.affected });
+    res.json({ ok: true, tournament: r.tournament, affected: r.affected });
   });
 
   // 取消赛事（需求 10）：主办人**仅未结束时**可用（已存档/已取消一律拒绝，需求 11）
@@ -142,7 +150,7 @@ module.exports = function registerTournaments(app) {
     }
     const r = tournaments.cancelTournament(req.params.id, (req.body && req.body.reason) || '');
     if (!r.ok) return fail(res, r.error);
-    res.json({ tournament: r.tournament });
+    res.json({ ok: true, tournament: r.tournament });
   });
 
   // 设置冠军（T4）：**仅管理员**（用户 2026-09-13 明确修正；`canManage` 已是唯一判定处）
@@ -151,7 +159,7 @@ module.exports = function registerTournaments(app) {
     if (!actor) return res.status(401).json({ error: '需要登录' });
     const r = tournaments.setChampion(req.params.id, req.body && req.body.playerId, actor);
     if (!r.ok) return fail(res, r.error);
-    res.json({ tournament: r.tournament });
+    res.json({ ok: true, tournament: r.tournament });
   });
 
   // 申请重赛（T6/需求 12）：**仅本场参赛者**（资格核对在域内，含"是不是这一场的人"）
@@ -165,7 +173,7 @@ module.exports = function registerTournaments(app) {
       { id: actor.id, name: (req.body && req.body.name) || null }
     );
     if (!r.ok) return fail(res, r.error);
-    res.json({ rematch: r.rematch, tournament: r.tournament });
+    res.json({ ok: true, rematch: r.rematch, tournament: r.tournament });
   });
 
   // 裁决重赛（T6）：主办人 / 管理员
@@ -177,6 +185,6 @@ module.exports = function registerTournaments(app) {
       req.params.id, req.params.rematchId, decision, actor, req.body && req.body.note
     );
     if (!r.ok) return fail(res, r.error);
-    res.json({ tournament: r.tournament, rematch: r.rematch });
+    res.json({ ok: true, tournament: r.tournament, rematch: r.rematch });
   });
 };

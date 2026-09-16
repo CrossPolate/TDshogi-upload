@@ -98,7 +98,69 @@
 .rv-comment-ops { display: flex; gap: 4px; }
 .rv-comment-ops .btn { padding: 2px 6px; font-size: 11px; }
 
+/* 顶部操作按钮组（翻转视角 / 导出 KIF / 导出 CSA / 返回） */
+.rv-meta-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 棋谱操作按钮组（首手 / 上一手 / 下一手 / 末手 / 自由摆放 / 撤销摆放） */
+.rv-nav-actions { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+
 /* 响应式 */
 @media (max-width: 1100px) {
-  .review-layout { grid-template-columns: 1fr; }
+  /* ⚠️ 必须是 `minmax(0, 1fr)` 而不是 `1fr`：`1fr` 的最小尺寸是 `auto`（≈ min-content），
+     列内只要有**不可换行**的内容（长选手名、nowrap 的按钮文字），整列就会被撑出视口，
+     表现为手机上莫名其妙的横向滚动。桌面那列本来就写了 `minmax(0, 1fr)`，这行漏了。 */
+  .review-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ==================================================================
+   手机端细调（≤640px）
+   ------------------------------------------------------------------
+   窄屏下最容易坏的三处，都是实机渲染后才看得出来的：
+   1. **顶部按钮把标签折进词里**——原先 4 个按钮挤在标题右侧，窄屏下各自被压缩，
+      于是出现"翻转视/角""导/出/KIF"这种断行，既难看又读不出意思；
+   2. **棋谱列表固定 360px**——手机上棋盘已占去大半屏，再加 360px 的列表，
+      首屏基本看不到棋盘全貌，得滚很久；
+   3. **手点目标和鼠标点不一样**——13px 行高 5px 内边距的走法条目，手指点不准。
+   ================================================================== */
+@media (max-width: 640px) {
+  /* 1. 按钮组：铺满整行 + 等分两列；`white-space: nowrap` 是重点，
+        不加的话按钮仍会被压窄、标签照旧在词中折行 */
+  .rv-meta-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .rv-meta-actions .btn {
+    width: 100%;
+    white-space: nowrap;
+    padding: 9px 6px;   /* 同时补足触控高度 */
+  }
+
+  /* 棋谱操作按钮：等分两列，"自由摆放"不会再孤零零占一行 */
+  .rv-nav-actions .btn {
+    flex: 1 1 calc(50% - 3px);
+    white-space: nowrap;
+    padding: 9px 6px;
+  }
+
+  /* 2. 棋谱列表：改用随视口的高度，把纵向空间还给棋盘 */
+  .rv-move-list { max-height: 42vh; }
+
+  /* 3. 触控目标：走法条目与行高都放大一档 */
+  .rv-move-row { padding: 7px 8px; }
+  .rv-mv { padding: 7px 8px; }
+
+  /* 长名字：管理员「展示名」上限 120 字，窄屏下会把玩家栏从 41px 撑到 100+px，
+     把棋盘一路顶下去（实测 45 字 → 104px）。截成一行 + 省略号即可。
+     ⚠️ 先给外层 `min-width: 0`，否则 flex 子项不会收缩，省略号根本不生效。 */
+  .review-layout .player-bar > div:first-child { min-width: 0; }
+  .review-layout .player-bar .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 评论块原本靠 30px 缩进对齐手数，窄屏下这段缩进太浪费宽度 */
+  .rv-comments { padding-left: 12px; }
+  .rv-comment-text { min-width: 0; }   /* 允许真正折行，而不是撑宽整行 */
 }

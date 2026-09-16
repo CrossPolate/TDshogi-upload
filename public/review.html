@@ -43,7 +43,9 @@
               <span id="rvDate"></span>
             </div>
           </div>
-          <div style="display:flex;gap:8px;">
+          <!-- 按钮组样式在 review.css 的 `.rv-meta-actions`（手机端要等分两列，
+               所以不能写 inline 的 display/gap——inline 会盖掉媒体查询） -->
+          <div class="rv-meta-actions">
             <button class="btn btn-ghost btn-sm" id="btnFlipView" title="切换先手 / 后手视角">🔄 翻转视角</button>
             <button class="btn btn-ghost btn-sm" id="btnExportKif">导出 KIF</button>
             <button class="btn btn-ghost btn-sm" id="btnExportCsa">导出 CSA</button>
@@ -141,7 +143,7 @@
                 </select>
               </div>
             </div>
-            <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
+            <div class="rv-nav-actions">
               <button class="btn btn-ghost btn-sm" id="btnFirst">⏮ 首手</button>
               <button class="btn btn-ghost btn-sm" id="btnPrev">◀ 上一手</button>
               <button class="btn btn-ghost btn-sm" id="btnNext">下一手 ▶</button>

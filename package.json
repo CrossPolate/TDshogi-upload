@@ -1,6 +1,6 @@
 {
   "name": "tdshogi",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "TDShogi 在线将棋对战平台 - 轻量级 Node.js 实时对局",
   "main": "server.js",
   "type": "commonjs",
@@ -8,6 +8,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test tests/*.test.js",
+    "e2e": "node scripts/e2e-all.js",
     "lint": "eslint .",
     "check": "node --check server.js",
     "backup": "node scripts/backup.js",

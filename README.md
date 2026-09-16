@@ -74,6 +74,7 @@ npm install
 npm start          # 默认 http://localhost:3000
 npm run dev        # --watch 自动重启
 npm test           # 单元测试（纯函数，无需起服）
+npm run e2e        # 端到端：自动起隔离实例 → 跑全部 e2e → 汇总 → 停服
 npm run lint       # eslint 静态检查
 ```
 
@@ -124,12 +125,12 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/api/home` `/api/lobby` | GET | 首页 / 大厅数据（含 version，排障可查进程版本） |
-| `/api/history?player=` | GET | 自己的棋谱 + 广场公开棋谱 |
+| `/api/history?adminToken=` | GET | 全库棋谱（**仅管理员**，§Q7-1 收权；玩家查自己的棋谱走 `/api/profile?player=` 或 WS 检索） |
 | `/api/gallery?q=&tag=&page=` | GET | 棋谱广场（公开棋谱列表） |
 | `/api/records/:id/playback` `/review` | GET | 回放 / 完整复盘数据（公开谱免登录） |
 | `/api/records/:id/export?fmt=kif\|csa` | GET | 导出（KIF 含手数评论） |
 | `/api/records/:id/{bookmark,comment,variation}` | POST | 写标注（评论支持编辑/删除，公开谱仅管理员） |
-| `/api/records/search` | GET | 棋谱检索（按选手/手数/结果/开局） |
+| `/api/records/search` | GET | 棋谱检索（按手数/结果/开局）。⚠️ 非管理员必须带**自己的**账号令牌，否则 403（§Q7-1） |
 | `/api/tournaments` | GET | 赛事列表（已过滤未审核/已拒/已取消） |
 | `/api/profile?player=` | GET | 个人战绩与等级 |
 | `/api/register` `/api/login` `/api/me` | POST/GET | 账号体系 |
@@ -190,16 +191,21 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 ## 开发与测试
 
 - **单元测试**：`npm test`（`tests/*.test.js`，Node 内置 `node --test`，纯函数不需起服）。
-  当前 **34 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、初始盘面，
-  以及 `game.js` 规则引擎 14 项（开局合法着法 30、王手放置禁止、升变区、吃子进驹台…）
+  当前 **202 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、初始盘面、
+  `game.js` 规则引擎、赛事状态机与权限、瑞士制配对与积分、棋钟、限流、隐私脱敏等
 - **静态检查**：`npm run lint`（eslint；`no-undef` 正是"路由层漏 require 导致接口 500"那类事故的克星）
 - **CI**：`.github/workflows/ci.yml`（语法检查 + lint + 单测 + e2e 冒烟）
-- **e2e 回归**：`scripts/e2e-*.js`（10 套件），需先起服再跑；由维护者手工执行
+- **e2e 回归**：`npm run e2e` —— **自动起隔离实例**（临时 `DATA_DIR` + `ADMIN_PASSWORD=admin123`）
+  后跑完整套，**13 个脚本 / 173 项断言**，末尾汇总并停服。
+  ⚠️ 其中 2 个脚本**自带服务器**（`e2e-snapshot.js` 重启进程验快照、`e2e-freeboard.js` 起 demo 服），
+  会与本实例抢端口，需单独跑。
+  ⚠️ 别手搓"先起服再 `node scripts/e2e-xxx.js`"：**漏掉 `ADMIN_PASSWORD` 就会卡在
+  "Admin 等待 admin_logged_in 超时"**，看起来像代码坏了——这正是把前提固化成一键入口的原因。
 - **文档**：`docs/PLAN.md`（路线图）/ `docs/ARCHITECTURE.md`（架构）/ `docs/UI-PAGES.md`（页面地图）
 
 ## 限制与扩展方向
 
-限制：仅平手（无駒落ち让子）、无 AI 对战、赛事仅单败淘汰、游客 id 无密码保护。
+限制：仅平手（无駒落ち让子）、无 AI 对战、赛事支持**单败淘汰与瑞士制**（无循环赛）、游客 id 无密码保护。
 
 方向：接入 USI 引擎（人机对战）、锦标赛（多轮/循环）、駒落ち、i18n、
 内容运营（棋谱广场栏目化）、赛事前台与自动化、PWA。
