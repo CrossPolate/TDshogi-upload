@@ -163,6 +163,55 @@ function nextLevelExp(level) {
 }
 
 /**
+ * 等级特权表（2026-09-20 用户要求：「等级 5 才能举办赛事」）。
+ *
+ * ⚠️ 这是**全项目唯一的特权门槛表**：要加新特权就往这里加一行，
+ * **不要**在业务模块里散写 `level >= 5`——门槛一旦散落多处，
+ * 改门槛时必然漏掉一处（`canManage`/`ACTION_ROLES` 已经立过这个规矩）。
+ *
+ * 数值含义：所需**等级**（0 = 无门槛）。等级由经验推导，见 `levelFromExp`。
+ */
+const LEVEL_PRIVILEGES = {
+  create_tournament: 5,   // 举办赛事
+};
+
+/** 只读等级（不构造完整 profile，避免为了拿个数字连带算 history） */
+function levelOf(playerId) {
+  const r = playerId ? getCache()[playerId] : null;
+  return levelFromExp((r && r.exp) || 0);
+}
+
+/**
+ * 某玩家是否拥有该特权。
+ * 未在 `LEVEL_PRIVILEGES` 里定义的门槛 = **不限制**（新特权默认放开，避免悄悄拦住老功能）。
+ *
+ * @returns {boolean}
+ */
+function hasPrivilege(playerId, privilege) {
+  const need = LEVEL_PRIVILEGES[privilege];
+  if (need == null) return true;
+  return levelOf(playerId) >= need;
+}
+
+/**
+ * 某玩家的全部特权状态（下发给前端展示用）。
+ *
+ * ⚠️ 从 `LEVEL_PRIVILEGES` 表**推导**，不是另抄一份门槛数值——
+ * 前端要显示"需要 Lv.5"时，抄一份就等于把门槛写死在两个地方，
+ * 改门槛时必然出现"服务端放行了但按钮还是灰的"。
+ *
+ * @returns {Record<string, {need:number, ok:boolean}>}
+ */
+function privilegesOf(playerId) {
+  const lv = levelOf(playerId);
+  const out = {};
+  for (const [key, need] of Object.entries(LEVEL_PRIVILEGES)) {
+    out[key] = { need, ok: lv >= need };
+  }
+  return out;
+}
+
+/**
  * 增加经验并结算等级。
  * @param {string} playerId
  * @param {number} amount 正整数
@@ -283,6 +332,11 @@ module.exports = {
   MAX_LEVEL,
   levelFromExp,
   nextLevelExp,
+  // ---- 等级特权（2026-09-20）：门槛表与判定只有这一处 ----
+  LEVEL_PRIVILEGES,
+  levelOf,
+  hasPrivilege,
+  privilegesOf,
   addExp,
   adminSetPlayer,
   applyGameResult,

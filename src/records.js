@@ -134,6 +134,10 @@ function saveRecord(data) {
     meta: data.meta || null,
     // 赛事归属（T6/需求 12）：赛事对局落盘时带上，详情页据此聚合"本赛事全部棋谱"
     tournamentId: data.tournamentId || null,
+    // 駒落ち（让子）：id + 显示名。盘面本身已由 `startSfen` 表达，
+    // 这里存的是**导出用**的标识（KIF 需要「手合割：香落ち」这一行，光有盘面推不出来）
+    handicap: data.handicap || null,
+    handicapLabel: data.handicapLabel || null,
   };
   putRecord(record);
   return record;
@@ -226,14 +230,25 @@ function exportKif(rec) {
   const totalFmt = (s) => `${Math.floor(s / 3600)}:${Math.floor((s % 3600) / 60)}:${s % 60}`;
   const started = new Date(rec.createdAt || Date.now());
   const startDate = `${started.getFullYear()}/${String(started.getMonth() + 1).padStart(2, '0')}/${String(started.getDate()).padStart(2, '0')} ${String(started.getHours()).padStart(2, '0')}:${String(started.getMinutes()).padStart(2, '0')}`;
+  // 駒落ち（让子）：KIF 用「下手/上手」代替「先手/後手」，且**必须写明手合割** ——
+  // 光看走法推不出少了哪些棋子（`startSfen` 里有，但 KIF 的消费方读的是这一行）。
+  const hdLabel = rec.handicapLabel
+    || (rec.handicap ? (require('./handicap').get(rec.handicap) || {}).label : null)
+    || null;
+  const names = rec.names || ['先手', '後手'];
+  // ⚠️ 让子局里"先列的那一方"不是先走的那一方：KIF 惯例把 **下手**（用全部棋子的一方，
+  //    即本项目的座位 w / names[1]）写在前面，而**着法从上手开始**（本项目 上手 = 座位 b）。
+  //    平手局不受影响（names[0] = b = 先手）。
+  const row1 = hdLabel ? `下手：${names[1] || '下手'}` : `先手：${names[0] || '先手'}`;
+  const row2 = hdLabel ? `上手：${names[0] || '上手'}` : `後手：${names[1] || '後手'}`;
   const lines = [
     '#KIF version=2.0 encoding=UTF-8',
     `開始日時：${startDate}`,
     '場所：天锻将棋道场',
     `持ち時間：${HOLD_TIME[rec.timeControl] || '10分'}`,
-    '手合割：平手',
-    `先手：${rec.names ? rec.names[0] : '先手'}`,
-    `後手：${rec.names ? rec.names[1] : '後手'}`,
+    `手合割：${hdLabel || '平手'}`,
+    row1,
+    row2,
     '手数----指手---------消費時間--',
   ];
   const jpMoves = movesToKif(rec.startSfen || DEFAULT_SFEN, rec.moves || []);
@@ -250,11 +265,15 @@ function exportKif(rec) {
     }
   });
   const n = (rec.moves || []).length;
+  // 胜者：让子局按「上手/下手」记（这正是让子局棋谱的惯例，玩家名字上面已经列过了）
+  const winner = hdLabel
+    ? (rec.result === 'b' ? '上手' : '下手')
+    : names[rec.result === 'b' ? 0 : 1];
   if (rec.resultDetail === '投了') {
     lines.push(`${n + 1} 投了`);
-    lines.push(`まで${n}手で${rec.names[rec.result === 'b' ? 0 : 1]}の勝ち`);
+    lines.push(`まで${n}手で${winner}の勝ち`);
   } else if (rec.result === 'b' || rec.result === 'w') {
-    lines.push(`まで${n}手で${rec.names[rec.result === 'b' ? 0 : 1]}の勝ち`);
+    lines.push(`まで${n}手で${winner}の勝ち`);
   } else if (rec.result === '-') {
     lines.push(`まで${n}手で${rec.resultDetail || '持将棋'}`);
   } else if (rec.resultDetail === '時間切れ') {

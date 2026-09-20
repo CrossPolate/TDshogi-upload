@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -54,13 +54,23 @@
 
     <!-- 身份卡 -->
     <div class="card profile-head">
-      <div class="profile-avatar" id="avatar">棋</div>
+      <div class="profile-avatar" id="avatar" title="点击更换头像" style="cursor:pointer;">棋</div>
       <div style="flex:1;">
         <div style="font-size:24px;font-weight:800;font-family:var(--font-serif);" id="pName">无名棋士</div>
         <div style="color:var(--text-dim);font-size:13px;margin-top:4px;" id="pRoleLabel">游客账号 · ID: <span id="pId"></span></div>
         <div style="display:flex;gap:8px;margin-top:12px;">
           <input class="input" id="renameInput" placeholder="修改名字（12 字内）" style="max-width:220px;">
           <button class="btn btn-ghost btn-sm" id="btnRename">改名</button>
+        </div>
+        <!-- 头像（2026-09-20）：**单独一行**，不要塞进上面的改名行——
+             改名对账号用户是隐藏的（`renderAccountUI` 会藏掉那一行），
+             而头像是游客/账号都能换，被那套显隐连带藏掉就成了"账号用户改不了头像" -->
+        <div style="margin-top:12px;">
+          <button class="btn btn-ghost btn-sm" id="btnPickAvatar">🎨 换头像</button>
+          <div id="avatarPicker" style="display:none;margin-top:10px;">
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">选一个头像（点击即生效）</div>
+            <div id="avatarOptions" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+          </div>
         </div>
       </div>
       <div style="text-align:center;">
@@ -133,6 +143,7 @@
 
   <script src="js/settings.js"></script>
   <script src="js/util.js"></script>
+  <script src="js/i18n.js"></script>
   <script src="js/nav.js"></script>
   <script src="js/api.js"></script>
   <script src="js/profile.js"></script>

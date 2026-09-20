@@ -31,6 +31,9 @@ const { genId } = require('./auth');
 // T8：瑞士制的配对与积分是**纯函数**（`src/swiss.js`），与赛事状态解耦——
 // 配对算法的正确性靠那 12 项单测钉死，这里只负责"把状态喂进去、把结果存下来"。
 const swiss = require('./swiss');
+// 等级特权（2026-09-20）：门槛表与判定都在 `ratings.js` 一处，这里只做"够不够"的询问。
+// ⚠️ 不要在下面写 `level >= 5`——散写门槛必然在改门槛时漏掉一处。
+const ratings = require('./ratings');
 
 function loadTournaments() {
   const data = readJson('tournaments.json', {});
@@ -113,6 +116,20 @@ function setMatchFactory(fn) {
  */
 function createTournament(name, size, owner, opts) {
   const o = opts || {};
+
+  // 等级特权（2026-09-20 用户要求）：举办赛事需要达到 `LEVEL_PRIVILEGES.create_tournament`。
+  // ⚠️ 判定放在这里（而不是 protocol / HTTP 路由层）：`createTournament` 是所有入口的必经之路，
+  // 放一层就等于"以后新增一个建赛入口时又得记得补一遍"。
+  if (owner && owner.id && !ratings.hasPrivilege(owner.id, 'create_tournament')) {
+    const need = ratings.LEVEL_PRIVILEGES.create_tournament;
+    return {
+      ok: false,
+      code: 'LEVEL_REQUIRED',
+      needLevel: need,
+      error: `举办赛事需要 Lv.${need}（你当前 Lv.${ratings.levelOf(owner.id)}）`,
+    };
+  }
+
   if (!SIZE_OPTIONS.includes(size)) return { ok: false, error: `参赛人数必须为 ${SIZE_OPTIONS.join(' / ')}` };
 
   const format = o.format || 'single-elimination';
@@ -1482,13 +1499,14 @@ function honorsOf(playerId, limit = 20) {
     if (place === 1) stats.titles++;
     else if (place === 2) stats.runnerUps++;
     else if (place === 3) stats.top4++;
-    if (!place) continue; // 拿到参赛次数但没有名次 → 不进荣誉明细
-
+    // ⚠️ 明细**列出每一个打完的赛事**（含没有名次的）：2026-09-20 用户要求"只写已参加的赛事即可"。
+    // 早先 `if (!place) continue` 会把"参加了但没进前四"的赛事整条丢掉——
+    // 于是打满 5 场只显示 1 条，看着像数据丢了。没名次就标「参赛」。
     items.push({
       tournamentId: t.id,
       name: t.name,
       place,
-      placeLabel: PLACE_LABEL[place] || '',
+      placeLabel: PLACE_LABEL[place] || '参赛',
       size: t.size,
       format: t.format || 'single-elimination',
       formatLabel: FORMAT_LABELS[t.format || 'single-elimination'] || null,

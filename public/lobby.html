@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -41,6 +41,12 @@
             <option value="10+30">10 分钟 + 30 秒读秒</option>
             <option value="10sec">10 秒快棋</option>
           </select>
+        </div>
+        <!-- 手合割（駒落ち让子）：选项由服务端 `hello.handicaps` 下发，前端不抄那张表 -->
+        <div style="margin:0 0 14px;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">手合割（让子）</div>
+          <select class="select" id="roomHandicap" style="width:100%;"></select>
+          <div id="handicapHint" style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.7;"></div>
         </div>
         <!-- 私人房间（PLAN §T2）：休闲模式——不计 ELO，经验值照常加 -->
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:8px;">
@@ -86,6 +92,7 @@
 
   <script src="js/settings.js"></script>
   <script src="js/util.js"></script>
+  <script src="js/i18n.js"></script>
   <script src="js/nav.js"></script>
   <script src="js/api.js"></script>
   <script src="js/hovercard.js"></script>

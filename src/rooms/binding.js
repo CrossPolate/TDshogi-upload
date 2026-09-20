@@ -120,7 +120,12 @@ module.exports = function applyBinding(X) {
         // 修复：原先 reconnect() 显式设置 p.clientId，bindToActiveGame() 也设置，
         //       但统一收敛到 _bindClient 后遗漏了 p.clientId，导致重连后收不到 state 推送
         room.players[seat].clientId = clientId;
+        // 重连回来（此前是掉线态）才播报；首次绑定不给聊天区插消息，否则开局就多一条废话
+        const wasDisconnected = room.players[seat].connected === false;
         room.players[seat].connected = true;
+        if (wasDisconnected && room.status === 'PLAYING') {
+          this._sysChat(room, `✅ ${room.players[seat].name || '对手'} 已回到对局`, 'player-return');
+        }
         // 重连成功：清除断线宽限计时器 + WAITING 销毁定时器
         this._clearDisconnectTimer(roomId, seat);
         this._clearWaitingTimer(roomId);
@@ -156,6 +161,15 @@ module.exports = function applyBinding(X) {
           // 对局中玩家断线：启动宽限期计时，超时未重连则判负
           if (room.status === 'PLAYING' && !room.game.isGameOver()) {
             this._scheduleDisconnectLoss(room.id, seat.seat);
+            // 聊天区留痕（2026-09-20 用户要求）：玩家栏上的「⚠️ 断线」是**瞬时**提示，
+            // 低头看棋盘的对手会错过；聊天区能回看，也顺带让观战者知道发生了什么。
+            // ⚠️ 名字只能从 `room.players[seat].name` 取：走到这里 registry 已经删了
+            //（§R3 的观众播报就踩过这个，所以那段注释专门写了"必须在这张表里先记下名字"）。
+            this._sysChat(
+              room,
+              `⚠️ ${room.players[seat.seat].name || '对手'} 已离开页面（掉线），等待重连…`,
+              'player-leave'
+            );
             // 立即推送状态（players.connected=false），让对手实时看到「对手断线」
             this._pushState(room);
           }

@@ -23,6 +23,27 @@ function genId() {
 }
 
 /**
+ * 预设头像白名单（2026-09-20 用户要求）。
+ *
+ * ⚠️ 存的是**字形本身**而不是 id：这样就**没有第二张"id → 字形"映射表**，
+ * 前后端只剩这一份白名单——服务端按它校验、前端直接渲染。
+ * （若存 id，前端就得抄一份同样的表，新增头像时必然出现"服务端认、前端画不出"。）
+ *
+ * 只存会话文件、不上传任何文件：游客也能用（平台默认就是游客开下，
+ * 头像不该反过来要求注册）。
+ */
+const AVATARS = [
+  '🐯', '🐰', '🦊', '🐼', '🐨', '🐸', '🐵', '🦁',
+  '🐮', '🐷', '🐙', '🦉', '🐧', '🐢', '🐲', '🦅',
+];
+
+/** 未选过头像时按 id **稳定**派生一个：同一玩家每次进来看见的一样，而不是每次随机闪 */
+function deriveAvatar(id) {
+  const tail = parseInt(String(id).slice(-4), 16);
+  return AVATARS[(Number.isFinite(tail) ? tail : 0) % AVATARS.length];
+}
+
+/**
  * 解析 / 校验游客身份，返回会话对象（不存在则创建）。
  * @param {string|null} guestId 客户端携带的游客 id
  * @param {{ip?:string|null, ua?:string|null}} meta 客户端网络信息（PLAN §K2）：
@@ -52,6 +73,8 @@ function identify(guestId, meta = {}) {
   session.name = typeof session.name === 'string' && session.name.trim()
     ? session.name.slice(0, 16)
     : '无名棋士';
+  // 头像兜底：白名单外的值（老数据 / 手改）一律回落成派生值，避免前端渲染出奇怪的东西
+  if (!AVATARS.includes(session.avatar)) session.avatar = deriveAvatar(id);
   session.lastSeen = Date.now();
 
   // 封禁懒解封：有期限且已到期 → 自动解除（PLAN §K3）
@@ -108,10 +131,28 @@ function rename(guestId, name) {
 }
 
 /**
+ * 修改头像（白名单校验）。
+ *
+ * 与 `rename` 同款：走**会话文件**而非账号表 —— 游客也能设头像，
+ * 不必为了换个头像去注册账号（平台默认就是游客开下）。
+ *
+ * @param {string} guestId
+ * @param {string} avatar 必须是 `AVATARS` 里的字形
+ * @returns {{ok: boolean, avatar?: string, error?: string}}
+ */
+function setAvatar(guestId, avatar) {
+  const session = identify(guestId);
+  if (!AVATARS.includes(avatar)) return { ok: false, error: '头像不在可选范围内' };
+  session.avatar = avatar;
+  writeJson(`sessions/${session.id}.json`, session);
+  return { ok: true, avatar };
+}
+
+/**
  * 统一的玩家信息对外形状（不含内部字段）。
  */
 function publicInfo(session) {
-  return { id: session.id, name: session.name };
+  return { id: session.id, name: session.name, avatar: session.avatar || null };
 }
 
 /**
@@ -223,6 +264,7 @@ function adminDeleteSession(playerId) {
 
 module.exports = {
   identify, load, rename, publicInfo, genId, listSessions,
+  AVATARS, setAvatar, // 头像（2026-09-20）：白名单只此一份，前端直接渲染字形
   upsertSession, getSessionRaw, saveSession, // §M4：会话的唯一来源是 kv，迁移也走这两个
   adminRename, banPlayer, unbanPlayer, adminSetTitle, adminDeleteSession,
 };

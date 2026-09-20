@@ -103,6 +103,8 @@
       : (opp ? playerMeta(opp) : '');
     $('topPlayerBar').classList.toggle('disconnected', !!oppDisconnected);
     $('topPlayerBar').classList.toggle('active', st.turn === oppSeat && !oppDisconnected);
+    // 头像（2026-09-20）：来自 state.players[].avatar（服务端按 playerId 查会话）
+    $('topAvatar').textContent = window.UI.avatarGlyph(opp && opp.avatar, (opp && opp.name) || '');
 
     // 下方（自己）玩家栏：名字优先显示自己账号名（localStorage），对手用服务端名
     const me = players[mySeatX];
@@ -111,6 +113,9 @@
     $('bottomName').setAttribute('data-player-id', (me && me.id) || '');
     $('bottomRating').textContent = me ? playerMeta(me) : '';
     $('bottomPlayerBar').classList.toggle('active', st.turn === mySeatX);
+    // 自己的头像以服务端为准（换了头像 → 服务端推新 state），拿不到再退回本地记录
+    $('bottomAvatar').textContent = window.UI.avatarGlyph(
+      (me && me.avatar) || (guest && guest.avatar), myName);
   }
 
   /**
@@ -138,6 +143,11 @@
     const tcName = TIME_CONTROLS[state.timeControl] ? TIME_CONTROLS[state.timeControl].name : '';
     $('roomCodeLabel').textContent = state.code ? `房间 ${state.code}` : '对局';
     if (tcName) $('roomCodeLabel').textContent += ` · ${tcName}`;
+    // 駒落ち（让子）：**必须显眼**——让子局的先手是"上手"（少棋子的那一方，即房主），
+    // 与平手局相反；不提示的话，玩家会以为"对手凭什么先走"或盘面少了棋子是程序出错。
+    if (state.handicapLabel) {
+      $('roomCodeLabel').textContent += ` · ${state.handicapLabel}（上手先手 · 不计 ELO）`;
+    }
 
     // 观战标识
     const spectator = !isPlayer;
@@ -154,6 +164,13 @@
       if (canDecl) {
         declareBtn.title = `入玉宣言（当前 ${d.points} 点 · 敌阵内 ${d.count} 枚）→ 宣言方获胜`;
       }
+    }
+    // 举报（2026-09-20）：观战者没有"对手"，不给按钮；对局者任何时候都能举报
+    //（对局结束后仍可能要举报——比如对面半路挂机/辱骂）
+    const reportBtn = $('btnReport');
+    if (reportBtn) {
+      reportBtn.style.display = spectator ? 'none' : 'inline';
+      if (spectator) $('reportPanel').style.display = 'none';
     }
     // §R1：视角切换按钮仅观战者可见，文字反映当前视角
     const vpBtn = $('btnViewpoint');
@@ -396,6 +413,63 @@
       api.send({ type: 'declare_nyugyoku' });
     });
   }
+  // ==================================================================
+  // 举报（2026-09-20 用户要求）
+  //
+  // ⚠️ 类别清单来自服务端（`hello.reportCategories`，源头是 `src/reports.js` 的 `CATEGORIES`），
+  // 前端**不另抄一份**——抄了就会出现"前端能选、服务端不认"或反之。
+  // ⚠️ 被举报人取**对面座位**的 id，而不是"当前视角那个人"写死成先手/后手；
+  // 视角可翻转，取错就会举报到自己。
+  // ⚠️ 服务端还会做去重与配额（同一目标 30 分钟内只收一条），这里只负责发起。
+  // ==================================================================
+  function reportTarget() {
+    if (!state || !state.players) return null;
+    // ⚠️ 用 `currentViewpoint()` 而不是直接读 `viewpoint`——后者只是各渲染函数里的**局部**常量，
+    // 在模块作用域读会直接 ReferenceError（本文件里 91/139/306 行都是各自声明的）。
+    const oppSeat = currentViewpoint() === 'b' ? 'w' : 'b';
+    const opp = state.players[oppSeat];
+    return opp && opp.id ? opp : null;
+  }
+
+  function renderReportCategories(list) {
+    const sel = $('reportCategory');
+    if (!sel || !list || !list.length || sel.options.length) return; // 幂等：已填过就不再填
+    sel.innerHTML = list.map((c) => `<option value="${window.UI.esc(c.id)}">${window.UI.esc(c.label)}</option>`).join('');
+  }
+
+  api.on('hello', (d) => { if (d) renderReportCategories(d.reportCategories); });
+
+  if ($('btnReport')) {
+    $('btnReport').addEventListener('click', () => {
+      const p = $('reportPanel');
+      const show = p.style.display === 'none';
+      p.style.display = show ? '' : 'none';
+      // 按钮在顶部交互栏、表单在右侧「操作」卡里（2026-09-20 移动）——
+      // 不滚过去的话，点完看着像"没反应"（尤其手机窄屏，表单在屏幕外）
+      if (show) { try { p.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (_) {} }
+    });
+    $('btnReportCancel').addEventListener('click', () => { $('reportPanel').style.display = 'none'; });
+    $('btnReportSubmit').addEventListener('click', () => {
+      const t = reportTarget();
+      if (!t) return toast('找不到可举报的对手');
+      api.send({
+        type: 'report',
+        data: {
+          targetId: t.id,
+          targetName: t.name,
+          category: $('reportCategory').value,
+          detail: $('reportDetail').value,
+          context: { roomId: (state && state.roomId) || null },
+        },
+      });
+    });
+    api.on('reported', () => {
+      toast('举报已提交，管理员会尽快处理');
+      $('reportPanel').style.display = 'none';
+      $('reportDetail').value = '';
+    });
+  }
+
   $('btnRematch').addEventListener('click', () => {
     api.send({ type: 'rematch' });
   });

@@ -40,7 +40,10 @@
   function toast(msg) {
     const el = document.getElementById('toast');
     if (!el) return;
-    el.textContent = msg;
+    // 多语言（PLAN §Z5）：这里是**所有提示的必经之路**（含服务端下发的错误文案），
+    // 所以词典里补一条就能翻一条，不必去改服务端。
+    // ⚠️ 带变量的句子（如「已批准 3 人」）查不到整句，需要在调用点用 `t('已批准 {n} 人', {n})`。
+    el.textContent = window.I18N ? window.I18N.t(msg) : msg;
     el.classList.add('show');
     setTimeout(() => el.classList.remove('show'), 2500);
   }
@@ -294,6 +297,36 @@
     return `<div class="bracket">${cols}</div>`;
   }
 
+  // ==================================================================
+  // 头像（2026-09-20）
+  // ==================================================================
+  /**
+   * 取要显示的头像字形。
+   *
+   * ⚠️ 服务端**存与传的就是字形本身**（见 `src/auth.js` 的 `AVATARS`），
+   * 所以这里没有"id → 字形"的映射表 —— 白名单只有服务端那一份，
+   * 前端直接渲染，不存在"两边表不同步"的问题。
+   * 兜底：拿不到头像时用名字首字（与旧的 `.profile-avatar` 行为一致）。
+   */
+  function avatarGlyph(avatar, name) {
+    if (avatar) return String(avatar);
+    const n = String(name == null ? '' : name).trim();
+    return n ? n[0] : '棋';
+  }
+
+  /**
+   * 头像圆标（行内元素）。**各页面共用这一份** ——
+   * 导航、玩家栏、聊天、观众列表各写一遍的话，迟早出现"圆的方的、大小不一"。
+   *
+   * @param {{avatar?:string|null, name?:string, size?:number}} o
+   */
+  function avatarHtml(o) {
+    const opts = o || {};
+    const size = opts.size || 28;
+    return `<span class="avatar" style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.55)}px;"`
+      + ` title="${esc(opts.name || '')}">${esc(avatarGlyph(opts.avatar, opts.name))}</span>`;
+  }
+
   global.debugLog = debugLog;
-  global.UI = { $, esc, toast, debugLog, resultText, paginate, bracketHtml };
+  global.UI = { $, esc, toast, debugLog, resultText, paginate, bracketHtml, avatarGlyph, avatarHtml };
 })(window);

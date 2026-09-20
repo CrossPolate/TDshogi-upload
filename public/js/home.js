@@ -62,7 +62,7 @@
       <div class="announce-card">
         <div class="announce-title">${esc(a.title)}</div>
         <div class="announce-content">${esc(a.content)}</div>
-        <div class="announce-date">${new Date(a.createdAt).toLocaleDateString('zh-CN')}</div>
+        <div class="announce-date">${I18N.fmtDate(a.createdAt)}</div>
       </div>
     `).join('');
   }
@@ -117,7 +117,7 @@
             ${r.rated ? '<span style="font-size:11px;color:var(--gold-light);">ELO 战</span>' : ''}
           </div>
           <div class="r-result result-win">${esc(resText)}</div>
-          <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${r.moveCount} 手 · ${new Date(r.createdAt).toLocaleString('zh-CN')} · 点击复盘 →</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${r.moveCount} 手 · ${I18N.fmt(r.createdAt)} · 点击复盘 →</div>
         </div>
       `;
     }).join('');

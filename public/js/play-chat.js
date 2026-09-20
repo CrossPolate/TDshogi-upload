@@ -68,6 +68,13 @@
     // §R2：玩家金色 / 观战者冷蓝 / 系统暗色斜体（配色见 style.css）
     const kind = msg.sys ? 'sys' : (msg.role === 'spectator' ? 'spectator' : 'player');
     row.className = `chat-msg ${kind}`;
+    // 头像（2026-09-20）：系统消息没有发言者，不画占位圆
+    if (!msg.sys) {
+      const av = document.createElement('span');
+      av.className = 'chat-avatar';
+      av.textContent = window.UI.avatarGlyph(msg.avatar, msg.name);
+      row.appendChild(av);
+    }
     const who = document.createElement('span');
     who.className = 'who';
     who.textContent = msg.name || '';
@@ -101,6 +108,37 @@
     chatInput.value = '';
   }
 
+  /**
+   * 快捷语（2026-09-20 用户要求）：高频寒暄点一下直接发，省去对局中打字。
+   *
+   * ⚠️ 只列**通用礼貌语**：这是"一键发出、没有二次确认"的通道，
+   * 任何可能引战或被误读的措辞放进来都会直接变成事故（对局中打字本来就慢，误点更刺眼）。
+   * 发送仍走同一条 `chat` 通道，**受服务端 2 秒节流约束**——连点第二下会被拒并提示。
+   */
+  const QUICK_PHRASES = [
+    '你好，请多指教',
+    '好棋！',
+    '稍等我一下',
+    '这手厉害',
+    '谢谢指教',
+    '再来一局？',
+  ];
+
+  /** 渲染快捷语胶囊（幂等：`init()` 可能被重复调用） */
+  function renderQuick() {
+    const box = $('chatQuick');
+    if (!box || box.dataset.ready === '1') return;
+    box.dataset.ready = '1';
+    QUICK_PHRASES.forEach((text) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chat-quick-btn';
+      b.textContent = text;
+      b.addEventListener('click', () => api.send({ type: 'chat', data: { text } }));
+      box.appendChild(b);
+    });
+  }
+
   /** 注册 DOM 交互与 WS 事件（**幂等**：重复调用不会重复绑定/重复收消息） */
   let inited = false;
   function init() {
@@ -109,6 +147,7 @@
 
     if ($('btnChatSend')) $('btnChatSend').addEventListener('click', sendChat);
     if (chatInput) chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+    renderQuick(); // 快捷语胶囊
 
     // §R2 分区切换
     if ($('chatTabs')) {
@@ -135,6 +174,9 @@
         role: data.role || 'player',
         sys: !!data.sys,
         kind: data.kind || null,
+        // ⚠️ 头像要一起存进 chatLog：切换分区会整段重绘（renderChat），
+        // 不存就只有"刚收到的那条"有头像，一切 tab 就没了。
+        avatar: data.avatar || null,
       });
     });
 

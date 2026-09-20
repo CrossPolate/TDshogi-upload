@@ -36,6 +36,8 @@ const C2S = {
   RANDOM_SPECTATE: 'random_spectate',
   LEAVE: 'leave',
   RENAME: 'rename',
+  SET_AVATAR: 'set_avatar', // 2026-09-20：换头像（游客与账号都能用）
+  REPORT: 'report',         // 2026-09-20：举报玩家
   REQUEST_STATE: 'request_state',
   CHAT: 'chat',
   ADMIN_LOGIN: 'admin_login',
@@ -85,6 +87,10 @@ const RULES = {
   [C2S.MOVE]: needString('usi', 'USI 走法，如 7g7f'),
   [C2S.CHAT]: needString('text', '聊天内容'),
   [C2S.RENAME]: needString('name', '新名字'),
+  // 头像：必填且必须是白名单里的字形（白名单校验在 `auth.setAvatar`，这里只挡"没传")
+  [C2S.SET_AVATAR]: needString('avatar', '头像'),
+  // 举报：只挡"没传被举报人"；类别合法性、去重与配额都在 `reports.submit` 里判
+  [C2S.REPORT]: needString('targetId', '被举报人 id'),
   [C2S.ADMIN_LOGIN]: needString('password', '管理密码'),
   [C2S.JOIN_ROOM]: needString('code', '6 位房间码'),
   [C2S.JOIN_TOURNAMENT]: needString('id', '赛事 id'),

@@ -53,6 +53,9 @@ class RoomManager {
     this.spectatorNames = new Map();
     // §R5：称号缓存（playerId -> { title, at }）。见 `_playerTitle()` 的说明。
     this._titleCache = new Map();
+    // 头像缓存（playerId -> { avatar, at }）。与称号同因：`auth.load()` 是同步读磁盘，
+    // 而玩家栏每次走子都要拿对手头像 —— 不缓存就是把 I/O 塞进对局主循环。
+    this._avatarCache = new Map();
     this._clockTimers = new Map();  // roomId -> interval
     this._disconnectTimers = new Map(); // roomId -> Map<seat, timer>（断线宽限期）
     // 对局快照定时器（进行中对局定期落盘，重启可恢复）

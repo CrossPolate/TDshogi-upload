@@ -114,16 +114,20 @@ module.exports = function applyGameplay(X) {
       const seat = this.clientToPlayer.get(clientId);
       let name = '观众';
       let role = 'spectator';
+      let speakerId = null;
       if (seat && room.players[seat.seat]) {
         name = room.players[seat.seat].name;
+        speakerId = room.players[seat.seat].playerId || null;
         role = seat.seat === 'b' ? 'player-b' : 'player-w';
       } else {
         const info = this.playerRegistry ? this.playerRegistry(clientId) : null;
         if (info && info.name) name = info.name;
+        if (info) speakerId = info.playerId || null;
       }
       this._broadcast(roomId, {
         type: 'chat',
-        data: { name, text: msg, ts: now, role },
+        // 头像（2026-09-20）：聊天行上显示发言者头像，靠 playerId 查（不是靠名字）
+        data: { name, text: msg, ts: now, role, avatar: this._playerAvatar(speakerId) },
       });
       return { ok: true };
     },
@@ -179,7 +183,10 @@ module.exports = function applyGameplay(X) {
       // 写在落盘路径上，将来新增的建房入口也不会漏掉这条规则。
       const tournamentId = room.tournamentId || null;
       const record = saveRecord({
+        // 让子局：初始局面已包含"上手少掉的棋子"，棋谱据此才能正确重放与导出
         startSfen: game.startSfen,
+        handicap: room.handicap || null,
+        handicapLabel: room.handicapLabel || null,
         moves: game.moves,
         moveTimes: room.moveTimes || [],
         timeControl: room.timeControl,
@@ -189,6 +196,10 @@ module.exports = function applyGameplay(X) {
         playerIds: { b: b ? b.playerId : null, w: w ? w.playerId : null },
         winnerId,
         durationSec: Math.round((Date.now() - room.createdAt) / 1000),
+        // 棋谱上的「是否计入评分」要与房间实际一致：私人房、让子局都不计 ELO。
+        // ⚠️ 此前没传，`saveRecord` 里 `data.rated !== false` 于是恒为 true ——
+        // 棋谱列表会把这些对局标成"计入评分"，与事实不符。
+        rated: room.rated !== false,
         tournamentId,
         visibility: tournamentId ? 'public' : undefined,
       });
@@ -222,8 +233,10 @@ module.exports = function applyGameplay(X) {
       const already = !!room.rematchVotes[seat.seat];
       room.rematchVotes[seat.seat] = true;
       if (room.rematchVotes.b && room.rematchVotes.w) {
-        // 双方同意，重置对局
-        room.game = newGame();
+        // 双方同意，重置对局。
+        // ⚠️ 必须用**本房间的初始局面**重建，不能 `newGame()` 了事：让子局一旦被重置成平手局，
+        //    "再来一局"就会悄悄变成另一盘棋（上手突然多了 2~10 枚棋子，而双方都没察觉）。
+        room.game = newGame(room.game.startSfen);
         room.status = 'PLAYING';
         room.result = null;
         room.resultDetail = null;
@@ -290,6 +303,9 @@ module.exports = function applyGameplay(X) {
       // 对局中离开 → 判「离开座位」负（而不是当前手番方）
       // 修复：原 resultDetail 写「投了」误导对手；中途退出/断线超时应提示「接続切断」
       if (room.status === 'PLAYING' && !room.game.isGameOver()) {
+        // 聊天区留痕（2026-09-20）：与「掉线等待重连」区分——主动退出是**立即判负**，
+        // 对手看到的消息必须说清是哪一种，否则会以为还有 60 秒宽限。
+        this._sysChat(room, `🚪 ${(room.players[seat.seat] || {}).name || '对手'} 退出了对局（判负）`, 'player-exit');
         room.game.result = seat.seat === 'b' ? 'w' : 'b';
         room.game.resultDetail = '接続切断';
         this._checkGameOver(room);

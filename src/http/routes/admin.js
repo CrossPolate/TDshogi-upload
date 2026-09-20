@@ -22,6 +22,7 @@ const rateLimit = require('../../ratelimit');
 const ipban = require('../../ipban');
 const net = require('../../net');
 const announcements = require('../../announcements');
+const reports = require('../../reports');
 const { adminOnly, adminWrite, tournamentAction } = require('../middleware');
 const { protocol } = require('../context');
 
@@ -183,6 +184,25 @@ module.exports = function registerAdmin(app) {
       ok: r.ok, error: r.error, action: 'tournament.edit',
       audit: { field: body.field, from: null, to: body.value == null ? null : String(body.value).slice(0, 80) },
       tournament: r.tournament,
+    };
+  }));
+
+  // ---------- 举报（2026-09-20 用户要求）----------
+  // 提交走 WS（对局页点按钮），查询与处理只在管理端。
+  app.get('/api/admin/reports', rateLimit.expressMiddleware(rateLimit.heavy), adminOnly, (req, res) => {
+    res.json({
+      reports: reports.list(req.query.status || ''),
+      pending: reports.pendingCount(),
+      categories: reports.CATEGORIES,
+    });
+  });
+
+  app.post('/api/admin/reports/:id', adminWrite((req, body) => {
+    const r = reports.decide(req.params.id, body && body.status, body && body.note, 'admin');
+    return {
+      ok: r.ok, error: r.error, action: 'report.decide',
+      audit: { id: req.params.id, status: body && body.status },
+      report: r.report,
     };
   }));
 

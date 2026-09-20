@@ -461,6 +461,20 @@ a { color: inherit; text-decoration: none; }
   border: 1px solid rgba(255, 255, 255, 0.05);
   transition: all 0.2s;
 }
+/* 玩家栏头像（2026-09-20）：字形由前端从 state.players[].avatar 填（play.js） */
+.player-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  font-size: 21px;
+  line-height: 1;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
 .player-bar.active {
   border-color: var(--gold);
   box-shadow: 0 0 0 2px rgba(201, 162, 39, 0.2);
@@ -562,6 +576,22 @@ a { color: inherit; text-decoration: none; }
   border: 1px solid rgba(255,255,255,0.06);
 }
 .chat-msg { display: flex; gap: 6px; line-height: 1.5; }
+/* 聊天行头像（2026-09-20）：`align-self: flex-start` 让多行消息时头像贴顶，
+   不去改 `.chat-msg` 的 align-items（那会连带改变既有排版） */
+.chat-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1;
+  border-radius: 50%;
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
 .chat-msg .who { color: var(--gold-light); font-weight: 700; flex-shrink: 0; }
 .chat-msg .text { color: var(--text); word-break: break-all; }
 .chat-msg.sys .text { color: var(--text-dim); font-style: italic; }
@@ -589,6 +619,57 @@ a { color: inherit; text-decoration: none; }
   color: var(--gold-light);
   border-color: rgba(201, 162, 39, 0.45);
   background: rgba(201, 162, 39, 0.10);
+}
+
+/* 头像圆标（2026-09-20）：服务端下发字形，渲染统一走 UI.avatarHtml() */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--bg-2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  line-height: 1;
+  user-select: none;
+}
+
+/* 头像选择器里的单个候选（个人页，2026-09-20） */
+.avatar-pick {
+  width: 40px;
+  height: 40px;
+  font-size: 20px;
+  line-height: 1;
+  border-radius: 50%;
+  background: var(--bg-2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: border-color .15s, transform .1s;
+}
+.avatar-pick:hover { border-color: rgba(201, 162, 39, 0.5); transform: scale(1.06); }
+.avatar-pick-on { border-color: var(--gold); box-shadow: 0 0 0 2px rgba(201, 162, 39, 0.25); }
+
+/* 快捷语（2026-09-20）：小胶囊，点一下直接发（列表见 js/play-chat.js 的 QUICK_PHRASES） */
+.chat-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.chat-quick-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.chat-quick-btn:hover {
+  color: var(--gold-light);
+  border-color: rgba(201, 162, 39, 0.45);
 }
 
 /* 升变弹层 */

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -17,10 +17,14 @@
         <div class="section-title" style="margin-bottom:6px;">棋手赛事</div>
         <div style="font-size:13px;color:var(--text-dim);">单败淘汰 / 瑞士制 · 报名满员自动开赛 · 赛事对局不计 ELO</div>
       </div>
-      <!-- 「我的赛事」紧挨创建按钮（2026-09-13 用户要求）：我的赛事 = 我主办的 + 我参赛/报名的 -->
-      <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <button class="btn btn-ghost btn-lg" id="btnMyTournaments">📋 我的赛事</button>
-        <button class="btn btn-primary btn-lg" id="btnCreateTournament">🏆 我要创建赛事</button>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
+        <!-- 「我的赛事」紧挨创建按钮（2026-09-13 用户要求）：我的赛事 = 我主办的 + 我参赛/报名的 -->
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-lg" id="btnMyTournaments">📋 我的赛事</button>
+          <button class="btn btn-primary btn-lg" id="btnCreateTournament">🏆 我要创建赛事</button>
+        </div>
+        <!-- 等级特权提示（2026-09-20）：等级不足时禁用创建按钮并说明差多少 -->
+        <div id="createLevelHint" style="font-size:12px;color:var(--gold-light);display:none;max-width:320px;text-align:right;line-height:1.6;"></div>
       </div>
     </div>
 
@@ -143,6 +147,7 @@
 
   <script src="js/settings.js"></script>
   <script src="js/util.js"></script>
+  <script src="js/i18n.js"></script>
   <script src="js/nav.js"></script>
   <script src="js/api.js"></script>
   <script src="js/hovercard.js"></script>

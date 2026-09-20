@@ -147,14 +147,20 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 
 连接：`ws://<host>/ws?guest=<guestId|accountToken>`
 
-客户端消息：`create_room` `join_room {code}` `quick_match` `cancel_match` `move {usi}` `resign`
-`rematch` `leave` `chat {text}` `rename {name}` `spectate {roomId}` `random_spectate`
+客户端消息：`create_room {timeControl?,isPrivate?,password?,handicap?}` `join_room {code}` `quick_match`
+`cancel_match` `move {usi}` `resign`
+`rematch` `leave` `chat {text}` `rename {name}` `set_avatar {avatar}` `report {targetId,category,detail?}`
+`spectate {roomId}` `random_spectate`
 `join_tournament_match` `create_tournament` `join_tournament` `admin_login {password}`
 `request_state {roomId?}`；终局后 `demo_move {usi,index}` `demo_undo` `demo_claim` `demo_transfer`
 `demo_reset` `demo_legal {index}` `demo_enter`。
 
+⚠️ 新增客户端消息**必须同步 `src/messages.js` 的 `C2S`**：`tests/messages.test.js` 会比对
+`protocol.js` 的 `case` 列表与 `C2S` 是否一致（这次加 `set_avatar` / `report` 就靠它拦住过一次）。
+
 服务端消息：`hello` `matched` `room_created` `room_joined` `game_start` `state` `clock` `move_invalid`
-`game_over` `elo_updated` `spectator_update` `chat` `tournament_update` `renamed` `spectating`
+`game_over` `elo_updated` `spectator_update` `chat` `tournament_update` `renamed` `avatar_updated`
+`reported` `spectating`
 `demo_state` `demo_init` `admin_logged_in` `error`。
 
 ## 棋谱格式
@@ -191,12 +197,17 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 ## 开发与测试
 
 - **单元测试**：`npm test`（`tests/*.test.js`，Node 内置 `node --test`，纯函数不需起服）。
-  当前 **202 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、初始盘面、
-  `game.js` 规则引擎、赛事状态机与权限、瑞士制配对与积分、棋钟、限流、隐私脱敏等
+  当前 **238 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、初始盘面、
+  （含駒落ち让子各手合割的 SFEN 生成）、`game.js` 规则引擎、赛事状态机与权限、瑞士制配对与积分、
+  等级特权、举报、多语言词典自检、棋钟、限流、隐私脱敏等
 - **静态检查**：`npm run lint`（eslint；`no-undef` 正是"路由层漏 require 导致接口 500"那类事故的克星）
+- **多语言**：`npm run i18n` 报告**还有哪些界面文案没有词条**（`--locale=ja` 看日语，
+  `--js` 连提示语一起报）。词典在 `public/js/i18n.js`，**以中文原文为键**；
+  导航右上角的 `中/EN/JA` 按钮点一下轮换一种语言。
+  当前 **en 与 ja 面向玩家的页面都已 100% 覆盖**（`admin.html` 刻意不翻），见 `docs/PLAN.md` §Z5 / §Z7
 - **CI**：`.github/workflows/ci.yml`（语法检查 + lint + 单测 + e2e 冒烟）
 - **e2e 回归**：`npm run e2e` —— **自动起隔离实例**（临时 `DATA_DIR` + `ADMIN_PASSWORD=admin123`）
-  后跑完整套，**13 个脚本 / 173 项断言**，末尾汇总并停服。
+  后跑完整套，**15 个脚本 / 227 项断言**，末尾汇总并停服。
   ⚠️ 其中 2 个脚本**自带服务器**（`e2e-snapshot.js` 重启进程验快照、`e2e-freeboard.js` 起 demo 服），
   会与本实例抢端口，需单独跑。
   ⚠️ 别手搓"先起服再 `node scripts/e2e-xxx.js`"：**漏掉 `ADMIN_PASSWORD` 就会卡在

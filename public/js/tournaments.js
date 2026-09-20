@@ -67,6 +67,46 @@
     if (e.target === modalEl) modalEl.style.display = 'none';
   });
 
+  // ==================================================================
+  // 等级特权（2026-09-20 用户要求：等级 5 才能举办赛事）
+  //
+  // ⚠️ 门槛数值**不在前端写死**：服务端随 hello 下发
+  // `privileges.create_tournament = { need, ok }`（由 `LEVEL_PRIVILEGES` 表推导）。
+  // 前端抄一份，改门槛时就会出现"服务端放行了但按钮还是灰的"。
+  // ⚠️ 这一层只是"别让用户点一个必然失败的按钮"；**真正的拦截在服务端**
+  // （`tournaments.createTournament` 里的 `ratings.hasPrivilege`）——绕过前端照样建不了赛。
+  // ==================================================================
+  const btnCreate = document.getElementById('btnCreateTournament');
+  const createHint = document.getElementById('createLevelHint');
+  const isAccount = !!guest.id && String(guest.id).includes('.');
+
+  function applyCreatePrivilege(priv, level) {
+    // 游客真正的阻碍是"没登录"——按等级提示反而误导，让点击时给登录引导
+    if (!isAccount || !priv) {
+      btnCreate.disabled = false;
+      btnCreate.title = '';
+      createHint.style.display = 'none';
+      return;
+    }
+    if (priv.ok) {
+      btnCreate.disabled = false;
+      btnCreate.title = '';
+      createHint.style.display = 'none';
+      return;
+    }
+    btnCreate.disabled = true;
+    btnCreate.title = `需要 Lv.${priv.need}`;
+    createHint.style.display = '';
+    createHint.textContent =
+      `🏆 举办赛事需要 Lv.${priv.need}（你当前 Lv.${level == null ? 0 : level}）—— 多下几局攒经验即可解锁。`;
+  }
+
+  api.on('hello', (d) => {
+    if (d && d.privileges) applyCreatePrivilege(d.privileges.create_tournament, d.level);
+  });
+  // hello 可能已经先到了（connect() 在本行之前调用），补判一次
+  if (api.privileges) applyCreatePrivilege(api.privileges.create_tournament, api.level);
+
   /** `datetime-local` 的值 → 时间戳；留空 → null（视为"不限"） */
   function tsOf(id) {
     const v = document.getElementById(id).value;
@@ -257,7 +297,7 @@
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:12px;color:var(--gold-light);">${champ}</span>
           ${joinAreaOf(t)}
-          <a class="btn btn-ghost btn-sm" href="tournament.html?id=${encodeURIComponent(t.id)}">详情</a>
+          <a class="btn btn-ghost btn-sm" href="tournament.html?id=${encodeURIComponent(t.id)}">查看详情 →</a>
         </div>
       </div>`;
   }
@@ -333,7 +373,7 @@
   //（`tournament.html` → `js/tournament.js` 的管理面板）。
   // 这里曾经也有一份 `ownerPanelOf()`：列表页每张卡片都挂一套审批按钮，
   // 于是"办赛管理"散落在两个页面，改一处忘一处，用户也说不清该去哪儿操作。
-  // 列表页现在只负责"看"——要管理就点「查看详情 / 管理 →」。
+  // 列表页现在只负责"看"——要管理就点「查看详情 →」进详情页（管理面板在那里）。
 
   function renderCard(t) {
     const entrants = t.entrants || [];
@@ -358,7 +398,8 @@
         </div>
         ${t.championId ? `<div style="margin-top:12px;color:var(--gold-light);font-weight:700;">🏆 冠军：${esc(getName(t, t.championId))}${t.championManual ? '（人工裁定）' : ''}</div>` : ''}
         <div style="margin-top:10px;">
-          <a class="btn btn-ghost btn-sm" href="tournament.html?id=${encodeURIComponent(t.id)}">查看详情 / 管理 →</a>
+          <!-- 用户 2026-09-20：按钮只写「查看详情」即可（管理入口在详情页里，不必在这里提示） -->
+          <a class="btn btn-ghost btn-sm" href="tournament.html?id=${encodeURIComponent(t.id)}">查看详情 →</a>
         </div>
       </div>
     `;

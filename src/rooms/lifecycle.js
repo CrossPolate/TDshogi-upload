@@ -19,6 +19,7 @@
 'use strict';
 
 const { newGame } = require('../game');
+const handicap = require('../handicap'); // 駒落ち（让子）手合割表与初始局面生成
 const { genId } = require('../auth');
 const roomPassword = require('../room-password');
 const log = require('../logger');
@@ -30,8 +31,9 @@ module.exports = function applyLifecycle(X) {
      * 创建房间（host 作为先手或随机）。
      * @param {object} host { clientId, playerId, name }
      * @param {string} timeControlId 时间控制预设 id
-     * @param {{isPrivate?:boolean, password?:string}} [opts] 私人房间（PLAN §T2）：休闲模式 + 可选密码
-     * @returns {{ok:true, roomId, code, seat}|{ok:false, error}}
+     * @param {{isPrivate?:boolean, password?:string, handicap?:string}} [opts]
+     *        私人房间（PLAN §T2）：休闲模式 + 可选密码；`handicap` = 手合割 id（駒落ち让子）
+     * @returns {{ok:true, roomId, code, seat, handicap, handicapLabel}|{ok:false, error}}
      */
     createRoom(host, timeControlId, opts) {
       // 若在已结束的对局中则自动退出；对局中自动认输退出（用户确认，PLAN §H）
@@ -68,6 +70,10 @@ module.exports = function applyLifecycle(X) {
       }
       const tc = TIME_CONTROLS[timeControlId] || TIME_CONTROLS[DEFAULT_TIME_CONTROL];
       const o = opts || {};
+      // 让子（駒落ち）：`''`/`'even'` = 平手；**未知 id 必须拒绝** ——
+      // 静默当成平手会让建房者以为生效了，打完整局才发现对手用的是全部棋子。
+      const hd = handicap.normalize(o.handicap);
+      if (hd === false) return { ok: false, error: '未知的手合割' };
       // 私人房间（PLAN §T2）：休闲模式——**不计 ELO**（`_finalize` 只对 rated 房间结算）；
       // 经验值在 `_finalize` 里是**无条件**加的，所以「经验照常加」无需额外处理。
       const isPrivate = o.isPrivate === true;
@@ -80,7 +86,8 @@ module.exports = function applyLifecycle(X) {
       const room = {
         id: roomId,
         code,
-        game: newGame(),
+        // 让子局的初始局面由手合割生成（落掉上手的若干棋子）；平手用 `newGame()` 的默认局面
+        game: newGame(hd ? hd.startSfen : undefined),
         players: { b: null, w: null },
         status: 'WAITING',       // WAITING | PLAYING | FINISHED
         type: 'room',
@@ -92,13 +99,19 @@ module.exports = function applyLifecycle(X) {
         lastActiveAt: Date.now(),
         result: null,
         resultDetail: null,
-        rated: !isPrivate,       // §T2：私人房间不计 ELO
+        // 让子局一并计不计 ELO：段位差已经用"落子"补偿过了，再按平手口径结算评分没有意义
+        rated: !isPrivate && !hd,
         isPrivate,               // §T2：不进观战列表 / 不可观战 / 排除随机观战
         passwordHash: (isPrivate && password) ? roomPassword.hash(password) : null,
         tournamentId: null,
+        // 駒落ち（让子）：id + 显示名。没让子则为 null（前端据此不显示）
+        handicap: hd ? hd.id : null,
+        handicapLabel: hd ? hd.label : null,
       };
-      // host 随机执先手
-      const seat = Math.random() < 0.5 ? 'b' : 'w';
+      // 平手局：host 随机执先手。
+      // ⚠️ 让子局**固定为 `b`**（上手）：上手必须先行，而落子取自 `b` 的初形，
+      //    这两件事只有在"上手 = b"时才能同时成立（`handicap.js` 顶部有完整说明）。
+      const seat = hd ? 'b' : (Math.random() < 0.5 ? 'b' : 'w');
       room.players[seat] = {
         clientId: host.clientId,
         playerId: host.playerId,
@@ -108,7 +121,12 @@ module.exports = function applyLifecycle(X) {
       this.rooms.set(roomId, room);
       this.byCode.set(code, roomId);
       this._bindClient(host.clientId, roomId, seat);
-      return { ok: true, roomId, code, seat };
+      return {
+        ok: true, roomId, code, seat,
+        handicap: room.handicap,
+        handicapLabel: room.handicapLabel,
+        rated: room.rated,
+      };
     },
 
     /**
@@ -446,6 +464,47 @@ module.exports = function applyLifecycle(X) {
       if (this._titleCache.size > 1000) this._titleCache.clear();
       this._titleCache.set(playerId, { title, at: now });
       return title;
+    },
+
+    /**
+     * 头像变更后刷新（2026-09-20）：清缓存 + 按需重推 state。
+     *
+     * ⚠️ 必须**主动失效缓存**：`_playerAvatar` 带 30 秒 TTL，
+     * 不失效的话改完头像要等半分钟才在对局页生效——用户会以为"没保存上"再点一次。
+     */
+    refreshAvatar(playerId) {
+      if (!playerId) return;
+      this._avatarCache.delete(playerId);
+      // 该玩家若在某个房间里，重推一次，让对手与观战者立刻看到新头像
+      for (const room of this.rooms.values()) {
+        for (const seat of ['b', 'w']) {
+          const p = room.players[seat];
+          if (p && p.playerId === playerId) { this._pushState(room); return; }
+        }
+      }
+    },
+
+    /**
+     * 玩家头像（2026-09-20）。
+     *
+     * ⚠️ 与 `_playerTitle` 完全同款：同样要**缓存**——`auth.load()` 是同步读磁盘，
+     * 而本函数在 `_gameState()` 里每次走子都会调用（玩家栏要显示对手头像），
+     * 不缓存就等于把磁盘 I/O 塞进对局主循环。
+     */
+    _playerAvatar(playerId) {
+      if (!playerId) return null;
+      const TTL_MS = 30000;
+      const now = Date.now();
+      const cached = this._avatarCache.get(playerId);
+      if (cached && now - cached.at < TTL_MS) return cached.avatar;
+      let avatar = null;
+      try {
+        const sess = require('../auth').load(playerId);
+        avatar = (sess && sess.avatar) || null;
+      } catch (_) { avatar = null; }
+      if (this._avatarCache.size > 1000) this._avatarCache.clear();
+      this._avatarCache.set(playerId, { avatar, at: now });
+      return avatar;
     },
 
     /**

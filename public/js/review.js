@@ -197,7 +197,7 @@
     const extra = [(review.meta && review.meta.event) || '', (review.meta && review.meta.round) || ''].filter(Boolean).join(' ');
     document.getElementById('rvResult').textContent = [resultText(review), (review.meta && review.meta.resultNote) ? `（${review.meta.resultNote}）` : ''].filter(Boolean).join('');
     document.getElementById('rvMoves').textContent = `${review.moves.length} 手`;
-    document.getElementById('rvDate').textContent = [extra, new Date(review.createdAt).toLocaleString('zh-CN')].filter(Boolean).join(' · ');
+    document.getElementById('rvDate').textContent = [extra, I18N.fmt(review.createdAt)].filter(Boolean).join(' · ');
     document.title = title ? `${title} · 复盘 · TDShogi` : '复盘 · TDShogi';
     document.getElementById('rvCursor').textContent = `${cursor} / ${review.moves.length}`;
 

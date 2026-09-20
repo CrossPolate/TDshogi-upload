@@ -53,7 +53,7 @@
     return data;
   }
 
-  function render(data) {
+  function render(data, playerId) {
     const badge = data.isAccount ? '🔐 账号' : '👤 游客';
     const dots = (data.recent || []).map((r) =>
       r === 'win' ? '<span class="hc-dot win">●</span>'
@@ -64,8 +64,18 @@
     rows.push(`<div class="hc-row"><span class="hc-name">${esc(data.name)}${data.title ? `（${esc(data.title)}）` : ''}</span><span class="hc-badge">${badge}</span></div>`);
     rows.push(`<div class="hc-row stats"><span>Lv.${data.level ?? 0} · ELO <b>${data.rating}</b></span><span>${data.games} 局</span><span>胜率 <b>${data.winRate}%</b></span></div>`);
     if (data.style) rows.push(`<div class="hc-row"><span>⚔️ 棋风</span><span style="color:var(--gold-light);">${esc(data.style)}</span></div>`);
-    if (data.createdAt) rows.push(`<div class="hc-row"><span>📅 注册于</span><span>${new Date(data.createdAt).toLocaleDateString('zh-CN')}</span></div>`);
+    if (data.createdAt) rows.push(`<div class="hc-row"><span>📅 注册于</span><span>${I18N.fmtDate(data.createdAt)}</span></div>`);
     rows.push(`<div class="hc-row"><span>近 10 局</span><span class="hc-dots">${dots}</span></div>`);
+    // 个人页入口（2026-09-20 用户要求："其他人查看的个人页界面没有入口"）。
+    // ⚠️ 放在**这张卡片**里，全站凡是有 `data-player-id` 的地方就都有入口了 ——
+    // 比在每个页面各加一个链接省事得多，也不会漏掉某个列表。
+    // 卡片自身有 mouseenter 取消隐藏，所以移进去点得到（见 ensureEl）。
+    if (playerId) {
+      rows.push(`<div class="hc-row" style="margin-top:4px;justify-content:flex-end;">
+        <a href="profile.html?player=${encodeURIComponent(playerId)}"
+           style="color:var(--gold-light);font-size:12px;text-decoration:none;">👤 查看个人页 →</a>
+      </div>`);
+    }
     return rows.join('');
   }
 
@@ -105,7 +115,7 @@
       try {
         const data = await fetchCard(playerId);
         if (currentId !== playerId) return; // 已移开
-        card.innerHTML = render(data);
+        card.innerHTML = render(data, playerId);
         place(target);
       } catch (_) {
         hide(); // 未知玩家/网络失败静默

@@ -75,7 +75,7 @@
         <div class="record-item" onclick="location.href='review.html?id=${r.id}'">
           <div style="font-size:13px;">${esc(names[0])} vs ${esc(names[1])}</div>
           <div class="r-result ${myResult.cls}">${esc(myResult.text)}</div>
-          <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${r.moveCount || 0} 手 · ${new Date(r.createdAt).toLocaleString('zh-CN')} · ${opening} · 进入复盘 →</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${r.moveCount || 0} 手 · ${I18N.fmt(r.createdAt)} · ${opening} · 进入复盘 →</div>
         </div>
       `;
     }).join('');

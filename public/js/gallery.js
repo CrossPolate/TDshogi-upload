@@ -66,7 +66,7 @@
           ${title}
           <div style="font-size:14px;">${esc(names[0])} <span style="color:var(--text-dim);font-size:12px;">vs</span> ${esc(names[1])}</div>
           <div class="r-result ${r.result === 'b' || r.result === 'w' ? 'result-win' : 'result-draw'}">${esc(res)} <span style="color:var(--text-dim);font-size:12px;">（${r.moveCount} 手）</span></div>
-          <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${eventLine ? esc(eventLine) + ' · ' : ''}${new Date(r.createdAt).toLocaleDateString('zh-CN')}</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${eventLine ? esc(eventLine) + ' · ' : ''}${I18N.fmtDate(r.createdAt)}</div>
           ${desc}${tags}
         </div>
       `;

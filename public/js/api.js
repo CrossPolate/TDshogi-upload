@@ -44,6 +44,18 @@
         // 并把权威名字写回 localStorage/导航，解决客户端与服务端名字不一致的混乱
         if (msg.type === 'hello' && msg.data) {
           if (msg.data.playerId) this.playerId = msg.data.playerId;
+          // 等级与特权（2026-09-20）：服务端在 hello 里下发，各页面直接用，
+          // 避免每个页面各自再查一次 profile
+          if (msg.data.level != null) this.level = msg.data.level;
+          if (msg.data.privileges) this.privileges = msg.data.privileges;
+          // 手合割（駒落ち让子）：缓存下来供页面随时取用 —— `hello` 可能在本页注册
+          // `on('hello')` 之前就已到达，只靠监听器会拿到空列表（下拉框是空的）
+          if (msg.data.handicaps) this.handicaps = msg.data.handicaps;
+          // 头像与可选白名单（2026-09-20）：白名单由服务端下发，前端不另抄一份
+          if (msg.data.avatar && global.NAV && global.NAV.updateAvatar) {
+            try { global.NAV.updateAvatar(msg.data.avatar); } catch (_) {}
+          }
+          if (msg.data.avatars) this.avatars = msg.data.avatars;
           if (msg.data.name && global.NAV && global.NAV.updateUserName) {
             try { global.NAV.updateUserName(msg.data.name); } catch (_) {}
           }

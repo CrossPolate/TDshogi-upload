@@ -46,7 +46,7 @@
   // ——两套页码状态并存时，翻页行为会出现"这个列表记住了、那个列表没记住"的怪象（2026-09-14 归并）。
   const pages = {
     records: 1, users: 1, audit: 1, tournaments: 1,
-    tnPending: 1, tnActive: 1, tnHistory: 1, ipbans: 1, announcements: 1,
+    tnPending: 1, tnActive: 1, tnHistory: 1, ipbans: 1, announcements: 1, reports: 1,
   };
 
   /**
@@ -88,6 +88,7 @@
     else if (key === 'tournaments') loadTournaments();
     else if (key === 'ipbans') loadIpBans();
     else if (key === 'announcements') loadAnnouncements();
+    else if (key === 'reports') loadReports();
   };
 
   // 初始化：检测是否已登录
@@ -146,6 +147,7 @@
       else if (btn.dataset.tab === 'users') loadUsers();
       else if (btn.dataset.tab === 'tournaments') loadTournaments();
       else if (btn.dataset.tab === 'audit') loadAudit();
+      else if (btn.dataset.tab === 'reports') loadReports();
     });
   });
 
@@ -208,7 +210,7 @@
         <div class="record-item">
           <div style="font-size:13px;">${esc(names[0])} vs ${esc(names[1])} <span style="color:var(--text-dim);font-size:11px;">（${r.moveCount || 0}手）</span></div>
           <div class="r-result result-win">${esc(res)}</div>
-          <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${new Date(r.createdAt).toLocaleString('zh-CN')}</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${I18N.fmt(r.createdAt)}</div>
           <div style="display:flex;gap:6px;margin-top:6px;">
             <button class="btn btn-ghost btn-sm" onclick="adminPlayback('${r.id}')">回放</button>
             <button class="btn btn-ghost btn-sm" onclick="adminExport('${r.id}','kif')">KIF</button>
@@ -266,7 +268,7 @@
         </div>
         <div class="r-result result-win">Lv.${u.level || 0} · ELO ${u.rating}</div>
         <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${u.games} 局 · 胜 ${u.wins} / 负 ${u.losses} / 平 ${u.draws} · 胜率 ${u.winRate}% · 经验 ${u.exp || 0}</div>
-        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">🌐 最近 IP：${u.lastIp ? `<span title="点击展开完整 IP" style="cursor:pointer;border-bottom:1px dashed var(--text-dim);" onclick="this.textContent='${esc(u.lastIp)}';this.title='';">${esc(maskIp(u.lastIp))}</span>` : '—'}${u.lastSeen ? ` · <span title="最后活跃时间">${new Date(u.lastSeen).toLocaleString('zh-CN')}</span>` : ''}</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">🌐 最近 IP：${u.lastIp ? `<span title="点击展开完整 IP" style="cursor:pointer;border-bottom:1px dashed var(--text-dim);" onclick="this.textContent='${esc(u.lastIp)}';this.title='';">${esc(maskIp(u.lastIp))}</span>` : '—'}${u.lastSeen ? ` · <span title="最后活跃时间">${I18N.fmt(u.lastSeen)}</span>` : ''}</div>
         <div style="display:flex;gap:6px;margin-top:6px;">
           <button class="btn btn-ghost btn-sm" onclick="viewUser('${u.id}')">查看详情</button>
           ${u.banned
@@ -303,7 +305,7 @@
     return data;
   }
 
-  const fmtTime = (ts) => (ts ? new Date(ts).toLocaleString('zh-CN') : '—');
+  const fmtTime = (ts) => (ts ? I18N.fmt(ts) : '—');
 
   window.viewUser = async (id) => {
     try {
@@ -527,7 +529,7 @@
   /** 时间戳 → 本地短格式；空值显示「不限」（申请表允许不填时间） */
   function fmtTs(ts) {
     if (!ts) return '不限';
-    return new Date(ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    return I18N.fmt(ts, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
   }
 
   /** 已确认参赛人数：开赛后看 players，报名阶段看 entrants 里 approved 的数量 */
@@ -584,7 +586,7 @@
         (t.format === 'swiss' && t.totalRounds)
           ? `第 ${t.currentRound || 0}/${t.totalRounds} 轮` : '',
         t.ownerName ? `主办 ${esc(t.ownerName)}` : '',
-        new Date(t.createdAt).toLocaleString('zh-CN'),
+        I18N.fmt(t.createdAt),
       ].filter(Boolean).join(' · ');
 
       // ---- 申请表信息（T2）：审核时最需要看的就是"为什么办、什么时候办" ----
@@ -696,6 +698,102 @@
       renderIpBans();
     } catch (e) { toast('加载失败：' + e.message); }
   }
+
+  // ==================================================================
+  // 举报处理（2026-09-20）
+  // ==================================================================
+  let allReports = [];
+  // ⚠️ 声明必须在 `renderReports` 之前：虽然调用发生在加载完成之后、运行时踩不到 TDZ，
+  // 但"先用后声明"读起来就像 bug，下一个改这里的人会先愣一下。
+  let reportCategories = [];
+
+  async function loadReports() {
+    const status = document.getElementById('rpFilter').value;
+    try {
+      const res = await fetch(`/api/admin/reports?status=${encodeURIComponent(status)}`, {
+        headers: { 'x-admin-token': getToken() },
+      });
+      const data = await res.json();
+      if (!res.ok) { toast((data && data.error) || '加载失败'); return; }
+      allReports = data.reports || [];
+      reportCategories = data.categories || reportCategories;
+      document.getElementById('rpPending').textContent = data.pending || 0;
+      document.getElementById('rpCount').textContent = allReports.length;
+      // 与其余 tab 一致走统一分页（PLAN §W1 / 需求 13：后台每个列表最多 20 条）。
+      // ⚠️ 新加的 tab 容易漏掉这一步——列表一长就把整页撑爆，而"共 N 条"还显示着全量。
+      renderPaged('reports', allReports, 'rpPager', renderReports);
+    } catch (e) { toast('加载失败：' + e.message); }
+  }
+
+  /** @param {Array} slice 本页的举报（全量在 `allReports`） */
+  function renderReports(slice) {
+    const box = document.getElementById('rpList');
+    if (!slice.length) {
+      box.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">没有符合条件的举报。</div>';
+      return;
+    }
+    const catLabel = (id) => {
+      const c = reportCategories.find((x) => x.id === id);
+      return c ? c.label : id;
+    };
+    const statusMeta = {
+      pending: ['🕐 待处理', 'var(--gold-light)'],
+      handled: ['✅ 已处理', 'var(--text-dim)'],
+      rejected: ['↩️ 已驳回', 'var(--text-dim)'],
+    };
+    box.innerHTML = slice.map((r) => {
+      const st = statusMeta[r.status] || [r.status, 'var(--text-dim)'];
+      const ops = r.status === 'pending'
+        ? `<button class="btn btn-primary btn-sm" data-rp="handled" data-id="${esc(r.id)}">标记已处理</button>
+           <button class="btn btn-ghost btn-sm" data-rp="rejected" data-id="${esc(r.id)}">驳回</button>`
+        : '';
+      const ctx = r.context && (r.context.roomId || r.context.recordId)
+        ? `<div style="font-size:11px;color:var(--text-dim);margin-top:3px;">上下文：${
+          [r.context.roomId ? `房间 ${esc(r.context.roomId)}` : '', r.context.recordId ? `棋谱 ${esc(r.context.recordId)}` : '']
+            .filter(Boolean).join(' · ')}</div>`
+        : '';
+      return `
+        <div class="record-item">
+          <div style="font-size:13px;display:flex;justify-content:space-between;gap:10px;">
+            <span><span data-player-id="${esc(r.targetId)}">${esc(r.targetName)}</span>
+              <span style="color:var(--text-dim);font-size:12px;">被 ${esc(r.byName)} 举报</span></span>
+            <span style="color:${st[1]};font-size:12px;">${st[0]}</span>
+          </div>
+          <div style="font-size:12px;margin-top:4px;">类别：${esc(catLabel(r.category))}${
+  r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${I18N.fmt(r.at)}</div>
+          ${ctx}
+          ${r.note ? `<div style="font-size:11px;color:var(--text-dim);margin-top:3px;">处理备注：${esc(r.note)}</div>` : ''}
+          ${ops ? `<div style="display:flex;gap:6px;margin-top:8px;">${ops}</div>` : ''}
+        </div>`;
+    }).join('');
+  }
+
+  document.getElementById('btnRefreshReports').addEventListener('click', loadReports);
+  // 换了筛选条件 = 数据来源变了 → 回到第 1 页（否则筛选后停在旧页码上会看到"空列表"）
+  document.getElementById('rpFilter').addEventListener('change', () => {
+    pages.reports = 1;
+    loadReports();
+  });
+  document.getElementById('rpList').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-rp]');
+    if (!btn) return;
+    const status = btn.getAttribute('data-rp');
+    const id = btn.getAttribute('data-id');
+    const note = prompt(status === 'handled' ? '处理备注（可留空）：' : '驳回理由（可留空）：');
+    if (note === null) return;
+    try {
+      const res = await fetch(`/api/admin/reports/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': getToken() },
+        body: JSON.stringify({ status, note }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) { toast((data && data.error) || '处理失败'); return; }
+      toast(status === 'handled' ? '已标记为处理' : '已驳回');
+      loadReports();
+    } catch (err) { toast('处理失败：' + err.message); }
+  });
 
   /** 表单与按钮只绑一次（列表每次刷新会重建，重复绑定会累积监听器） */
   function initIpBanForm() {

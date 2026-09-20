@@ -233,7 +233,15 @@ class Game {
       const from = usiSquareToXY(mv.from);
       const to = usiSquareToXY(mv.to);
       const piece = this.shogi.get(from.x, from.y);
+      // ⚠️ **已成子要排除**（2026-09-20 修）：と金/成香/成桂 不能再升变，
+      // "强制升变"规则对它们根本不适用。但 `mustPromote` 看的是**原始种类**
+      // （`Piece.unpromote(piece.kind)`），拿已成子去问必然得到"必须升变" ——
+      // 于是把「と金进底线」这种**终盘常见**的合法着法判成非法：
+      // 前端 `candidateMovesFrom` 明确把已成子排除在 `canPromote` 之外（只给"不成"一种），
+      // 玩家点了却被服务端拒绝，还回一句对と金毫无意义的"该棋子必须升变"。
+      // 两处口径必须一致：这里加的条件与 `candidateMovesFrom` 的 `canPromote` 同源。
       if (piece && piece.color === this.shogi.turn
+        && !Piece.isPromoted(piece.kind)
         && mustPromote(Piece.unpromote(piece.kind), to.y, piece.color)) {
         return { ok: false, error: '该棋子走到此位置必须升变' };
       }

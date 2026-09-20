@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -34,6 +34,7 @@
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="rooms">🕹 对局干预</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="audit">操作审计</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="ipbans">🚫 IP 封禁</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="reports">🚩 举报</button>
       </div>
 
       <!-- 总览仪表盘（§C1）：进后台第一眼看到全局 -->
@@ -141,6 +142,29 @@
         <div id="ipbPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
       </div>
 
+      <!-- 举报处理（2026-09-20）：玩家在对局页提交，这里处理 -->
+      <div class="card" id="tab-reports" style="padding:20px;display:none;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>举报处理（<span id="rpPending">0</span> 待处理 / 共 <span id="rpCount">0</span>）</span>
+          <span style="display:flex;gap:8px;">
+            <select class="input" id="rpFilter" style="font-size:12px;padding:5px 8px;">
+              <option value="pending">仅待处理</option>
+              <option value="">全部</option>
+              <option value="handled">已处理</option>
+              <option value="rejected">已驳回</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" id="btnRefreshReports">刷新</button>
+          </span>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;line-height:1.7;">
+          被举报人的名字由<b>服务端查会话</b>写入（不接受客户端传的名字），所以记录里的对象是可信的。
+          ⚠️ 处理请以<b>证据</b>为准：这里的记录本身不是证据，棋谱才是（可从对局页导出）。
+        </div>
+        <div id="rpList" style="max-height:60vh;overflow-y:auto;"></div>
+        <!-- 分页条：与其余 tab 一致（20 条/页） -->
+        <div id="rpPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
+      </div>
+
       <!-- 公告管理（§C5）：此前只能手改 data/announcements.json -->
       <div class="card" id="tab-announcements" style="padding:20px;display:none;">
         <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
@@ -197,6 +221,7 @@
 
   <script src="js/settings.js"></script>
   <script src="js/util.js"></script>
+  <script src="js/i18n.js"></script>
   <script src="js/nav.js"></script>
   <script src="js/api.js"></script>
   <script src="js/admin.js"></script>

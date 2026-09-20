@@ -1,4 +1,4 @@
-/**
+﻿/**
  * nav.js — 全局导航渲染与游客身份
  *
  * 页面共用：左上品牌 TDShogi，右上 首页/对战/棋谱/赛事/个人 五页导航。
@@ -39,6 +39,22 @@
     // 刷新导航栏用户徽章（可能跨页未重渲染）
     const badge = document.querySelector('.nav-user span');
     if (badge) badge.textContent = name;
+  }
+
+  /**
+   * 头像到达后更新（2026-09-20）：写进本地 guest 记录并刷新导航徽标。
+   * 服务端在 `hello` 里下发头像，所以任意页面一进来就能显示。
+   */
+  function updateAvatar(avatar) {
+    if (!avatar) return;
+    const g = getGuest();
+    if (g.avatar === avatar) return;
+    g.avatar = avatar;
+    saveGuest(g);
+    const el = document.querySelector('.nav-user .nav-avatar');
+    if (el && global.UI && global.UI.avatarGlyph) {
+      el.textContent = global.UI.avatarGlyph(avatar, g.name);
+    }
   }
 
   function genId() {
@@ -94,14 +110,68 @@
     if (global.Settings) { global.Settings.apply('theme'); return; }
     const theme = getTheme();
     document.documentElement.classList.toggle('theme-light', theme === 'light');
-    const btn = document.querySelector('.theme-toggle');
+    // ⚠️ 按 **id** 取，不要用 `querySelector('.theme-toggle')`（取"第一个"）：
+    // 语言切换按钮（2026-09-20 新增）复用了同一个类名，按类名取会命中语言按钮，
+    // 把它的「中/EN」覆写成 🌙 —— 两个按钮长得一样，排查起来很费劲。
+    const btn = document.getElementById('themeToggle');
     if (btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
+  }
+
+  // 多语言（PLAN §Z5）：导航文案走 `t()`；`i18n.js` 万一没加载（或页面漏引）就原样显示中文，
+  // 绝不让"漏引一个 script"变成整页导航空白。
+  function tr(s) {
+    return global.I18N ? global.I18N.t(s) : s;
+  }
+  /** 语言按钮上显示当前语言（点一下切到下一种） */
+  function localeShort() {
+    return global.I18N ? global.I18N.current().short : '中';
+  }
+
+  function toggleLocale() {
+    if (!global.I18N) return;
+    global.I18N.cycle();
+  }
+
+  /**
+   * 语言切换后**就地**更新导航文案（**不重建元素**）。
+   *
+   * ⚠️ 这里绝不能用 `nav.innerHTML = ...` 整块重建：**语言按钮就在导航里**，
+   * 重建会把用户"正在点的那个按钮"换掉 —— `mousedown` 与 `mouseup` 落在两个不同元素上
+   * 就不再产生 `click` 事件，于是"连点几下之后点了没反应"，看起来像卡死。
+   * （2026-09-20 用户反馈"反复点切换语言会卡死"，根因就是这个；
+   *   实测切语言本身只要几毫秒，12k 节点也才 36ms，慢的从来不是词典与扫描。）
+   *
+   * 导航文案由 JS 渲染、不在静态 HTML 里，所以语言一变必须**主动更新一次** ——
+   * 但只能是"改文字"，不能是"换元素"。
+   */
+  function applyLocale() {
+    document.querySelectorAll('.nav-links a[data-nav]').forEach((a) => {
+      const item = NAV.find((n) => n.id === a.getAttribute('data-nav'));
+      if (item) a.textContent = tr(item.label);
+    });
+    const lang = document.getElementById('langToggle');
+    if (lang) { lang.textContent = localeShort(); lang.title = tr('语言'); }
+    const theme = document.getElementById('themeToggle');
+    if (theme) theme.title = tr('切换主题');
+    const settings = document.getElementById('settingsToggle');
+    if (settings) settings.title = tr('设置');
+    const user = document.querySelector('.nav-user');
+    if (user) {
+      const g = getGuest();
+      const isAcc = typeof g.id === 'string' && g.id.includes('.');
+      user.title = isAcc ? tr('个人 · 已登录账号') : tr('个人 · 游客');
+    }
   }
 
   function renderNav(current) {
     const guest = getGuest();
     const isAccount = typeof guest.id === 'string' && guest.id.includes('.');
-    const userBadge = isAccount ? '🔐' : '👤';
+    // 头像（2026-09-20）：徽标改成显示头像；**登录态改由 title 表达**——
+    // 原先那个 🔐/👤 图标只在"点开个人页才知道登没登"这个场景有用，
+    // 而现在每个玩家都有头像，徽标位置给头像信息量更大。
+    const userBadge = (global.UI && global.UI.avatarGlyph)
+      ? global.UI.avatarGlyph(guest.avatar, guest.name)
+      : (isAccount ? '🔐' : '👤');
     // 名字首次到达前（hello 未回）显示占位，避免导航与对局/列表不同步
     const displayName = guest.name || '载入中…';
     const nav = document.querySelector('.nav');
@@ -112,13 +182,14 @@
           <span class="brand-stamp">将棋</span>
         </a>
         <nav class="nav-links">
-          ${NAV.map((n) => `<a href="${n.href}" class="${n.id === current ? 'active' : ''}" data-nav="${n.id}">${n.label}</a>`).join('')}
+          ${NAV.map((n) => `<a href="${n.href}" class="${n.id === current ? 'active' : ''}" data-nav="${n.id}">${tr(n.label)}</a>`).join('')}
         </nav>
         <div style="display:flex;align-items:center;gap:10px;">
-          <button class="theme-toggle" title="切换主题" onclick="NAV.toggleTheme()">🌙</button>
-          <button class="theme-toggle" title="设置" onclick="Settings.openPanel()">⚙️</button>
+          <button class="theme-toggle" id="langToggle" title="${tr('语言')}" onclick="NAV.toggleLocale()">${localeShort()}</button>
+          <button class="theme-toggle" id="themeToggle" title="${tr('切换主题')}" onclick="NAV.toggleTheme()">🌙</button>
+          <button class="theme-toggle" id="settingsToggle" title="${tr('设置')}" onclick="Settings.openPanel()">⚙️</button>
           ${adminEntryHtml()}
-          <a class="nav-user" href="profile.html" title="个人页面/账号">
+          <a class="nav-user" href="profile.html" title="${isAccount ? tr('个人 · 已登录账号') : tr('个人 · 游客')}">
             <span>${displayName}</span>
             <span class="nav-avatar">${userBadge}</span>
           </a>
@@ -131,11 +202,12 @@
       n.innerHTML = `
         <a class="brand" href="index.html"><span class="brand-logo">TDShogi</span><span class="brand-stamp">将棋</span></a>
         <nav class="nav-links">
-          ${NAV.map((x) => `<a href="${x.href}" class="${x.id === current ? 'active' : ''}">${x.label}</a>`).join('')}
+          ${NAV.map((x) => `<a href="${x.href}" class="${x.id === current ? 'active' : ''}" data-nav="${x.id}">${tr(x.label)}</a>`).join('')}
         </nav>
         <div style="display:flex;align-items:center;gap:10px;">
-          <button class="theme-toggle" title="切换主题" onclick="NAV.toggleTheme()">🌙</button>
-          <button class="theme-toggle" title="设置" onclick="Settings.openPanel()">⚙️</button>
+          <button class="theme-toggle" id="langToggle" title="${tr('语言')}" onclick="NAV.toggleLocale()">${localeShort()}</button>
+          <button class="theme-toggle" id="themeToggle" title="${tr('切换主题')}" onclick="NAV.toggleTheme()">🌙</button>
+          <button class="theme-toggle" id="settingsToggle" title="${tr('设置')}" onclick="Settings.openPanel()">⚙️</button>
           ${adminEntryHtml()}
         </div>
       `;
@@ -152,5 +224,5 @@
     applyTheme();
   }
 
-  global.NAV = { renderNav, getGuest, saveGuest, updateUserName, randomName, genId, GUEST_KEY, THEME_KEY, ADMIN_KEY, isAdminSession, toggleTheme, getTheme, applyTheme };
+  global.NAV = { renderNav, applyLocale, toggleLocale, getGuest, saveGuest, updateUserName, updateAvatar, randomName, genId, GUEST_KEY, THEME_KEY, ADMIN_KEY, isAdminSession, toggleTheme, getTheme, applyTheme };
 })(window);

@@ -32,6 +32,8 @@ const tournaments = require('./tournaments');
 const { listPlayerRecords, getRecord, exportRecord, recentSummaries, searchRecords } = require('./records');
 const { countRecords, listSummaries } = require('./storage');
 const { listAnnouncements } = require('./announcements');
+const handicap = require('./handicap'); // 手合割（駒落ち让子）表：`hello` 下发给前端渲染建房下拉
+const reports = require('./reports');
 
 class Protocol {
   constructor({ onBroadcast }) {
@@ -105,6 +107,19 @@ class Protocol {
         clientId,
         playerId: session.id,
         name: session.name,
+        // 等级与等级特权（2026-09-20）：随 hello 下发，前端不必再单发一次请求。
+        // `privileges` 由 `LEVEL_PRIVILEGES` 表推导（含 need/ok 两项），
+        // 前端可以直接渲染"需要 Lv.5（你当前 Lv.2）"而不必抄门槛数值。
+        level: ratings.levelOf(session.id),
+        privileges: ratings.privilegesOf(session.id),
+        // 头像（2026-09-20）：当前头像 + 可选白名单。白名单只维护在 `auth.AVATARS` 一处，
+        // 前端直接拿它渲染选择器，不另抄一份表。
+        avatar: session.avatar || null,
+        avatars: auth.AVATARS,
+        // 举报类别（2026-09-20）：同样只在服务端维护一份，前端拿来直接渲染下拉
+        reportCategories: reports.CATEGORIES,
+        // 手合割（駒落ち让子）：服务端是唯一来源，前端建房下拉直接用它渲染
+        handicaps: handicap.list().map((d) => ({ id: d.id, label: d.label, hint: d.hint })),
         reconnect: pending ? { ok: true, ...pending } : null,
         stats: this._stats(), // 统一统计出口（§T1）：在线人数按「唯一身份数」计
       },
@@ -183,6 +198,8 @@ class Protocol {
         const res = r.createRoom(player, tc, {
           isPrivate: !!(data && data.isPrivate),
           password: (data && data.password) || '',
+          // 駒落ち（让子）手合割 id；空 = 平手。未知 id 由 createRoom 拒绝
+          handicap: data && data.handicap,
         });
         if (!res.ok) { this._error(clientId, res.error); break; }
         this._send(clientId, { type: 'room_created', data: res });
@@ -272,6 +289,37 @@ class Protocol {
           // 同步进行中对局里该玩家的名字（对手即时看到新名）
           this.rooms.updatePlayerName(player.playerId, res.name);
           this._broadcastStats();
+        } else {
+          this._error(clientId, res.error);
+        }
+        break;
+      }
+      case 'report': {
+        // 举报（2026-09-20）：`targetId` 由客户端给（对局页就是对面座位），
+        // 但**被举报人的显示名由服务端查会话**——不信客户端传的名字，
+        // 否则举报记录里的"被举报人"可以被伪造成任意人。
+        const rp = reports.submit({
+          byId: player.playerId,
+          byName: player.name,
+          targetId: data && data.targetId,
+          targetName: data && data.targetName,
+          category: data && data.category,
+          detail: data && data.detail,
+          context: data && data.context,
+        });
+        if (rp.ok) this._send(clientId, { type: 'reported', data: { id: rp.report.id } });
+        else this._error(clientId, rp.error);
+        break;
+      }
+      case 'set_avatar': {
+        // 头像（2026-09-20）：与改名同款，走**会话文件**——游客也能换头像，
+        // 不必为了换个头像去注册账号。白名单校验在 `auth.setAvatar` 里。
+        const res = auth.setAvatar(player.playerId, data && data.avatar);
+        if (res.ok) {
+          player.avatar = res.avatar;
+          this._send(clientId, { type: 'avatar_updated', data: { avatar: res.avatar } });
+          // 进行中的对局要**立刻**生效：清掉房间侧的头像缓存并重推 state
+          this.rooms.refreshAvatar(player.playerId);
         } else {
           this._error(clientId, res.error);
         }
@@ -576,8 +624,13 @@ class Protocol {
     // 赛事荣誉（个人页"赛事荣誉栏"）：赛事结果本身就是公开信息，不涉及隐私，
     // 所以放在同一出口一起下发（stripPrivate 的键名黑名单与它无交集）。
     const honors = tournaments.honorsOf(playerId);
+    // 被查看者的头像（2026-09-20 补）：个人页身份卡上那个大头像必须画**这个人**的。
+    // 原先不下发 → 前端只好画自己的/占位字形，看别人的资料页时就成了"我把他头像改了"
+    // （用户报的 bug）。头像本就是公开信息（对局 state、聊天、观众列表都在发）。
     // 非管理员出口：过隐私白名单（PLAN §K2）
-    return privacy.stripPrivate({ profile: prof, records, name: session.name, honors });
+    return privacy.stripPrivate({
+      profile: prof, records, name: session.name, avatar: session.avatar || null, honors,
+    });
   }
 
   // ==================================================================

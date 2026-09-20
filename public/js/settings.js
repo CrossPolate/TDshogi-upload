@@ -143,7 +143,10 @@
 
     if (!key || key === 'theme') {
       document.documentElement.classList.toggle('theme-light', s.theme === 'light');
-      const btn = document.querySelector('.theme-toggle');
+      // ⚠️ 按 id 取主题按钮：`.theme-toggle` 这个类名同时被语言按钮复用（2026-09-20），
+      // 按类名取"第一个"会把语言按钮的「中/EN」覆写成月亮图标。
+      // 保留类名兜底：万一导航还没渲染（面板先打开），至少别报错。
+      const btn = document.getElementById('themeToggle') || document.querySelector('.theme-toggle');
       if (btn) btn.textContent = s.theme === 'light' ? '☀️' : '🌙';
     }
 

@@ -122,6 +122,9 @@ module.exports = function applyCleanup(X) {
         if (p && !p.connected) {
           cur.game.result = seat === 'b' ? 'w' : 'b';
           cur.game.resultDetail = '接続切断';
+          // 聊天区留痕（2026-09-20）：宽限期到了才判负——与「刚掉线」区分开，
+          // 否则用户会以为"一掉线就判负了"。
+          this._sysChat(cur, `⏱ ${p.name || '对手'} 掉线超过宽限期未回归，判负`, 'player-timeout');
           this._checkGameOver(cur);
         }
         timers.delete(seat);

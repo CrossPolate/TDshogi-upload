@@ -21,6 +21,34 @@
     document.getElementById('matchControls').style.display = 'block';
   });
 
+  // ---- 手合割（駒落ち让子）----
+  // 选项来自服务端 `hello.handicaps`（本项目的既有分工：表只在服务端维护一份）。
+  // ⚠️ 两头都取：立即读一次缓存（`hello` 可能早于本页注册监听器就到了），
+  //    再注册监听器兜住"还没到"的情况——只做一头就会出现"下拉框偶尔是空的"。
+  let handicaps = [];
+  function fillHandicaps(list) {
+    if (list && list.length) handicaps = list;
+    const sel = document.getElementById('roomHandicap');
+    if (!sel || !handicaps.length) return;
+    const keep = sel.value;
+    sel.innerHTML = handicaps.map((h) => `<option value="${esc(h.id)}">${esc(h.label)}</option>`).join('');
+    if (keep && handicaps.some((h) => h.id === keep)) sel.value = keep;
+    syncHandicapHint();
+  }
+  function syncHandicapHint() {
+    const sel = document.getElementById('roomHandicap');
+    const box = document.getElementById('handicapHint');
+    if (!sel || !box) return;
+    const cur = handicaps.find((h) => h.id === sel.value);
+    const isEven = !sel.value || sel.value === 'even';
+    box.innerHTML = (cur && !isEven)
+      ? `${esc(cur.hint || '')}<br>⚠️ 让子局：<b>房主执上手（少子的那一方）并先走</b>，不计 ELO。`
+      : '不让子：双方各 20 枚，房主随机执先手，计入 ELO。';
+  }
+  fillHandicaps(api.handicaps);
+  api.on('hello', (d) => fillHandicaps(d && d.handicaps));
+  document.getElementById('roomHandicap').addEventListener('change', syncHandicapHint);
+
   // ---- 创建房间 ----
   // 私人房间（PLAN §T2）：休闲模式（不计 ELO，经验照常加）+ 可选密码；
   // 勾选后才显示密码框，密码留空 = 不设门禁（只是休闲局）
@@ -36,7 +64,14 @@
       return toast('房间密码需 4-8 位');
     }
     lastCreatedPrivate = isPrivate;
-    api.send({ type: 'create_room', data: { timeControl, isPrivate, password } });
+    api.send({
+      type: 'create_room',
+      data: {
+        timeControl, isPrivate, password,
+        // 手合割（駒落ち让子）：空 = 平手。服务端会拒绝未知 id
+        handicap: document.getElementById('roomHandicap').value || null,
+      },
+    });
   });
 
   // ---- 加入房间 ----
@@ -126,6 +161,8 @@
       const pid = g.playerIds || {};
       const sc = g.spectatorCount || 0;
       const spec = sc > 0 ? ` · 👁 <b style="color:var(--gold-light);">${sc}</b> 人观战` : ' · 观战';
+      // 让子局必须标出来：不标的话，点进去观战的人看到"棋盘少了几枚棋子"会以为是坏了
+      const hd = g.handicapLabel ? ` · ♟ ${esc(g.handicapLabel)}` : '';
       return `
       <div class="game-card" data-room="${esc(g.roomId)}">
         <div class="players">
@@ -133,7 +170,7 @@
           <span class="vs">vs</span>
           <span data-player-id="${esc(pid.w || '')}">${esc(g.players.w || '後手')}</span>
         </div>
-        <div class="meta">房间 ${esc(g.code)} · ${typeName} · ${g.moveCount} 手${spec}</div>
+        <div class="meta">房间 ${esc(g.code)} · ${typeName} · ${g.moveCount} 手${hd}${spec}</div>
       </div>
     `;
     }).join('');

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -20,6 +20,10 @@
       <div style="display:flex;gap:8px;">
         <button class="btn btn-ghost btn-sm" id="btnViewpoint" style="display:none;" title="切换观战视角（先手 / 后手）">🔄 视角·先手</button>
         <button class="btn btn-ghost btn-sm" id="btnSound" title="音效开关">🔊 音效</button>
+        <!-- 举报（2026-09-20）：移到顶部交互栏（原先埋在右侧「操作」卡里，要滚动才看得到）。
+             只在对局中、对面确实有人时出现；类别清单由服务端在 hello 里下发（src/reports.js）。 -->
+        <button class="btn btn-ghost btn-sm" id="btnReport" style="display:none;"
+          title="举报对手：作弊 / 辱骂 / 恶意挂机等">🚩 举报</button>
         <button class="btn btn-ghost btn-sm" id="btnLeave">退出对局</button>
       </div>
     </div>
@@ -42,6 +46,8 @@
 
         <!-- 上方玩家栏（对面）—— 由 play.js 按视角动态渲染 -->
         <div class="player-bar" id="topPlayerBar">
+          <!-- 头像（2026-09-20）：由 play.js 从 state.players[].avatar 填充 -->
+          <span class="player-avatar" id="topAvatar"></span>
           <div>
             <div class="name" id="topName">—</div>
             <div class="rating" id="topRating"></div>
@@ -64,6 +70,7 @@
 
         <!-- 下方玩家栏（自己） -->
         <div class="player-bar" id="bottomPlayerBar">
+          <span class="player-avatar" id="bottomAvatar"></span>
           <div>
             <div class="name" id="bottomName">—</div>
             <div class="rating" id="bottomRating"></div>
@@ -75,7 +82,7 @@
       <!-- 右侧面板 -->
       <div class="play-side">
         <div class="panel">
-          <h3>棋谱</h3>
+          <h3>走子记录</h3>
           <div class="move-list" id="moveList"></div>
         </div>
         <div class="panel">
@@ -90,6 +97,15 @@
               title="入玉宣言：玉在敌阵 + 敌阵内 10 枚以上 + 点数先手 28 / 后手 27 以上，且自己手番、未被王手 → 宣言方胜（AJSA 规则）">🏯 入玉宣言</button>
             <button class="btn btn-primary" id="btnRematch" style="display:none;">再来一局</button>
           </div>
+          <div id="reportPanel" style="display:none;margin-top:10px;">
+            <select class="input" id="reportCategory" style="font-size:12px;padding:5px 8px;"></select>
+            <input class="input" id="reportDetail" maxlength="200" placeholder="补充说明（可选）"
+              style="margin-top:6px;font-size:12px;padding:5px 8px;">
+            <div style="display:flex;gap:6px;margin-top:6px;">
+              <button class="btn btn-primary btn-sm" id="btnReportSubmit">提交举报</button>
+              <button class="btn btn-ghost btn-sm" id="btnReportCancel">取消</button>
+            </div>
+          </div>
         </div>
         <!-- 聊天：§R2 kibitz 分区（全部 / 对局 / 观战），并按发言者身份配色区分 -->
         <div class="panel">
@@ -100,6 +116,9 @@
             <button class="chat-tab" data-tab="spectators">观战</button>
           </div>
           <div class="chat-box" id="chatBox"></div>
+          <!-- 快捷语（2026-09-20）：高频寒暄点一下直接发，省去对局中打字。
+               内容与渲染见 js/play-chat.js 的 QUICK_PHRASES -->
+          <div class="chat-quick" id="chatQuick"></div>
           <div style="display:flex;gap:6px;margin-top:8px;">
             <input class="input" id="chatInput" placeholder="说点什么…" style="padding:6px 10px;font-size:13px;">
             <button class="btn btn-primary btn-sm" id="btnChatSend" style="flex-shrink:0;">发送</button>
@@ -133,6 +152,7 @@
 
   <script src="js/settings.js"></script>
   <script src="js/util.js"></script>
+  <script src="js/i18n.js"></script>
   <script src="js/nav.js"></script>
   <script src="js/api.js"></script>
   <script src="js/pieces.js"></script>

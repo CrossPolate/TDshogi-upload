@@ -71,7 +71,7 @@
 
   function fmtTime(ts) {
     if (!ts) return '不限';
-    return new Date(ts).toLocaleString('zh-CN', {
+    return I18N.fmt(ts, {
       year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
     });
   }
