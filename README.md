@@ -11,8 +11,16 @@
 - 在线人人对战（**服务端权威规则判定**）+ 实时观战 + 随机观战
 - 好友房间（6 位房间码）+ 快速匹配 + 房间聊天
 - 四种时制：`10:00`（10 分包干）/ `15+60` / `10+30` / `10sec`（0+10 每手读秒）
+- **手合割（駒落ち让子）**：香落ち / 角落ち / 飛車落ち / 二枚落ち … 十枚落ち共 **11 种**，
+  上手执先、下手让子；**不计 ELO**（私人房间同款），经验照常
+- **玩家头像**：16 种预设字形，**游客也能换**（走会话文件，不必为换头像去注册）
+- 聊天快捷语（6 条通用礼貌语，点击即发，仍受 2 秒节流）+ 观众列表（带头像与等级）
 - 终局自动进入**感想战**：按规则推演、分支变化、待った、演示权交接、自由摆棋
 - 断线 60 秒重连宽限；中途退出/掉线判负并标记 `接続切断`
+- **选手状态播报**：离开页面 / 掉线超时判负 / 主动退出 / 重新回到对局，
+  都会在**聊天区**留痕（低头看棋盘的对手与观战者不会再错过）
+- **举报**：入口在玩家卡片上（对局页从对手名字进入），类别 + 补充说明；
+  同一目标 30 分钟去重 + 单人 10 条/小时，管理员在后台处理
 
 **棋谱**
 - 自动保存，支持**日本标准 KIF / CSA** 导出（含每手耗时；KIF 带手数评论）、KIF 批量导入
@@ -22,11 +30,39 @@
 **社区与运营**
 - ELO 评级（起始 1500，K=32）+ 排行榜
 - **等级系统**：每日登录 +2 经验、完成一局 +1；`L→L+1` 需 `2^(L+1)` 经验（0→1:2、1→2:4…），封顶 64 级
-- 单败淘汰赛事（4/8/16 人）+ 创建审核流
+- **等级特权**：举办赛事需 **Lv.5**（门槛表只在 `src/ratings.js` 的 `LEVEL_PRIVILEGES` 一处；
+  前端据服务端下发的 `{need, ok}` 置灰按钮，真正的拦截在服务端）
+- 赛事：**单败淘汰 / 瑞士制**（4~32 人，瑞士制按积分逐轮配对、无淘汰）、报名审核、
+  对阵表 / 名次表 / 重赛 / 变更记录（详见 `docs/TOURNAMENT.md`）
+- **个人页**：可查看**他人**的个人页（只读视图保留等级/战绩/荣誉/走势/最近对局），
+  并列出全部参赛过的赛事
 - 选手信息悬停小窗、用户称号
-- **管理后台**：用户管理（登录 IP/UA、封禁、改名、重置 ELO/密码、编辑资料、删除账号）、
-  赛事审核、棋谱导入、对局信息与评论编辑、操作审计
+- **管理后台**：用户管理（登录 IP/UA、封禁、改名、重置 ELO/密码、改等级、编辑资料、删除账号）、
+  赛事审核、棋谱导入、对局干预、操作审计、IP 封禁、**举报处理**
 - 移动端适配（棋盘竖排、触控拖拽、尺寸自适应）
+
+**多语言**
+- 中文 / English / 日本語，导航右上角**一键轮换**（记住选择），日期也按当前语言格式化
+- 词典以**中文原文为键**（`public/js/i18n.js`），JS 渲染出来的新内容由 `MutationObserver` 兜住
+- `npm run i18n` 报告还有哪些界面文案没词条（`--locale=ja` 看日语，`--js` 连提示语一起）
+- 面向玩家的页面 **en / ja 均 100% 覆盖**（`admin.html` 只有站长用，刻意不翻）
+
+## 本版更新（v1.4.4）
+
+> 完整历史见 `git log`；每条的设计取舍与踩过的坑记在 `docs/PLAN.md`。
+
+- **修复：反复切换语言会卡死浏览器**。真根因是译文**首尾带空白**时 `translateNode` 的写入不幂等，
+  被 `MutationObserver` 反复触发 → 无限微任务循环（主线程占满、文本无限膨胀）。
+  现改为 `nodeContent(原文, 译文)` **只依赖原文**（结构上不可能自激），
+  并加**熔断**（观察器内写入 >5000 次/秒即停用自动翻译，宁可退回中文也不卡死）+ 回归测试
+  （"翻译必须收敛"，并反向自检"老实现确实会挂在这条断言上"）。
+  ⚠️ 副产物：`setLocale` 不再重建导航（重建会换掉用户正在点的按钮 → 连点丢点击）。
+- **新增日语**：`中文 → English → 日本語` 轮换；en / ja 玩家页面均 100% 覆盖。
+- **手合割（駒落ち）**：11 种让子，不计 ELO，建房 → 对局状态 → 棋谱记录全链路打通。
+- **玩家侧五项**：头像、聊天快捷语、选手状态播报、举报、等级特权（建赛需 Lv.5）。
+- **个人页**：支持查看他人（只读视图）；举报入口从对局页移到玩家卡片（对局页只留退出）。
+- **规则修复**：**已成子**（と金 / 成香 / 成桂）走底线曾被误判为「必须升变」而拒绝 ——
+  前端高亮可点、服务端却报错；终盘常见着法。已加"候选列表里的着法 `applyMove` 必须全部接受"的不变量测试。
 
 ## 目录结构
 
@@ -56,7 +92,7 @@ shogiwebapp/
 │   ├── index/lobby/play/history/gallery/review/tournaments/profile/admin .html
 │   ├── css/                   # style.css（主题+响应式）/ board.css / review.css
 │   ├── pieces/                # 木棋子图片素材（kinki.png / ryoko.png）
-│   └── js/                    # 18 个脚本
+│   └── js/                    # 24 个脚本
 │       ├── settings.js        # ★ 用户设置中心（单一 tdshogi_settings 键 + ⚙️ 面板，须先于 nav.js 加载）
 │       ├── api.js nav.js board.js pieces.js piece-kinds.js
 │       ├── freeboard.js       # ★ 统一棋盘组件（play/demo-rules/free/review 四模式）
@@ -140,7 +176,9 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 | `/api/admin/users/:id/{ban,unban,rename,reset-rating,reset-password,profile,elo}` | POST | 用户管理（全部写审计） |
 | `/api/admin/users/:id` | DELETE | 删除账号（需确认） |
 | `/api/admin/records/:id/{visibility,meta}` | POST | 棋谱公开设置与对局信息编辑 |
-| `/api/admin/{tournaments,audit}` | GET | 赛事全量 / 操作审计 |
+| `/api/admin/{overview,users,tournaments,audit,rooms,announcements,ipbans,reports}` | GET | 管理后台各 tab 的数据源（总览 / 用户 / 赛事 / 审计 / 在线对局 / 公告 / IP 封禁 / 举报） |
+| `/api/admin/{announcements,ipbans}` `/api/admin/reports/:id` | POST | 公告增改下线、IP 封禁与解除、**举报处理（一次性）** |
+| `/api/admin/{rooms/:id/close,kick}` | POST | 对局干预：强制结束 / 踢人 |
 | `/api/admin/records/import` | POST | 导入 KIF |
 
 ## WebSocket 协议
@@ -162,6 +200,12 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 `game_over` `elo_updated` `spectator_update` `chat` `tournament_update` `renamed` `avatar_updated`
 `reported` `spectating`
 `demo_state` `demo_init` `admin_logged_in` `error`。
+
+⚠️ `hello` 里所有"**可选值清单**"一律由服务端下发，前端**不抄第二份**：
+`avatars`（头像白名单）、`reportCategories`（举报类别）、`handicaps`（手合割）、
+`privileges`（等级特权门槛 `{need, ok}`），另带本人 `avatar` / `level`。
+源头各一处：`src/auth.js` / `src/reports.js` / `src/handicap.js` / `src/ratings.js`。
+—— 新增一个头像、一个举报类别或一种手合割，只改服务端那张表，前端自动跟上。
 
 ## 棋谱格式
 
@@ -186,7 +230,8 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 
 单一 SQLite 库 `data/tdshogi.db`（WAL 模式，`storage.js` 提供 kv 兼容层）：
 
-- `kv`：评级 / 账号 / 赛事 / 公告 / 会话（`sessions/<id>.json`）/ 管理配置 / 事件日志（`events/<ts>-<rand>`）
+- `kv`：评级 / 账号 / 赛事 / 公告 / 会话（`sessions/<id>.json`，含头像）/ 举报（`reports.json`）/
+  管理配置 / 事件日志（`events/<ts>-<rand>`）
 - `records`：每局棋谱。`data` 列存完整 JSON（局面、走法、耗时、书签/评论/变着、可见性与展示 meta），
   另有**标量摘要列**（playerB/playerW/nameB/nameW/result/moveCount/opening/pub/…）+ 索引——
   列表与检索只读摘要列、不解析整谱（老库首次启动自动补列与回填）
@@ -197,9 +242,10 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 ## 开发与测试
 
 - **单元测试**：`npm test`（`tests/*.test.js`，Node 内置 `node --test`，纯函数不需起服）。
-  当前 **238 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、初始盘面、
-  （含駒落ち让子各手合割的 SFEN 生成）、`game.js` 规则引擎、赛事状态机与权限、瑞士制配对与积分、
-  等级特权、举报、多语言词典自检、棋钟、限流、隐私脱敏等
+  当前 **238 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、
+  初始盘面（含駒落ち各手合割的 SFEN 生成）、`game.js` 规则引擎（含"候选着法必被接受"的不变量）、
+  赛事状态机与权限、瑞士制配对与积分、等级特权、举报、多语言词典自检（含"翻译必须收敛"回归）、
+  棋钟、限流、隐私脱敏等
 - **静态检查**：`npm run lint`（eslint；`no-undef` 正是"路由层漏 require 导致接口 500"那类事故的克星）
 - **多语言**：`npm run i18n` 报告**还有哪些界面文案没有词条**（`--locale=ja` 看日语，
   `--js` 连提示语一起报）。词典在 `public/js/i18n.js`，**以中文原文为键**；
@@ -216,11 +262,15 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 
 ## 限制与扩展方向
 
-限制：仅平手（无駒落ち让子）、无 AI 对战、赛事支持**单败淘汰与瑞士制**（无循环赛）、游客 id 无密码保护。
+限制：无 AI 对战、赛事**无循环赛**（单败淘汰与瑞士制已有）、游客 id 无密码保护
+（拿到 id 即可顶替该身份，所以别把自己的链接外传）。
 
-方向：接入 USI 引擎（人机对战）、锦标赛（多轮/循环）、駒落ち、i18n、
-内容运营（棋谱广场栏目化）、赛事前台与自动化、PWA。
-（棋谱越权治理与接口速率限制已于 2026-09 完成，见 `docs/PLAN.md` §Q7）
+多语言的已知残留：切换语言后，**已经渲染出来的日期文本**会保留切换前的格式 ——
+它们是普通字符串、不在词典里，要等该列表下次刷新（多数列表有轮询，会自愈）或刷新页面。
+
+方向：接入 USI 引擎（人机对战）、循环赛 / 联赛、内容运营（棋谱广场栏目化）、赛事自动化、PWA。
+（棋谱越权治理与接口速率限制已于 2026-09 完成，见 `docs/PLAN.md` §Q7；
+駒落ち让子与多语言已于 2026-09-20 完成，见 §Z）
 
 ## License
 
