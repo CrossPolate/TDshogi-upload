@@ -70,7 +70,7 @@
 shogiwebapp/
 ├── package.json / package-lock.json
 ├── server.js                  # 入口：Express(REST) + ws 同端口
-├── src/                       # 服务端 16 模块（CommonJS）
+├── src/                       # 服务端 26 模块（CommonJS）
 │   ├── storage.js             # SQLite 存储层（kv/records/sessions/gamesnapshots）
 │   ├── rooms.js               # ★ 对局状态机：房间/匹配/棋钟/观战/聊天/快照/感想战
 │   ├── protocol.js            # WS 消息路由 + REST 数据聚合
@@ -79,7 +79,10 @@ shogiwebapp/
 │   ├── records.js             # 棋谱读写 + KIF/CSA 导出 + 复盘标注 + 公开广场
 │   ├── kif.js                 # KIF 解析（导入）
 │   ├── ratings.js             # ELO 评级 + 等级（exp/level）
-│   ├── tournaments.js         # 单败淘汰赛事
+│   ├── tournaments.js         # 赛事（单败淘汰 / 瑞士制）+ 权限（canManage）与荣誉统计
+│   ├── swiss.js               # 瑞士制配对与积分（轮空视同胜）
+│   ├── handicap.js            # 手合割（駒落ち让子）：11 种表 + 让子后 SFEN 生成
+│   ├── reports.js             # 玩家举报：类别 / 去重 / 配额 / 管理与处理
 │   ├── accounts.js            # 账号（注册/登录/令牌/升级迁移）
 │   ├── auth.js                # 游客会话（kv sessions/<id>.json）
 │   ├── admin.js               # 管理员鉴权（HMAC 令牌）
@@ -87,16 +90,20 @@ shogiwebapp/
 │   ├── net.js                 # 客户端 IP/UA 解析（反代信任）
 │   ├── audit.js               # 登录与管理员操作事件日志
 │   ├── privacy.js             # 隐私字段出口白名单（stripPrivate）
+│   ├── ipban.js               # IP 封禁（支持网段；服务端硬性拒绝"封到自己"）
+│   ├── messages.js logger.js backup.js cleanup.js room-password.js
 │   └── ratelimit.js           # 内存限流：登录防爆破 / REST 防刷 / WS 防洪泛（§Q7）
 ├── public/                    # 前端（静态，无构建步骤）
-│   ├── index/lobby/play/history/gallery/review/tournaments/profile/admin .html
+│   ├── index/lobby/play/history/gallery/review/tournaments/tournament/profile/admin .html
 │   ├── css/                   # style.css（主题+响应式）/ board.css / review.css
 │   ├── pieces/                # 木棋子图片素材（kinki.png / ryoko.png）
 │   └── js/                    # 24 个脚本
 │       ├── settings.js        # ★ 用户设置中心（单一 tdshogi_settings 键 + ⚙️ 面板，须先于 nav.js 加载）
 │       ├── api.js nav.js board.js pieces.js piece-kinds.js
 │       ├── freeboard.js       # ★ 统一棋盘组件（play/demo-rules/free/review 四模式）
-│       ├── home lobby play history gallery review tournaments profile admin .js
+│       ├── i18n.js            # ★ 多语言（词典以中文原文为键 + DOM 扫描 + 写入熔断）
+│       ├── util.js            # 公共工具：$ / esc / toast / debugLog / paginate / avatarGlyph 等
+│       ├── home lobby play history gallery review tournaments tournament profile admin .js
 │       ├── hovercard.js sound.js
 ├── tests/                     # 单元测试（node --test，纯函数、不起服）
 ├── scripts/                   # e2e 回归套件与工具脚本（需起服）
