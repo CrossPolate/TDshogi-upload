@@ -41,6 +41,26 @@ function resolvePlayer(raw) {
   return raw;
 }
 
+/**
+ * **归属判定**专用的严格身份解析（2026-09-21 安全审查 P0-4）。
+ *
+ * ⚠️⚠️ `resolvePlayer` 是**公开读**用的宽松解析：`/api/profile?player=<任意 id>` 本就该能查
+ * 任何人（个人页、悬停卡都是公开数据）。但棋谱的六个接口拿它去做**归属判定**
+ * （`records.isOwner`）—— 于是"知道别人的公开 id"就等于拿到了他的身份：
+ * 无令牌即可导出/回放/复盘他人棋谱，还能以他的名义写评论、书签、变着（审查已实测复现）。
+ *
+ * 本函数把边界收紧：**注册账号必须凭签名令牌**；裸 id 只对游客成立。
+ * 游客 id 目前"即凭证"的现状保持不变（要改需引入游客会话撤销机制，留下一版）。
+ */
+function resolveOwner(raw) {
+  if (!raw) return null;
+  const s = String(raw);
+  if (s.includes('.')) return accounts.verifyToken(s) || null; // 账号：必须凭令牌
+  // 裸 24 hex：若是**已注册账号**的 id → 不可信（账号一律走令牌）
+  if (/^[0-9a-f]{24}$/.test(s) && accounts.getAccount(s)) return null;
+  return s; // 游客 id（现状：id 即凭证）
+}
+
 /** 文件名清洗：去掉路径分隔与危险字符 */
 function sanitize(s) {
   return String(s || '').replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 20) || '无名';
@@ -58,4 +78,4 @@ function checkAdmin(req) {
   return admin.verify(token) ? token : null;
 }
 
-module.exports = { protocol, VERSION, resolvePlayer, sanitize, checkAdmin };
+module.exports = { protocol, VERSION, resolvePlayer, resolveOwner, sanitize, checkAdmin };

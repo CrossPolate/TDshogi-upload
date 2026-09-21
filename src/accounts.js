@@ -22,7 +22,30 @@ const auth = require('./auth');
 const log = require('./logger');
 
 const ACCOUNTS_FILE = 'accounts.json';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'tdshogi_session_secret_change_me';
+
+/**
+ * 会话令牌签名密钥。
+ *
+ * ⚠️⚠️ **绝不能用源码里的固定默认值**（2026-09-21 安全审查 P0-2）：本仓库是公开的，
+ * 而**账号 id 本身是公开数据**（大厅对局列表、个人页、悬停卡、管理接口都能看到），
+ * 于是"公开 id + 内置默认密钥"＝可以**离线伪造**出任意账号的合法会话令牌 →
+ * 完全接管账号（读私密资料、连 WS 顶替身份、检索其棋谱）。审查已实测复现。
+ *
+ * 规则：**环境变量优先；没有就生成随机密钥并持久化**（首启一次，零运维负担）。
+ * ⚠️ 必须持久化：密钥一换，所有旧令牌立即失效（用户需重新登录），不能每次启动随机。
+ */
+function resolveSessionSecret() {
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  const saved = readJson('secret.json', null);
+  if (saved && saved.key) return saved.key;
+  const key = crypto.randomBytes(32).toString('hex');
+  writeJson('secret.json', { key, createdAt: Date.now() });
+  log.warn('security',
+    '未配置 SESSION_SECRET，已自动生成随机密钥并持久化到 data/secret.json（建议显式配置）');
+  return key;
+}
+
+const SESSION_SECRET = resolveSessionSecret();
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 天
 const MAX_USERNAME = 16;
 const MIN_PASSWORD = 4;
@@ -84,7 +107,18 @@ function register(username, password, guestId = null) {
   accounts[id] = account;
   persist();
   // 游客数据迁移（对局/评级/会话 → accountId）
-  if (guestId) migrateGuestData(guestId, id);
+  //
+  // ⚠️⚠️ **必须先确认这个 id 不是别人的注册账号**（2026-09-21 安全审查 P0-3，已实测复现）：
+  // 账号 id 是公开数据，而原实现不验证来源 —— 任何人用受害者 id 注册，
+  // 就能干净地拿走他的**全部棋谱、ELO 战绩与会话**（审查实测：1516 分 1 局的账号被搬空，
+  // 受害者账号随即变回 1500 分空号）。
+  // 完整方案是「迁移凭据」（游客会话里存一个不下发的 key，迁移时必须携带）——留下一版；
+  // 本版先做**最小修复**：已是注册账号的 id 一律不迁移，并记审计日志。
+  if (guestId && getAccount(guestId)) {
+    log.warn('accounts', '拒绝游客数据迁移：目标 id 已是注册账号', { guestId, by: id });
+  } else if (guestId) {
+    migrateGuestData(guestId, id);
+  }
   // 写会话（名字=用户名，供 WS/REST 显示）
   auth.upsertSession(id, name);
   return { ok: true, account: publicInfo(account) };
@@ -124,9 +158,23 @@ function verifyToken(token) {
   if (parts.length !== 3) return null;
   const [accountId, ts, sig] = parts;
   const expected = crypto.createHmac('sha256', SESSION_SECRET).update(`${accountId}.${ts}`).digest('hex');
-  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+  // ⚠️⚠️ 常量时间比较前必须把「长度」量准（2026-09-21 安全审查 P0-1，已实测复现）：
+  // 原实现用 `sig.length`（**UTF-16 字符数**）做前置校验，而 `Buffer.from(sig)` 得到的是
+  // **UTF-8 字节数**。签名段塞多字节字符时（32 个 emoji = 64 字符 / 128 字节），
+  // 长度校验通过、`crypto.timingSafeEqual` 因字节长度不等抛 RangeError；
+  // 该异常发生在 WS 握手回调里且无人接 → **整个进程退出，全部在线对局断线**
+  // （单行命令即可打崩，且不需要任何账号）。
+  // 修法：先做**格式白名单**（64 位小写 hex ⇒ 字符数恒等于字节数），再比较，并兜住异常。
+  if (typeof sig !== 'string' || !/^[0-9a-f]{64}$/.test(sig) || sig.length !== expected.length) {
     return null;
   }
+  let same = false;
+  try {
+    same = crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
+  } catch (_) {
+    return null; // 理论上到不了这里，但握手路径不允许有任何抛出点
+  }
+  if (!same) return null;
   if (Date.now() - Number(ts) > SESSION_TTL_MS) return null;
   const acct = getCache()[accountId];
   if (!acct) return null;

@@ -112,11 +112,35 @@ const wss = new WebSocketServer({
 });
 
 wss.on('connection', (ws, req) => {
-  // 解析 guestId（从查询参数）
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const guestId = url.searchParams.get('guest') || null;
-  // 传入客户端 IP/UA（PLAN §K1：登录记录与管理员审计的数据来源）
-  protocol.handleConnection(ws, guestId, netInfo.clientInfo(req));
+  // ⚠️⚠️ 握手回调**必须整体兜住异常**（2026-09-21 安全审查 P0-1，已实测复现）：
+  // 这里的任何抛出都没有人接 —— Node 视为 uncaughtException 直接**退出进程**，
+  // 全部在线对局一起断线。而触发它只需要一条畸形消息或一个畸形请求头：
+  //   ① `new URL(req.url, 'http://' + req.headers.host)`：畸形 Host（如 `a b`）抛 ERR_INVALID_URL；
+  //   ② `handleConnection` 内部解析 guest 令牌时抛错（见 `accounts.verifyToken` 的字节长度坑）。
+  try {
+    // 解析 guestId（从查询参数）。⚠️ **不信任 Host**：畸形 Host 会让 new URL 抛错，
+    // 而 Host 在这里只用来凑基地址（req.url 本身是绝对路径），固定 localhost 即可。
+    const url = new URL(req.url, 'http://localhost');
+    const guestId = url.searchParams.get('guest') || null;
+    // 传入客户端 IP/UA（PLAN §K1：登录记录与管理员审计的数据来源）
+    protocol.handleConnection(ws, guestId, netInfo.clientInfo(req));
+  } catch (err) {
+    log.error('ws', 'WS 握手异常，仅拒绝该连接', { err: err && err.message });
+    try { ws.close(); } catch (_) { /* 忽略 */ }
+  }
+});
+
+// ---- 最后一道保险（2026-09-21 安全审查 P0-1）----
+// 已知的两个崩溃向量已按"逐个入口兜住"修掉，但这类漏口永远是"下一个还在路上"。
+// 对**单进程**游戏服来说，"单个请求把全站打崩"的代价远大于"这一个请求处理失败"，
+// 所以再加一道进程级兜底：记日志、保持存活。
+// ⚠️ 这是保险而**不是替代品**：新代码仍必须自己 try/catch（走到这里时状态可能已不一致）。
+process.on('uncaughtException', (err) => {
+  log.error('process', '未捕获异常（已兜住，进程继续运行）',
+    { err: err && err.stack ? String(err.stack).split('\n')[0] : String(err) });
+});
+process.on('unhandledRejection', (err) => {
+  log.error('process', '未处理的 Promise 拒绝（已兜住）', { err: err && err.message ? err.message : String(err) });
 });
 
 server.listen(PORT, () => {

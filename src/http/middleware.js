@@ -105,7 +105,13 @@ function requestId(req, res, next) {
  * 注：这层只是入口隐蔽，真正的权限校验仍在 `admin.verify`（所有 `/api/admin/*` 均校验）。
  */
 function adminEntryGate(req, res, next) {
-  if (ADMIN_ENTRY_KEY && req.path === '/admin.html' && req.query.k !== ADMIN_ENTRY_KEY) {
+  // ⚠️ `req.path` **不做百分号解码**，而静态中间件会解码后再匹配文件 ——
+  // 于是 `GET /%61dmin.html` 能直接绕过门禁拿到后台页（2026-09-21 安全审查 P1-4，已复现）。
+  // 比较前先解码（编码非法就按"非目标路径"处理，绝不因此抛错）。
+  // 注：绕过门禁不等于拿到权限（真正的校验在 `admin.verify`），但会暴露后台入口与攻击面。
+  let path = req.path;
+  try { path = decodeURIComponent(path); } catch (_) { /* 非法编码：保持原样 */ }
+  if (ADMIN_ENTRY_KEY && path === '/admin.html' && req.query.k !== ADMIN_ENTRY_KEY) {
     return res.status(404).send('Not Found');
   }
   next();

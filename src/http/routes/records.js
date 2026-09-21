@@ -16,17 +16,24 @@ const auth = require('../../auth');
 const accounts = require('../../accounts');
 const audit = require('../../audit');
 const rateLimit = require('../../ratelimit');
-const { protocol, resolvePlayer, sanitize, checkAdmin } = require('../context');
+const { protocol, resolvePlayer, resolveOwner, sanitize, checkAdmin } = require('../context');
 
 module.exports = function registerRecords(app) {
   // ---------- 读取：导出 / 回放 / 复盘 ----------
+  //
+  // ⚠️⚠️ 本文件的**归属判定一律用 `resolveOwner`，不用 `resolvePlayer`**
+  // （2026-09-21 安全审查 P0-4，已实测复现）：
+  // `resolvePlayer` 是公开读用的宽松解析（`/api/profile?player=` 就该宽松），
+  // 但拿它做 `records.isOwner` 判定时，"知道别人的公开 id"＝拿到他的身份 ——
+  // 无令牌即可导出/回放/复盘他人棋谱，还能以他名义写评论、书签、变着。
+  // `resolvePlayer` 现在只保留给**管理员检索**那一条（管理员本就允许查任意人）。
 
   // 棋谱导出（权限：owner 或管理员）
   app.get('/api/records/:id/export', (req, res) => {
     const fmt = req.query.fmt === 'csa' ? 'csa' : 'kif';
     const rec = records.getRecord(req.params.id);
     if (!rec) return res.status(404).json({ error: '棋谱不存在' });
-    const guest = resolvePlayer(req.query.guest);
+    const guest = resolveOwner(req.query.guest);
     // §L2：管理员 / 谱主 / 已公开棋谱 均可导出（管理员判定统一走 checkAdmin）
     if (!records.canView(rec, { playerId: guest, isAdmin: !!checkAdmin(req) })) {
       return res.status(403).json({ error: '无权导出他人的棋谱' });
@@ -50,7 +57,7 @@ module.exports = function registerRecords(app) {
   app.get('/api/records/:id/playback', (req, res) => {
     const rec = records.getRecord(req.params.id);
     if (!rec) return res.status(404).json({ error: '棋谱不存在' });
-    const guest = resolvePlayer(req.query.guest);
+    const guest = resolveOwner(req.query.guest);
     // §L2：公开棋谱任何人可回放（管理员判定统一走 checkAdmin）
     if (!records.canView(rec, { playerId: guest, isAdmin: !!checkAdmin(req) })) {
       return res.status(403).json({ error: '只能回放自己的棋谱' });
@@ -60,7 +67,7 @@ module.exports = function registerRecords(app) {
 
   // 复盘数据（完整：含书签/评论/变着）。权限：owner 或管理员。
   app.get('/api/records/:id/review', (req, res) => {
-    const guest = resolvePlayer(req.query.guest);
+    const guest = resolveOwner(req.query.guest);
     const rec = records.getRecord(req.params.id);
     if (!rec) return res.status(404).json({ error: '棋谱不存在' });
     // §L2：公开棋谱任何人可复盘（管理员判定统一走 checkAdmin）
@@ -109,7 +116,7 @@ module.exports = function registerRecords(app) {
 
   // 书签（toggle）
   app.post('/api/records/:id/bookmark', (req, res) => {
-    const guest = req.body && req.body.guest;
+    const guest = resolveOwner(req.body && req.body.guest);
     const moveNo = req.body && req.body.moveNo;
     const on = !!(req.body && req.body.on);
     const rec = records.getRecord(req.params.id);
@@ -126,7 +133,7 @@ module.exports = function registerRecords(app) {
   // 权限：谱主可写自己的评论；管理员可写、编辑、删除任意评论（force）
   app.post('/api/records/:id/comment', (req, res) => {
     const isAdmin = !!checkAdmin(req); // 管理员判定统一走 checkAdmin
-    const guest = resolvePlayer(req.body && req.body.guest);
+    const guest = resolveOwner(req.body && req.body.guest);
     const moveNo = req.body && req.body.moveNo;
     const text = req.body && req.body.text;
     const commentId = (req.body && req.body.commentId) || null;
@@ -162,7 +169,7 @@ module.exports = function registerRecords(app) {
 
   // 变着（添加一条变着走法）
   app.post('/api/records/:id/variation', (req, res) => {
-    const guest = req.body && req.body.guest;
+    const guest = resolveOwner(req.body && req.body.guest);
     const parent = req.body && req.body.parent;
     const move = req.body && req.body.move;
     const rec = records.getRecord(req.params.id);

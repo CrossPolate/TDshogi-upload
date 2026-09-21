@@ -26,10 +26,17 @@
   /** 取元素：`$('id')` → `document.getElementById('id')` */
   function $(id) { return document.getElementById(id); }
 
-  /** HTML 转义（防 XSS）：用于所有拼接进 innerHTML 的动态文本 */
+  /**
+   * HTML 转义（防 XSS）：用于所有拼接进 innerHTML 的动态文本。
+   *
+   * ⚠️ 必须**同时转义单引号**（2026-09-21 安全审查 P1-3）：
+   * 只转 `& < > "` 时，凡是把值拼进**单引号属性**（如 `onclick="f('<id>')"`）的地方，
+   * 一个 `'` 就能逃出属性 → 存储型 XSS。审查实测：游客改名 `');alert()//`
+   * （12 字符，恰好通过长度校验）→ 管理员点该用户任一按钮即以管理员身份执行脚本。
+   */
   function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     }[c]));
   }
 
