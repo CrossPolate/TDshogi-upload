@@ -204,7 +204,7 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 `protocol.js` 的 `case` 列表与 `C2S` 是否一致（这次加 `set_avatar` / `report` 就靠它拦住过一次）。
 
 服务端消息：`hello` `matched` `room_created` `room_joined` `game_start` `state` `clock` `move_invalid`
-`game_over` `elo_updated` `spectator_update` `chat` `tournament_update` `renamed` `avatar_updated`
+`game_over` `spectator_update` `chat` `renamed` `avatar_updated`
 `reported` `spectating`
 `demo_state` `demo_init` `admin_logged_in` `error`。
 
@@ -247,6 +247,11 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 首次启动会把旧版 JSON 迁移入库并改名 `.bak`。
 
 ## 开发与测试
+
+> ⚠️ **本节这些命令只在「开发仓库」里可用**：部署镜像（`github-upload/`）按部署清单打包，
+> **不含** `tests/`、`scripts/`、eslint 配置与 `docs/`。在镜像里跑 `npm test` 会得到
+> **"0 个测试通过"的假绿**（没有测试文件也算成功）、`npm run lint` 直接报错。
+> 要跑这些请回到开发仓库（2026-09-21 审查 P2-5）。
 
 - **单元测试**：`npm test`（`tests/*.test.js`，Node 内置 `node --test`，纯函数不需起服）。
   当前 **238 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、

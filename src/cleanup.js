@@ -23,6 +23,9 @@
 
 const storage = require('./storage');
 const accounts = require('./accounts');
+// ⚠️ 会话必须走 `auth`（kv：`sessions/<id>.json`），**不要**用 storage 的 `sessions` **表** ——
+// 那是 §M4 之前的旧路径，早已无人写入（读它永远得到空数组，见 `plan()` 的注释）。
+const auth = require('./auth');
 const log = require('./logger');
 
 const RETENTION_DAYS = Number(process.env.GUEST_RETENTION_DAYS || 30);
@@ -49,7 +52,11 @@ function plan(opts) {
     accounts.listAccountsRaw().map((a) => a && a.guestId).filter(Boolean)
   );
 
-  const sessions = storage.listSessions();
+  // ⚠️⚠️ 会话来源是 **kv**（`sessions/<id>.json`，§M4 起唯一来源）。
+  // 2026-09-21 审查 P1-5 实测：这里原先调 `storage.listSessions()` 读的是**已废弃的 sessions 表**，
+  // 而该表几乎无人写入 ⇒ `plan()` 恒返回 0 个待清理会话 ⇒ **过期游客与孤儿棋谱永不清理**
+  // （"30 天保留期"这条隐私承诺实际上从未生效），kv 数据只增不减。
+  const sessions = auth.listSessions();
   const staleSessions = sessions.filter((s) => {
     if (!s || !s.id) return false;
     if (registered.has(s.id)) return false; // 已注册 → 永不清理
@@ -110,7 +117,12 @@ function run(opts) {
 
   let deletedSessions = 0;
   for (const s of p.staleSessions) {
-    try { deletedSessions += storage.deleteSession(s.id); } catch (err) {
+    // 同理走 kv 路径（`auth.adminDeleteSession` 删的就是 `sessions/<id>.json`）：
+    // 原先的 `storage.deleteSession()` 打向旧表，删不到任何东西。
+    try {
+      auth.adminDeleteSession(s.id);
+      deletedSessions += 1;
+    } catch (err) {
       log.error('cleanup', `删除会话 ${s.id} 失败`, { err, sessionId: s.id });
     }
   }

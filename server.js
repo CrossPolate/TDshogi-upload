@@ -91,6 +91,10 @@ const server = http.createServer(app);
 
 const wss = new WebSocketServer({
   server,
+  // 单条消息体积上限（2026-09-21 审查 P2-2）：ws 默认 100 MiB，而本项目最大的客户端消息
+  // 也就几十字节（走法/聊天/建房参数），64 KB 已经宽得离谱。留着默认值等于给"发一个巨大帧
+  // 把内存吃满"留门（限流只限制**频率**，不限制**单帧体积**）。
+  maxPayload: 64 * 1024,
   // IP 封禁的**第二个生效点**（PLAN §X4）：在握手阶段就拒绝。
   //
   // ⚠️ 少了这里就是**假封禁**：WS 才是对局主通道，只挡 HTTP 的话，
@@ -111,12 +115,43 @@ const wss = new WebSocketServer({
   },
 });
 
+/**
+ * 单 IP 并发 WS 连接上限（2026-09-21 审查 P2-6）。
+ *
+ * ⚠️ 现有两道防护都**不管这件事**：限流只管"消息频率"，IP 封禁只管"黑名单"。
+ * 于是单个 IP 可以开上万个连接把内存/文件描述符吃光（连上不发消息就完全不触发限流）。
+ * 上限给得宽松（正常浏览器最多几个标签页；多人共用出口 IP 的 NAT/公司网络也够用），
+ * 目的是"存在一个天花板"，不是精确治理。可用 `WS_MAX_CONN_PER_IP` 调整。
+ */
+const WS_MAX_CONN_PER_IP = Math.max(1, Number(process.env.WS_MAX_CONN_PER_IP) || 60);
+const wsConnsByIp = new Map();
+
 wss.on('connection', (ws, req) => {
   // ⚠️⚠️ 握手回调**必须整体兜住异常**（2026-09-21 安全审查 P0-1，已实测复现）：
   // 这里的任何抛出都没有人接 —— Node 视为 uncaughtException 直接**退出进程**，
   // 全部在线对局一起断线。而触发它只需要一条畸形消息或一个畸形请求头：
   //   ① `new URL(req.url, 'http://' + req.headers.host)`：畸形 Host（如 `a b`）抛 ERR_INVALID_URL；
   //   ② `handleConnection` 内部解析 guest 令牌时抛错（见 `accounts.verifyToken` 的字节长度坑）。
+  let ip = 'unknown';
+  try { ip = netInfo.clientIp(req) || 'unknown'; } catch (_) { /* 取不到就算 unknown */ }
+  // 并发连接计数（同一 IP 复用出口时也该有个天花板）
+  const used = (wsConnsByIp.get(ip) || 0) + 1;
+  if (used > WS_MAX_CONN_PER_IP) {
+    log.warn('ws', '同一 IP 并发连接超限，拒绝新连接', { ip, used, limit: WS_MAX_CONN_PER_IP });
+    try { ws.close(1013, 'too many connections'); } catch (_) { /* 忽略 */ }
+    return; // ⚠️ 不计数、也不进入协议层
+  }
+  wsConnsByIp.set(ip, used);
+  let released = false;
+  const release = () => {
+    if (released) return; // close 与 error 都会来，只能减一次
+    released = true;
+    const cur = (wsConnsByIp.get(ip) || 1) - 1;
+    if (cur <= 0) wsConnsByIp.delete(ip); else wsConnsByIp.set(ip, cur);
+  };
+  ws.on('close', release);
+  ws.on('error', release);
+
   try {
     // 解析 guestId（从查询参数）。⚠️ **不信任 Host**：畸形 Host 会让 new URL 抛错，
     // 而 Host 在这里只用来凑基地址（req.url 本身是绝对路径），固定 localhost 即可。

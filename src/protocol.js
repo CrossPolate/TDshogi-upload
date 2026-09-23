@@ -14,7 +14,12 @@
  *
  * 服务端消息（type 字段）：
  *   hello / matched / game_start / state / clock / move_invalid /
- *   game_over / elo_updated / spectator_update / tournament_update / error
+ *   game_over / spectator_update / error
+ *
+ * ⚠️ 这里**只列真正会发出的消息**（2026-09-23 审查 P2-4）：原先还写着 `elo_updated` 与
+ * `tournament_update`，但全项目**从未发送过** —— 客户端照着文档等一个永远不来的消息，
+ * 排障时会白查一轮。要么实现、要么从文档删掉；这两个的语义已由 `state`（含评级变化后的
+ * 对局状态）与 `tournament_update`→`tournament_detail` 的 HTTP 拉取覆盖，故删文档。
  */
 'use strict';
 

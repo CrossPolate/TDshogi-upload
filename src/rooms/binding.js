@@ -136,6 +136,10 @@ module.exports = function applyBinding(X) {
       // 匹配队列清理：断线/退出的排队者必须移出，否则僵尸条目会毒化后续配对
       const qIdx = this.matchQueue.indexOf(clientId);
       if (qIdx >= 0) this.matchQueue.splice(qIdx, 1);
+      // 聊天节流表清理（2026-09-21 审查 P2-3）：`_lastChatTs` 按 clientId **只写不删**，
+      // 每个连过的 clientId 都会留一条，长跑缓慢增长。这里是**唯一的断连汇聚点**，
+      // 所有退出路径（关页面/掉线/退出对局/换房）最后都会走到这里。
+      if (this._lastChatTs) delete this._lastChatTs[clientId];
       // 观战者断线：同样清理（否则残留收广播 + 泄漏）
       const specRoomId = this.clientToRoom.get(clientId);
       if (specRoomId && !this.clientToPlayer.has(clientId)) {
