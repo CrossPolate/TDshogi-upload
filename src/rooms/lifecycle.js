@@ -2,8 +2,11 @@
  * rooms/lifecycle.js — 房间生命周期：建房 / 加入 / 匹配 / 开局 / 赛事对局（PLAN §M1，从 `rooms.js` 拆出）
  *
  * 这是**玩家进入一张棋桌的全部路径**：建房、凭码加入、快速匹配，以及赛事系统直接建房。
- * 三条入口共享同一套「先把自己从旧房间摘干净」的前置逻辑（`_autoLeave*` 系列），
- * 这些清理是幽灵房问题的长期修复成果：
+ * `joinRoom` / `quickMatch` 采用**三段式**（P1-1，2026-09-23）：
+ *  ① 非破坏性校验（目标存在/密码/未开赛/未满/对局中 → 只回 error，**当前对局分毫不动**）
+ *  ② 校验全过后才动当前状态（`_autoLeaveFinished` / `_autoLeaveAllRooms` / `_abandonRestoredFor` / 换房销毁）
+ *  ③ 落座 / 入队
+ *  这些清理是幽灵房问题的长期修复成果：
  *  - 旧连接残留的座位会被回位扫描捞出来，把新连接绑回旧对局 → `_autoLeaveAllRooms` 按 playerId 清；
  *  - 房主刷新后 WAITING 房没人销毁 → 房间码仍可被加入、开局后对手是空壳 → 建房/换房时立即销毁旧等待房；
  *  - 对局中换玩法 → 自动认输退出（用户拍板，PLAN §H）。
@@ -136,52 +139,57 @@ module.exports = function applyLifecycle(X) {
      * @param {string} [password] 私人房间密码（PLAN §T2）
      */
     joinRoom(player, code, password) {
-      // 若在已结束的对局中则自动退出；对局中自动认输退出（用户确认，PLAN §H）
-      this._autoLeaveFinished(player.clientId);
-      this._autoResignAndLeave(player.clientId);
-      this._autoLeaveAllRooms(player.playerId, player.clientId); // 旧连接残留的座位一并退出（幽灵房修复）
-      this._abandonRestoredFor(player.playerId);
-      const roomId = this.byCode.get(code.trim().toUpperCase());
+      // ========== ① 非破坏性校验（P1-1：重复/必然失败的请求 = no-op，绝不先动当前对局） ==========
+      // 修复前这里一上来就 _autoResignAndLeave —— 输错房间码、重复 join 都会把当前对局
+      // 判负（对手立刻收到 game_over detail=投了）。产品决定：这些请求只回 error。
+      // ⚠️ 顺序红线（PLAN §T2 遗训）：密码校验必须在"处理当前所在房间"之前 ——
+      //    否则密码输错也会先把玩家从原等待房踢出去（试错一次就被赶出房间）。
+      const roomId = this.byCode.get(String(code).trim().toUpperCase());
       if (!roomId) return { ok: false, error: '房间不存在或房间码错误' };
-      // 同一身份不能加入自己的房间（房主座位已是自己的 playerId → 再加入即一人占两位）
       const target = this._room(roomId);
-      if (target && ['b', 'w'].some((s) => target.players[s] && target.players[s].playerId === player.playerId)) {
+      if (!target) return { ok: false, error: '房间不存在或房间码错误' };
+      // 同一身份不能加入自己的房间（房主座位已是自己的 playerId → 再加入即一人占两位）
+      if (['b', 'w'].some((s) => target.players[s] && target.players[s].playerId === player.playerId)) {
         return { ok: false, error: '这是你自己创建/所在的房间，同一身份不能加入（可在对局结束后再来，或换一个身份测试）' };
       }
-      // 私人房间密码校验（PLAN §T2）。
-      // ⚠️ 位置讲究：必须放在「处理当前所在房间」**之前**——否则密码输错也会先把玩家
-      // 从原等待房踢出去，变成"试错一次就被赶出房间"。
-      if (target && target.isPrivate && !roomPassword.verify(target.passwordHash, password)) {
+      // 私人房间密码校验（PLAN §T2）——仍在非破坏阶段
+      if (target.isPrivate && !roomPassword.verify(target.passwordHash, password)) {
         return {
           ok: false,
           needPassword: true, // 结构化标志：前端据此显示密码输入框再重试
           error: password ? '房间密码错误' : '该房间是私人房间，需要密码',
         };
       }
+      if (target.status !== 'WAITING') return { ok: false, error: '对局已经开始，无法加入' };
+      if (target.players.b && target.players.w) return { ok: false, error: '房间已满' };
+      // 当前连接所在对局：对局中 → 拒绝（no-op）；已在目标等待房 → 已在房间中
       const curId = this.clientToRoom.get(player.clientId);
-      if (curId) {
-        const curRoom = this._room(curId);
-        if (curRoom && curRoom.status === 'PLAYING') {
-          return { ok: false, error: '你正在对局中，请先结束当前对局' };
-        }
-        // 自己的等待房未开赛：换房 → 销毁旧等待房（避免幽灵房）；
-        // 若目标就是自己的等待房，按"已在房间中"处理（不动原房间）
-        if (curRoom && curRoom.status === 'WAITING') {
-          if (curId === roomId) return { ok: false, error: '你已在房间中' };
-          this._dissolveRoom(curId, 'switch_room');
-          this._unbindClient(player.clientId);
-        }
+      const curRoom = curId ? this._room(curId) : null;
+      if (curRoom && curRoom.status === 'PLAYING') {
+        return { ok: false, error: '你正在对局中，请先结束当前对局' };
       }
+      if (curRoom && curRoom.status === 'WAITING' && curId === roomId) {
+        return { ok: false, error: '你已在房间中' };
+      }
+      // ========== ② 校验全过后才动当前状态 ==========
+      // FINISHED 房解绑；旧连接残留的座位一并退出（幽灵房修复）；放弃恢复局
+      this._autoLeaveFinished(player.clientId);
+      this._autoLeaveAllRooms(player.playerId, player.clientId);
+      this._abandonRestoredFor(player.playerId);
+      // 自己的等待房未开赛：换房 → 销毁旧等待房（避免幽灵房）
+      if (curRoom && curRoom.status === 'WAITING') {
+        this._dissolveRoom(curId, 'switch_room');
+        this._unbindClient(player.clientId);
+      }
+      // ========== ③ 落座 + 开局（② 期间目标房可能被销毁/开赛，重查一遍） ==========
       const room = this._room(roomId);
+      if (!room) return { ok: false, error: '房间不存在或房间码错误' };
       if (room.status !== 'WAITING') return { ok: false, error: '对局已经开始，无法加入' };
       // 空位
       let seat = null;
       if (!room.players.b) seat = 'b';
       else if (!room.players.w) seat = 'w';
       else return { ok: false, error: '房间已满' };
-      if (room.players[seat] && room.players[seat].playerId === player.playerId) {
-        return { ok: false, error: '你已在房间中' };
-      }
       room.players[seat] = {
         clientId: player.clientId,
         playerId: player.playerId,
@@ -209,23 +217,31 @@ module.exports = function applyLifecycle(X) {
      * 快速匹配：将玩家放入队列，两人即配对。
      */
     quickMatch(player) {
-      // 若在已结束的对局中则自动退出；对局中自动认输退出（用户确认，PLAN §H）
+      // ========== ① 非破坏性校验（P1-1：双击/对局中点匹配 = no-op，绝不把当前对局判负） ==========
+      // ⚠️ **只拦 PLAYING**：不能写成"状态不是 WAITING 就拒绝"——那会把既有的
+      // 「对局结束后不退出、直接再匹配」也挡掉（FINISHED 房靠 _autoLeaveFinished 解绑）。
+      // 修复前这里一上来就 _autoResignAndLeave → 双击匹配直接把当前对局判负。
+      const curId = this.clientToRoom.get(player.clientId);
+      if (curId) {
+        const cur = this._room(curId);
+        if (cur && cur.status === 'PLAYING') {
+          return { ok: false, error: '你正在对局中，请先结束当前对局' };
+        }
+      }
+      // ========== ② 校验过后才动当前状态 ==========
       this._autoLeaveFinished(player.clientId);
-      this._autoResignAndLeave(player.clientId);
       this._autoLeaveAllRooms(player.playerId, player.clientId); // 旧连接残留的座位一并退出（幽灵房修复）
       this._abandonRestoredFor(player.playerId);
-      // 已绑在某房间：进行中 → 拒绝；自己的等待房（未开赛）→ 销毁后再匹配
+      // 已绑在自己的等待房（未开赛）→ 销毁旧房再入队
       // （否则房主换玩法后 WAITING 房残留，其他人凭旧 code 加入会开局但对手是空壳）
-      const curId = this.clientToRoom.get(player.clientId);
       if (curId) {
         const cur = this._room(curId);
         if (cur && cur.status === 'WAITING') {
           this._dissolveRoom(curId, 'switch_to_match');
           this._unbindClient(player.clientId);
-        } else {
-          return { ok: false, error: '你已在房间中' };
         }
       }
+      // ========== ③ 入队与配对 ==========
       // 同一身份已在队列 → 拒绝（防止同浏览器双窗口/双标签自己和自己配对，占两个位置）
       if (this.matchQueue.some((cid) => {
         const p = this.playerRegistry(cid);

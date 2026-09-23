@@ -43,6 +43,12 @@ class Protocol {
     this.playerRegistry = new Map();
     // playerId -> Set<clientId>（同一身份可有多窗口连接，全部保留）
     this.playerToClients = new Map();
+    // 连接自增序号：保证 clientId 全局唯一（P1-1 排障时定位到的碰撞 bug：
+    // 同一身份的双连接在同一毫秒内握手时，纯时间戳后缀会生成**完全相同的
+    // clientId**，后到的连接覆盖 `clients`/`playerRegistry` 里先到的注册 →
+    // 先到的连接此后收不到任何回执（消息全部发到后者的 socket 上），表现为
+    // "请求被静默丢弃"。e2e-test.js「同身份占用防护」段历史抖动即源于此。）
+    this._connSeq = 0;
 
     this.rooms = new RoomManager((clientId, payload) => {
       const ws = this.clients.get(clientId);
@@ -84,7 +90,7 @@ class Protocol {
       const loginEv = audit.loginEvent({ playerId: session.id, ip: meta.ip || null, ua: meta.ua || null, via: 'ws' });
       if (loginEv) ratings.addExp(session.id, 2, 'daily-login');
     } catch (_) {}
-    const clientId = `${session.id}_${Date.now().toString(36)}`;
+    const clientId = `${session.id}_${Date.now().toString(36)}${(++this._connSeq).toString(36)}`;
     this.clients.set(clientId, ws);
     this.playerRegistry.set(clientId, {
       playerId: session.id,
