@@ -188,6 +188,16 @@
   // （原先与 history.js 各有一份，加新结果说明时很容易只改一边）
   function resultText(r) { return window.UI.resultText(r); }
 
+// 评论「编辑 / 删除」按钮：从 inline onclick 改为 `data-act` 委托（2026-09-23，审查项 13f）。
+// 这两个值（手数 + 评论 id）原先被拼进 `onclick="rvEditComment(3, 'abc')"` 里 ——
+// 那正是 P1-3「单引号逃逸 → 存储型 XSS」的形态。现在值为**属性文本**，逃不出属性。
+window.UI.onAction('cm-edit', (el) => window.rvEditComment(
+  Number(el.getAttribute('data-no')), el.getAttribute('data-id'),
+));
+window.UI.onAction('cm-del', (el) => window.rvDeleteComment(
+  Number(el.getAttribute('data-no')), el.getAttribute('data-id'),
+));
+
   function render() {
     // 顶部元信息（§L：管理员可为展示覆盖双方名/结果说明，与广场卡片保持一致）
     const ov = (review.meta && review.meta.nameOverrides) || null;
@@ -265,8 +275,8 @@
             <span class="rv-comment-text">${esc(c.text)}</span>
             ${c.editedAt ? '<span class="rv-comment-edited">（已编辑）</span>' : ''}
             ${isAdmin ? `<span class="rv-comment-ops">
-              <button class="btn btn-ghost btn-sm" onclick="rvEditComment(${no}, '${c.id}')">✏️</button>
-              <button class="btn btn-ghost btn-sm" onclick="rvDeleteComment(${no}, '${c.id}')">🗑</button>
+              <button class="btn btn-ghost btn-sm" data-act="cm-edit" data-no="${no}" data-id="${esc(c.id)}" title="编辑">✏️</button>
+              <button class="btn btn-ghost btn-sm" data-act="cm-del" data-no="${no}" data-id="${esc(c.id)}" title="删除">🗑</button>
             </span>` : ''}
           </div>`).join('')}</div>`);
       }

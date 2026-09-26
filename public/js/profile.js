@@ -388,7 +388,7 @@
       const iWon = mineIsB ? r.result === 'b' : r.result === 'w';
       const cls = iWon ? 'result-win' : 'result-lose';
       return `
-        <div class="record-item" onclick="location.href='history.html'">
+        <div class="record-item" data-href="history.html">
           <div style="font-size:13px;">${esc(names[0])} vs ${esc(names[1])} <span style="color:var(--text-dim);font-size:11px;">（我执${mineIsB ? '先' : '后'}手）</span></div>
           <div class="r-result ${cls}">${iWon ? '胜' : (r.result === '-' ? '和' : '负')} · ${esc(result)}</div>
           <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${(r.moves || []).length} 手 · ${I18N.fmt(r.createdAt)}</div>

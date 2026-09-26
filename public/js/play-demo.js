@@ -175,7 +175,13 @@
     let status;
     if (freeMode) status = '✋ 自由摆棋中（本地草稿，不入谱不同步）';
     else if (seat && amDemo) status = '🎤 正在由你演示（对方实时观看）';
-    else if (seat) status = '🎤 正在由 ' + (name || '对方') + ' 演示';
+    else if (seat) {
+      // ⚠️ 这一句是**拼接**出来的，词典查不到整句 —— 必须在调用点用 `{name}` 模板来查，
+      // 否则切到英/日后它永远停在中文（2026-09-23 补 i18n 时发现）。
+      // 其余三句都是完整字面量，交给 i18n 的 DOM 观察器翻译，不必在这里手动查。
+      const t = (s, v) => (window.I18N ? window.I18N.t(s, v) : s);
+      status = t('🎤 正在由 {name} 演示', { name: name || t('对方') });
+    }
     else status = '💤 演示暂停——点「我来演示」开始行棋';
     $('demoStatus').textContent = status;
     $('btnDemoClaim').style.display = (mySeat && !seat && !freeMode) ? 'inline-block' : 'none';

@@ -254,9 +254,11 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 > 要跑这些请回到开发仓库（2026-09-21 审查 P2-5）。
 
 - **单元测试**：`npm test`（`tests/*.test.js`，Node 内置 `node --test`，纯函数不需起服）。
-  当前 **238 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、
+  当前 **268 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、
   初始盘面（含駒落ち各手合割的 SFEN 生成）、`game.js` 规则引擎（含"候选着法必被接受"的不变量）、
   赛事状态机与权限、瑞士制配对与积分、等级特权、举报、多语言词典自检（含"翻译必须收敛"回归）、
+  i18n 词条提取器（含"单行块注释吞掉后续代码"假绿回归）、设置 SCHEMA/归一化/`file:` 音频选项
+  对应真实 mp3、音效与 BGM 音频链路（Audio 桩验 URL 映射/循环/切曲/总开关）、
   棋钟、限流、隐私脱敏等
 - **静态检查**：`npm run lint`（eslint；`no-undef` 正是"路由层漏 require 导致接口 500"那类事故的克星）
 - **多语言**：`npm run i18n` 报告**还有哪些界面文案没有词条**（`--locale=ja` 看日语，
@@ -265,12 +267,13 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
   当前 **en 与 ja 面向玩家的页面都已 100% 覆盖**（`admin.html` 刻意不翻），见 `docs/PLAN.md` §Z5 / §Z7
 - **CI**：`.github/workflows/ci.yml`（语法检查 + lint + 单测 + e2e 冒烟）
 - **e2e 回归**：`npm run e2e` —— **自动起隔离实例**（临时 `DATA_DIR` + `ADMIN_PASSWORD=admin123`）
-  后跑完整套，**15 个脚本 / 227 项断言**，末尾汇总并停服。
+  后跑完整套，**17 个脚本 / 265 项断言**，末尾汇总并停服。
   ⚠️ 其中 2 个脚本**自带服务器**（`e2e-snapshot.js` 重启进程验快照、`e2e-freeboard.js` 起 demo 服），
   会与本实例抢端口，需单独跑。
   ⚠️ 别手搓"先起服再 `node scripts/e2e-xxx.js`"：**漏掉 `ADMIN_PASSWORD` 就会卡在
   "Admin 等待 admin_logged_in 超时"**，看起来像代码坏了——这正是把前提固化成一键入口的原因。
-- **文档**：`docs/PLAN.md`（路线图）/ `docs/ARCHITECTURE.md`（架构）/ `docs/UI-PAGES.md`（页面地图）
+- **文档**：`docs/PLAN.md`（路线图）/ `docs/ARCHITECTURE.md`（架构）/ `docs/UI-PAGES.md`（页面地图）/
+  `docs/HANDOFF.md`（**尚未完成、需外部协助的困难任务清单**，含验收标准、已知坑与分工建议）
 
 ## 限制与扩展方向
 

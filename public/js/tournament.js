@@ -310,12 +310,10 @@
         post(`/api/tournaments/${encodeURIComponent(T.id)}/cancel`, { reason }, '赛事已取消');
       });
     }
-    // 管理面板里的「批准 / 拒绝」：**作用域限定在面板内部**，
-    // 名单里的同名按钮由 `renderRoster` 自己绑——两处都写 `document.querySelectorAll`
-    // 会把回调重复绑到对方按钮上（点一下触发两次请求）。
-    box.querySelectorAll('button[data-act]').forEach((btn) => {
-      btn.addEventListener('click', () => rosterAction(btn.getAttribute('data-act'), btn.getAttribute('data-pid')));
-    });
+    // 「批准 / 拒绝」按钮**不再在这里逐个绑定**（2026-09-23，审查项 13f）：
+    // 已改走 util.js 的**整页委托**（见文件末尾的注册）。
+    // ⚠️ 原注释记录的坑是真的：两处面板各写一次 `querySelectorAll('button[data-act]')`
+    // 会把回调同时绑到对方的按钮上（点一下发两次请求）。委托只有一份监听，从结构上不会再犯。
     const allBtn = el('btnApproveAll');
     if (allBtn) {
       allBtn.addEventListener('click', () => approveAll(pendingList.map((e) => e.id)));
@@ -425,10 +423,7 @@
       </div>
       ${body}`;
 
-    // 名单里的操作按钮（事件委托：一处处理所有按钮，避免给每个按钮单独绑定）
-    el('tnRoster').querySelectorAll('button[data-act]').forEach((btn) => {
-      btn.addEventListener('click', () => rosterAction(btn.getAttribute('data-act'), btn.getAttribute('data-pid')));
-    });
+    // 名单里的操作按钮同样走**整页委托**（2026-09-23，审查项 13f）：这里不再逐个绑定。
   }
 
   /**
@@ -634,7 +629,7 @@
       const names = r.names || ['先手', '後手'];
       const res = window.UI.resultText(r, { withClass: true });
       return `
-        <div class="record-item" onclick="location.href='review.html?id=${encodeURIComponent(r.id)}'">
+        <div class="record-item" data-href="review.html?id=${encodeURIComponent(r.id)}">
           <div style="font-size:13px;">${esc(names[0])} vs ${esc(names[1])}</div>
           <div class="r-result ${res.cls}">${esc(res.text)}</div>
           <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${r.moveCount || 0} 手 · ${fmtTime(r.createdAt)} · 进入复盘 →</div>
@@ -770,6 +765,16 @@
   api.on('error', (d) => {
     if (d && d.message) toast(d.message);
   });
+
+  // 名单/待办队列里的操作按钮（2026-09-23，审查项 13f）：
+  // 从"两处各自 querySelectorAll + 逐个绑定"改为**一处注册 + 整页委托**。
+  // ⚠️ 这几个动作名（approve / reject / kick / void / champion）起得比较泛，
+  // 只在本页使用、且本页不与 admin.html 共存，故不改名（改用 data-pid 传参赛者 id）。
+  window.UI.onAction('approve', (btn) => rosterAction('approve', btn.getAttribute('data-pid')));
+  window.UI.onAction('reject', (btn) => rosterAction('reject', btn.getAttribute('data-pid')));
+  window.UI.onAction('kick', (btn) => rosterAction('kick', btn.getAttribute('data-pid')));
+  window.UI.onAction('void', (btn) => rosterAction('void', btn.getAttribute('data-pid')));
+  window.UI.onAction('champion', (btn) => rosterAction('champion', btn.getAttribute('data-pid')));
 
   load();
 })();

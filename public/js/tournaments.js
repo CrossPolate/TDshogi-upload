@@ -357,7 +357,7 @@
     const entrants = t.entrants || [];
     const mine = entrants.find((e) => e.id === myPlayerId);
     if (!mine) {
-      return `<button class="btn btn-primary btn-sm" onclick="joinTournament('${t.id}')">报名</button>`;
+      return `<button class="btn btn-primary btn-sm" data-act="join-tn" data-id="${esc(t.id)}">报名</button>`;
     }
     const map = {
       pending: ['🕐 待主办人批准', 'var(--gold-light)'],
@@ -429,6 +429,11 @@
 
   // 公共工具（PLAN §M5）：实现统一在 util.js，此处只转发
   function esc(s) { return window.UI.esc(s); }
+
+  // 「报名」按钮：从 inline onclick 改为 data-act 委托（2026-09-23，审查项 13f）。
+  // 赛事 id 虽是服务端生成的，但**拼进属性**这件事本身就不该做 ——
+  // 改属性文本后，即使哪天 id 里出现引号也逃不出属性（见 util.js 的 onAction 注释）。
+  window.UI.onAction('join-tn', (el) => window.joinTournament(el.getAttribute('data-id')));
 
   loadTournaments();
   setInterval(loadTournaments, 5000);  // 轮询：检测新对局安排/对阵推进

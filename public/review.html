@@ -21,7 +21,7 @@
     <!-- 无权限/未找到 -->
     <div id="error" class="card" style="padding:40px;text-align:center;display:none;color:var(--red-light);">
       <div id="errorText"></div>
-      <button class="btn btn-ghost" style="margin-top:16px;" onclick="location.href='history.html'">返回棋谱列表</button>
+      <button class="btn btn-ghost" style="margin-top:16px;" data-href="history.html">返回棋谱列表</button>
     </div>
 
     <!-- 复盘器主体 -->
@@ -49,7 +49,7 @@
             <button class="btn btn-ghost btn-sm" id="btnFlipView" title="切换先手 / 后手视角">🔄 翻转视角</button>
             <button class="btn btn-ghost btn-sm" id="btnExportKif">导出 KIF</button>
             <button class="btn btn-ghost btn-sm" id="btnExportCsa">导出 CSA</button>
-            <button class="btn btn-ghost btn-sm" onclick="location.href='history.html'">返回</button>
+            <button class="btn btn-ghost btn-sm" data-href="history.html">返回</button>
           </div>
         </div>
       </div>

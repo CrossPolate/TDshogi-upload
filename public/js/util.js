@@ -334,6 +334,53 @@
       + ` title="${esc(opts.name || '')}">${esc(avatarGlyph(opts.avatar, opts.name))}</span>`;
   }
 
+  // ==================================================================
+  // 事件委托（2026-09-23，安全审查遗留项 13f）
+  // ==================================================================
+  const actionHandlers = {};
+
+  /**
+   * 注册一个 `data-act` 动作。**整页只装一次 click 监听**（本文件加载时就装好）。
+   *
+   * ⚠️⚠️ 为什么不再用 inline `onclick="fn('${id}')"`（审查 P1-3 的根因）：
+   * 把值拼进**属性**里，安全就全靠"每个调用点都记得让 `esc` 转义"。
+   * 2026-09-21 补上单引号转义只是**止血** —— 只要有人新加一处忘了 `esc`，
+   * 立刻又是一个存储型 XSS（游客改个名字，管理员点一下就在管理员身份下执行脚本）。
+   * 改用 `data-*` 后：① 值为**普通属性文本**，引号逃不出属性、更不会被执行；
+   * ② 事件走**委托**，脚本重渲染列表也不会丢监听；③ 整页一个监听，比 34 个 inline 属性更省。
+   * （仍要 `esc`：那是防 HTML 注入，与"会不会执行"是两件事。）
+   *
+   * 用法：
+   *   UI.onAction('user-ban', (el) => adminBan(el.dataset.id, el.dataset.name));
+   *   `<button data-act="user-ban" data-id="…" data-name="…">封禁</button>`
+   *
+   * 另有一条**通用**约定：任何元素带 `data-href` 即点击跳转
+   * （替代原先 6 处 `onclick="location.href='review.html?id=…'"`）。
+   *
+   * @param {string} name  `data-act` 的值
+   * @param {(el:Element, ev:Event)=>void} fn 处理器，`el` 是最近的 `[data-act]` 元素
+   */
+  function onAction(name, fn) {
+    actionHandlers[name] = fn;
+  }
+
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    const jump = t.closest('[data-href]');
+    if (jump) {
+      const href = jump.getAttribute('data-href');
+      if (href) global.location.href = href;
+      return;
+    }
+    const el = t.closest('[data-act]');
+    if (!el) return;
+    const fn = actionHandlers[el.getAttribute('data-act')];
+    if (fn) fn(el, e);
+  });
+
   global.debugLog = debugLog;
-  global.UI = { $, esc, toast, debugLog, resultText, paginate, bracketHtml, avatarGlyph, avatarHtml };
+  global.UI = {
+    $, esc, toast, debugLog, resultText, paginate, bracketHtml, avatarGlyph, avatarHtml, onAction,
+  };
 })(window);

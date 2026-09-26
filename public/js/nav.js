@@ -185,9 +185,9 @@
           ${NAV.map((n) => `<a href="${n.href}" class="${n.id === current ? 'active' : ''}" data-nav="${n.id}">${tr(n.label)}</a>`).join('')}
         </nav>
         <div style="display:flex;align-items:center;gap:10px;">
-          <button class="theme-toggle" id="langToggle" title="${tr('语言')}" onclick="NAV.toggleLocale()">${localeShort()}</button>
-          <button class="theme-toggle" id="themeToggle" title="${tr('切换主题')}" onclick="NAV.toggleTheme()">🌙</button>
-          <button class="theme-toggle" id="settingsToggle" title="${tr('设置')}" onclick="Settings.openPanel()">⚙️</button>
+          <button class="theme-toggle" id="langToggle" title="${tr('语言')}">${localeShort()}</button>
+          <button class="theme-toggle" id="themeToggle" title="${tr('切换主题')}">🌙</button>
+          <button class="theme-toggle" id="settingsToggle" title="${tr('设置')}">⚙️</button>
           ${adminEntryHtml()}
           <a class="nav-user" href="profile.html" title="${isAccount ? tr('个人 · 已登录账号') : tr('个人 · 游客')}">
             <span>${displayName}</span>
@@ -205,16 +205,40 @@
           ${NAV.map((x) => `<a href="${x.href}" class="${x.id === current ? 'active' : ''}" data-nav="${x.id}">${tr(x.label)}</a>`).join('')}
         </nav>
         <div style="display:flex;align-items:center;gap:10px;">
-          <button class="theme-toggle" id="langToggle" title="${tr('语言')}" onclick="NAV.toggleLocale()">${localeShort()}</button>
-          <button class="theme-toggle" id="themeToggle" title="${tr('切换主题')}" onclick="NAV.toggleTheme()">🌙</button>
-          <button class="theme-toggle" id="settingsToggle" title="${tr('设置')}" onclick="Settings.openPanel()">⚙️</button>
+          <button class="theme-toggle" id="langToggle" title="${tr('语言')}">${localeShort()}</button>
+          <button class="theme-toggle" id="themeToggle" title="${tr('切换主题')}">🌙</button>
+          <button class="theme-toggle" id="settingsToggle" title="${tr('设置')}">⚙️</button>
           ${adminEntryHtml()}
         </div>
       `;
       document.body.insertBefore(n, document.body.firstChild);
     }
+    // 三个按钮用 addEventListener 绑定（2026-09-23，审查项 13f）：
+    // 这里刚**重建**过 DOM（innerHTML），所以每次 renderNav 都重新绑一遍 ——
+    // 元素是新的，不会重复绑定。
+    bindNavButtons();
     applyTheme();
     return guest;
+  }
+
+  /**
+   * 绑定导航里的三个按钮（2026-09-23，安全审查遗留项 13f：去掉 inline `onclick`）。
+   *
+   * 为什么这里用 `addEventListener` 而不是 `UI.onAction` 委托：这三个按钮在
+   * **每次 `renderNav` 时都被整块重建**（`innerHTML` 换掉），而它们的 `id` 是稳定的 ——
+   * 重建后重新绑一遍即可；元素是新的，不存在重复监听。
+   * ⚠️ 别改成"绑在 `.nav` 上做委托再按 id 分派"：那要先判断元素在不在 nav 里，更容易写错。
+   */
+  function bindNavButtons() {
+    const on = (id, fn) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('click', fn);
+    };
+    on('langToggle', () => toggleLocale());
+    on('themeToggle', () => toggleTheme());
+    on('settingsToggle', () => {
+      if (global.Settings && global.Settings.openPanel) global.Settings.openPanel();
+    });
   }
 
   function toggleTheme() {

@@ -212,9 +212,9 @@
           <div class="r-result result-win">${esc(res)}</div>
           <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${I18N.fmt(r.createdAt)}</div>
           <div style="display:flex;gap:6px;margin-top:6px;">
-            <button class="btn btn-ghost btn-sm" onclick="adminPlayback('${r.id}')">回放</button>
-            <button class="btn btn-ghost btn-sm" onclick="adminExport('${r.id}','kif')">KIF</button>
-            <button class="btn btn-ghost btn-sm" onclick="adminExport('${r.id}','csa')">CSA</button>
+            <button class="btn btn-ghost btn-sm" data-act="rb-playback" data-id="${esc(r.id)}">回放</button>
+            <button class="btn btn-ghost btn-sm" data-act="rb-export" data-id="${esc(r.id)}" data-fmt="kif">KIF</button>
+            <button class="btn btn-ghost btn-sm" data-act="rb-export" data-id="${esc(r.id)}" data-fmt="csa">CSA</button>
           </div>
         </div>
       `;
@@ -268,12 +268,12 @@
         </div>
         <div class="r-result result-win">Lv.${u.level || 0} · ELO ${u.rating}</div>
         <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${u.games} 局 · 胜 ${u.wins} / 负 ${u.losses} / 平 ${u.draws} · 胜率 ${u.winRate}% · 经验 ${u.exp || 0}</div>
-        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">🌐 最近 IP：${u.lastIp ? `<span title="点击展开完整 IP" style="cursor:pointer;border-bottom:1px dashed var(--text-dim);" onclick="this.textContent='${esc(u.lastIp)}';this.title='';">${esc(maskIp(u.lastIp))}</span>` : '—'}${u.lastSeen ? ` · <span title="最后活跃时间">${I18N.fmt(u.lastSeen)}</span>` : ''}</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">🌐 最近 IP：${u.lastIp ? `<span title="点击展开完整 IP" style="cursor:pointer;border-bottom:1px dashed var(--text-dim);" data-act="reveal-ip" data-text="${esc(u.lastIp)}">${esc(maskIp(u.lastIp))}</span>` : '—'}${u.lastSeen ? ` · <span title="最后活跃时间">${I18N.fmt(u.lastSeen)}</span>` : ''}</div>
         <div style="display:flex;gap:6px;margin-top:6px;">
-          <button class="btn btn-ghost btn-sm" onclick="viewUser('${u.id}')">查看详情</button>
+          <button class="btn btn-ghost btn-sm" data-act="user-view" data-id="${esc(u.id)}">查看详情</button>
           ${u.banned
-            ? `<button class="btn btn-ghost btn-sm" onclick="adminUnban('${u.id}','${esc(u.name)}')">解封</button>`
-            : `<button class="btn btn-ghost btn-sm" onclick="adminBan('${u.id}','${esc(u.name)}')">封禁</button>`}
+            ? `<button class="btn btn-ghost btn-sm" data-act="user-unban" data-id="${esc(u.id)}" data-name="${esc(u.name)}">解封</button>`
+            : `<button class="btn btn-ghost btn-sm" data-act="user-ban" data-id="${esc(u.id)}" data-name="${esc(u.name)}">封禁</button>`}
         </div>
       </div>
     `).join('');
@@ -344,7 +344,7 @@
             <select class="input" id="editStyle" style="width:150px;">${styleOpts}</select></div>
           <div style="flex:1;min-width:200px;"><div style="font-size:11px;color:var(--text-dim);">用户称号（展示为「名称（称号）」，留空清除）</div>
             <input class="input" id="editTitle" value="${esc(data.title || '')}" maxlength="12" style="width:100%;"></div>
-          <button class="btn btn-primary btn-sm" onclick="adminSaveProfile('${id}')">保存资料</button>
+          <button class="btn btn-primary btn-sm" data-act="user-save-profile" data-id="${esc(id)}">保存资料</button>
         </div>
         <div style="font-size:14px;font-weight:700;margin:14px 0 6px;">📊 等级与 ELO <span style="font-size:11px;color:var(--text-dim);font-weight:400;">（Lv.${p.level} · 经验 ${p.exp}；等级随经验自动推导）</span></div>
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:6px;">
@@ -352,17 +352,17 @@
             <input class="input" id="editElo" value="${p.rating}" style="width:110px;"></div>
           <div><div style="font-size:11px;color:var(--text-dim);">经验（≥0）</div>
             <input class="input" id="editExp" value="${p.exp || 0}" style="width:110px;"></div>
-          <button class="btn btn-primary btn-sm" onclick="adminSaveElo('${id}')">保存 ELO/经验</button>
+          <button class="btn btn-primary btn-sm" data-act="user-save-elo" data-id="${esc(id)}">保存 ELO/经验</button>
         </div>
         <div style="font-size:14px;font-weight:700;margin:14px 0 6px;">🛠️ 管理操作</div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
-          <button class="btn btn-ghost btn-sm" onclick="adminRename('${id}','${esc(data.name)}')">✏️ 改名</button>
-          <button class="btn btn-ghost btn-sm" onclick="adminResetRating('${id}','${esc(data.name)}')">♻️ 重置 ELO</button>
-          <button class="btn btn-ghost btn-sm" onclick="adminResetPassword('${id}','${esc(data.name)}')">🔑 重置密码</button>
+          <button class="btn btn-ghost btn-sm" data-act="user-rename" data-id="${esc(id)}" data-name="${esc(data.name)}">✏️ 改名</button>
+          <button class="btn btn-ghost btn-sm" data-act="user-reset-rating" data-id="${esc(id)}" data-name="${esc(data.name)}">♻️ 重置 ELO</button>
+          <button class="btn btn-ghost btn-sm" data-act="user-reset-pwd" data-id="${esc(id)}" data-name="${esc(data.name)}">🔑 重置密码</button>
           ${banned
-            ? `<button class="btn btn-primary btn-sm" onclick="adminUnban('${id}','${esc(data.name)}')">✅ 解封</button>`
-            : `<button class="btn btn-ghost btn-sm" onclick="adminBan('${id}','${esc(data.name)}')">⛔ 封禁</button>`}
-          ${data.isAccount ? `<button class="btn btn-ghost btn-sm" onclick="adminDeleteAccount('${id}','${esc(data.name)}')" style="color:var(--red-light);">🗑 删除账号</button>` : ''}
+            ? `<button class="btn btn-primary btn-sm" data-act="user-unban" data-id="${esc(id)}" data-name="${esc(data.name)}">✅ 解封</button>`
+            : `<button class="btn btn-ghost btn-sm" data-act="user-ban" data-id="${esc(id)}" data-name="${esc(data.name)}">⛔ 封禁</button>`}
+          ${data.isAccount ? `<button class="btn btn-ghost btn-sm" data-act="user-delete" data-id="${esc(id)}" data-name="${esc(data.name)}" style="color:var(--red-light);">🗑 删除账号</button>` : ''}
         </div>
         <div style="font-size:14px;font-weight:700;margin:14px 0 6px;">🕘 最近登录记录（${events.length}）</div>
         ${events.length ? `<div style="max-height:180px;overflow-y:auto;margin-bottom:10px;">${events.map((e) => `
@@ -602,13 +602,13 @@
       let actions = '';
       if (t.status === 'pending_approval') {
         actions = `
-          <button class="btn btn-primary btn-sm" onclick="tnApprove('${t.id}')">✓ 通过</button>
-          <button class="btn btn-ghost btn-sm" onclick="tnReject('${t.id}')">✗ 拒绝</button>`;
+          <button class="btn btn-primary btn-sm" data-act="tn-approve" data-id="${esc(t.id)}">✓ 通过</button>
+          <button class="btn btn-ghost btn-sm" data-act="tn-reject" data-id="${esc(t.id)}">✗ 拒绝</button>`;
       } else if (t.status === 'registration' || t.status === 'playing') {
-        actions = `<button class="btn btn-ghost btn-sm" onclick="tnCancel('${t.id}')">⛔ 取消赛事</button>`;
+        actions = `<button class="btn btn-ghost btn-sm" data-act="tn-cancel" data-id="${esc(t.id)}">⛔ 取消赛事</button>`;
       } else if (t.status === 'finished') {
         // T6：存档（存档后主办人只读，管理员仍可编辑）
-        actions = `<button class="btn btn-ghost btn-sm" onclick="tnArchive('${t.id}')">📦 存档</button>`;
+        actions = `<button class="btn btn-ghost btn-sm" data-act="tn-archive" data-id="${esc(t.id)}">📦 存档</button>`;
       }
       // 所有状态都能进详情页（那里有对阵表、赛事棋谱、重赛与变更记录）
       actions += `<a class="btn btn-ghost btn-sm" href="tournament.html?id=${encodeURIComponent(t.id)}" target="_blank">详情 ↗</a>`;
@@ -1207,6 +1207,48 @@
   }
 
   document.getElementById('btnRefreshAudit').addEventListener('click', loadAudit);
+
+  // ==================================================================
+  // `data-act` 分派（2026-09-23，安全审查遗留项 13f）
+  //
+  // 本页原先有 **19 处** inline `onclick`，且多处把用户可控的值（玩家名、赛事名）
+  // 拼进属性里 —— 那正是 P1-3「单引号逃逸 → 存储型 XSS」的形态：
+  // 游客把名字改成 `');alert()//`，管理员点该用户任一按钮即以管理员身份执行。
+  // `esc` 补上单引号转义只是**止血**；改成 `data-act` + 属性值之后，
+  // 引号逃不出属性、更不会被当代码执行，而且**事件走 util.js 的整页委托** ——
+  // 列表整块重渲染也不会丢监听（逐个绑定要做到这点，得每次渲染后重新绑一遍）。
+  //
+  // ⚠️ 处理器一律写成 `window.xxx`：本页的处理函数都是 `window.xxx = …` 赋的，
+  // 直接写裸名既是未定义标识符、也会被 eslint 的 `no-undef` 拦下。
+  // ==================================================================
+  {
+    const at = (el, k) => el.getAttribute(k);
+    window.UI.onAction('rb-playback', (el) => window.adminPlayback(at(el, 'data-id')));
+    window.UI.onAction('rb-export', (el) => window.adminExport(at(el, 'data-id'), at(el, 'data-fmt')));
+    window.UI.onAction('reveal-ip', (el) => {
+      el.textContent = at(el, 'data-text');
+      el.removeAttribute('title');
+      el.style.cursor = 'default';
+    });
+    window.UI.onAction('user-view', (el) => window.viewUser(at(el, 'data-id')));
+    window.UI.onAction('user-ban', (el) => window.adminBan(at(el, 'data-id'), at(el, 'data-name')));
+    window.UI.onAction('user-unban', (el) => window.adminUnban(at(el, 'data-id'), at(el, 'data-name')));
+    window.UI.onAction('user-save-profile', (el) => window.adminSaveProfile(at(el, 'data-id')));
+    window.UI.onAction('user-save-elo', (el) => window.adminSaveElo(at(el, 'data-id')));
+    window.UI.onAction('user-rename', (el) => window.adminRename(at(el, 'data-id'), at(el, 'data-name')));
+    window.UI.onAction('user-reset-rating', (el) => window.adminResetRating(at(el, 'data-id'), at(el, 'data-name')));
+    window.UI.onAction('user-reset-pwd', (el) => window.adminResetPassword(at(el, 'data-id'), at(el, 'data-name')));
+    window.UI.onAction('user-delete', (el) => window.adminDeleteAccount(at(el, 'data-id'), at(el, 'data-name')));
+    window.UI.onAction('tn-approve', (el) => window.tnApprove(at(el, 'data-id')));
+    window.UI.onAction('tn-reject', (el) => window.tnReject(at(el, 'data-id')));
+    window.UI.onAction('tn-cancel', (el) => window.tnCancel(at(el, 'data-id')));
+    window.UI.onAction('tn-archive', (el) => window.tnArchive(at(el, 'data-id')));
+    // 用户详情弹窗的「关闭」（原先写在 admin.html 的 inline onclick 里）
+    window.UI.onAction('modal-close', () => {
+      const m = document.getElementById('userDetailModal');
+      if (m) m.style.display = 'none';
+    });
+  }
 
   initUI();
 })();

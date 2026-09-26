@@ -107,7 +107,7 @@
       else if (r.result === 'w') resText = `${names[1]} 胜`;
       else resText = r.resultDetail || '和棋';
       return `
-        <div class="record-item" onclick="location.href='review.html?id=${encodeURIComponent(r.id)}'">
+        <div class="record-item" data-href="review.html?id=${encodeURIComponent(r.id)}">
           <div style="font-size:13px;display:flex;justify-content:space-between;gap:10px;">
             <span>
               <span data-player-id="${esc((r.playerIds && r.playerIds.b) || '')}">${esc(names[0])}</span>

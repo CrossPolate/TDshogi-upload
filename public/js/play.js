@@ -404,6 +404,13 @@
   });
 
   // 认输 / 再来一局 / 退出
+  // 结算横幅的「关闭」：原先写在 play.html 的 inline onclick 里，
+  // 改为 data-act + 整页委托（2026-09-23，审查项 13f）。
+  window.UI.onAction('banner-close', () => {
+    const b = document.getElementById('banner');
+    if (b) b.classList.remove('show');
+  });
+
   $('btnResign').addEventListener('click', () => {
     if (confirm('确定认输吗？')) api.send({ type: 'resign' });
   });
@@ -562,6 +569,11 @@
     isPlayer = data.isPlayer === true;
     window.PlayClock.resetTick(); // 以"此刻"为倒计时基准（原 `lastTickTs = Date.now()`）
     scrollBoardIntoViewOnce(); // §S2：手机端首屏直接落到棋盘
+    // §U4 对局 BGM：进行中开、终局停（刷新/中途进房也走这里）
+    if (window.Sound) {
+      if (state.status === 'PLAYING') window.Sound.bgmStart();
+      else if (state.status === 'FINISHED') window.Sound.bgmStop();
+    }
     // 感想战路由（PLAN §G v6）：终局自动进入；新对局自动退出（§M5：实现在 play-demo.js）
     if (state.status === 'FINISHED' && state.result) {
       window.PlayDemo.enter(state);
@@ -642,12 +654,12 @@
   // ==================================================================
   api.on('game_over', (data) => {
     notify('对局结束：' + (data.resultDetail || ''));
-    if (window.Sound) window.Sound.playEnd();
+    if (window.Sound) { window.Sound.playEnd(); window.Sound.bgmStop(); } // §U4 终局停 BGM
     // 终局不跳页——state 推送（含 demo）会触发自动进入感想战模式
   });
   api.on('game_start', (data) => {
     notify('对局开始！');
-    if (window.Sound) window.Sound.playStart();
+    if (window.Sound) { window.Sound.playStart(); window.Sound.bgmStart(); } // §U4 开局起 BGM
   });
   // 对手请求再来一局：提示并高亮「再来一局」按钮
   api.on('rematch_requested', (data) => {
