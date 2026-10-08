@@ -1,0 +1,615 @@
+/* ============================================================
+   TDShogi 精修层 — theme-pro.css
+   参考「现代大型网游/游戏大厅」界面语言：
+     · 玻璃拟态面板（半透明 + 背景模糊 + 发丝高光边）
+     · 强光效层次（氛围背景、外发光、内高光）
+     · 悬浮卡片（抬升 + 金光晕）
+     · 发光强调色（保留品牌金，做渐变与 glow）
+   定位：**纯视觉覆盖层**，不改变任何布局尺寸与交互逻辑。
+   ⚠️ 加载顺序：style.css → motion.css → **theme-pro.css** → board/review
+      （放最后，覆盖基础态视觉；motion 提供过渡与关键帧，本层只改观感）
+   ⚠️ 只改颜色/背景/边框/阴影/圆角等视觉属性，**不要**在此改 padding/尺寸。
+   ============================================================ */
+
+:root {
+  /* 玻璃与发丝边 */
+  --glass-1: color-mix(in srgb, var(--bg-2) 70%, transparent);
+  --glass-2: color-mix(in srgb, var(--bg-3) 52%, transparent);
+  --glass-blur: 12px;
+  --hairline: color-mix(in srgb, var(--gold) 24%, transparent);
+  --hairline-soft: color-mix(in srgb, var(--text) 11%, transparent);
+  --inner-hi: inset 0 1px 0 color-mix(in srgb, #ffffff 10%, transparent);
+  /* 光晕 */
+  --glow-gold: 0 0 22px color-mix(in srgb, var(--gold) 32%, transparent);
+  --glow-gold-strong: 0 0 34px color-mix(in srgb, var(--gold) 55%, transparent);
+  --radius-lg: 18px;
+}
+
+.theme-light {
+  --glass-1: color-mix(in srgb, #ffffff 78%, transparent);
+  --glass-2: color-mix(in srgb, #ffffff 60%, transparent);
+  --hairline-soft: color-mix(in srgb, var(--text) 14%, transparent);
+  --inner-hi: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --glow-gold: 0 0 20px color-mix(in srgb, var(--gold) 22%, transparent);
+  --glow-gold-strong: 0 0 28px color-mix(in srgb, var(--gold) 32%, transparent);
+}
+
+/* ============================================================
+   ① 氛围背景：多层径向光 + 极淡科技网格（游戏大厅的空间感）
+   ============================================================ */
+body {
+  background:
+    radial-gradient(1100px 620px at 78% -12%, color-mix(in srgb, var(--gold) 13%, transparent), transparent 60%),
+    radial-gradient(900px 520px at 6% 110%, color-mix(in srgb, var(--red) 11%, transparent), transparent 55%),
+    radial-gradient(760px 460px at 50% 42%, color-mix(in srgb, var(--bg-3) 42%, transparent), transparent 72%),
+    repeating-linear-gradient(0deg, transparent 0 47px, color-mix(in srgb, var(--text) 3%, transparent) 47px 48px),
+    repeating-linear-gradient(90deg, transparent 0 47px, color-mix(in srgb, var(--text) 3%, transparent) 47px 48px),
+    var(--bg);
+  background-attachment: fixed;
+}
+
+/* ============================================================
+   ② 顶栏：强化玻璃 + 底部金色光边 + 品牌发光
+   ============================================================ */
+.nav {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bg) 72%, transparent),
+    color-mix(in srgb, var(--bg) 58%, transparent));
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  border-bottom: 1px solid var(--hairline);
+  box-shadow:
+    inset 0 -1px 0 color-mix(in srgb, var(--gold) 10%, transparent),
+    0 10px 34px rgba(0, 0, 0, 0.4);
+}
+.brand-logo {
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--gold) 45%, transparent));
+}
+
+/* 导航链接：胶囊态 + 激活发光的「页签」感 */
+.nav-links a { border-radius: 10px; }
+.nav-links a:hover {
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+  color: var(--text);
+}
+.nav-links a.active {
+  color: var(--gold-light);
+  background: color-mix(in srgb, var(--gold) 14%, transparent);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+/* ============================================================
+   ③ 按钮：渐变/玻璃 + 内高光 + 悬停光晕 + 扫光
+   ============================================================ */
+.btn {
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+  letter-spacing: 0.02em;
+  box-shadow: var(--inner-hi);
+}
+.btn::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -60%;
+  width: 50%;
+  background: linear-gradient(100deg, transparent, color-mix(in srgb, #ffffff 42%, transparent), transparent);
+  transform: translateX(-120%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.55s var(--ease-out), opacity 0.3s ease;
+}
+.btn:hover::before { transform: translateX(320%); opacity: 0.9; }
+
+.btn-primary {
+  background: linear-gradient(135deg,
+    var(--gold-light),
+    var(--gold) 55%,
+    color-mix(in srgb, var(--gold) 68%, #000));
+  color: #171a1f;
+  font-weight: 700;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 45%, transparent),
+    0 6px 22px color-mix(in srgb, var(--gold) 34%, transparent);
+}
+.btn-primary:hover {
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 55%, transparent),
+    var(--glow-gold-strong);
+  transform: translateY(-1px);
+}
+
+.btn-ghost {
+  background: var(--glass-1);
+  border: 1px solid var(--hairline-soft);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.btn-ghost:hover {
+  border-color: var(--gold);
+  color: var(--gold-light);
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+  box-shadow: var(--glow-gold);
+}
+
+.btn-danger {
+  background: linear-gradient(135deg, var(--red-light), var(--red));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 22%, transparent),
+    0 6px 20px color-mix(in srgb, var(--red) 40%, transparent);
+}
+
+/* ============================================================
+   ④ 卡片 / 面板：玻璃拟态 + 发丝边 + 悬停金光晕
+   ============================================================ */
+.card,
+.panel {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--text) 5%, transparent), transparent 42%),
+    linear-gradient(180deg, var(--glass-2), var(--glass-1));
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.34),
+    var(--inner-hi);
+  backdrop-filter: blur(var(--glass-blur)) saturate(130%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(130%);
+}
+.card:hover {
+  border-color: var(--hairline);
+  box-shadow:
+    0 18px 46px rgba(0, 0, 0, 0.48),
+    var(--glow-gold),
+    var(--inner-hi);
+}
+/* 纯容器卡片（内嵌图表/列表）不加悬浮位移，避免误触感 */
+.card.rule-card:hover,
+.card.no-lift:hover { transform: none; }
+
+/* ============================================================
+   ⑤ 表单：内嵌玻璃 + 聚焦光边
+   ============================================================ */
+.input,
+.select {
+  background: color-mix(in srgb, var(--bg) 65%, transparent);
+  border: 1px solid var(--hairline-soft);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.input:focus,
+.select:focus {
+  border-color: var(--gold);
+  box-shadow: var(--glow-gold);
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+}
+
+/* ============================================================
+   ⑥ 版块标题 / 数据 / 榜单：金色发光点缀
+   ============================================================ */
+.section-title::before {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--gold) 60%, transparent);
+}
+.stat-card .num,
+.live-pill .num {
+  text-shadow: 0 0 16px color-mix(in srgb, var(--gold) 45%, transparent);
+}
+
+/* 实时数据条：玻璃胶囊 */
+.live-pill {
+  background: var(--glass-1);
+  border: 1px solid var(--hairline-soft);
+  box-shadow: var(--inner-hi);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+/* 榜单行悬停：金色微光 */
+.rank-row:hover {
+  background: color-mix(in srgb, var(--gold) 8%, transparent);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+/* ============================================================
+   ⑦ 引导卡 / Hero：更强的空间与光
+   ============================================================ */
+.step-card {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--text) 5%, transparent), transparent 45%),
+    linear-gradient(180deg, var(--glass-2), var(--glass-1));
+  border: 1px solid var(--hairline-soft);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.34), var(--inner-hi);
+}
+.step-emoji { filter: drop-shadow(0 4px 12px color-mix(in srgb, var(--gold) 35%, transparent)); }
+.step-no { text-shadow: 0 0 12px color-mix(in srgb, var(--gold) 40%, transparent); }
+
+.hero {
+  background:
+    radial-gradient(760px 300px at 50% -10%, color-mix(in srgb, var(--gold) 24%, transparent), transparent 62%),
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-2) 80%, transparent), color-mix(in srgb, var(--bg) 70%, transparent));
+  border: 1px solid var(--hairline);
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.5),
+    var(--inner-hi),
+    0 0 60px color-mix(in srgb, var(--gold) 12%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.hero-title { filter: drop-shadow(0 6px 24px color-mix(in srgb, var(--gold) 30%, transparent)); }
+
+/* ============================================================
+   ⑧ 浮层：Toast / 弹窗：玻璃 + 光边
+   ============================================================ */
+.toast {
+  background: color-mix(in srgb, var(--bg-2) 82%, transparent);
+  border: 1px solid var(--hairline);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), var(--glow-gold);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.modal-overlay {
+  background: color-mix(in srgb, #05070a 62%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+/* ============================================================
+   ⑨ 滚动条：贴合深色玻璃，金色滑块
+   ============================================================ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--gold) 35%, transparent) transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--gold) 28%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 10px;
+}
+*::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--gold) 50%, transparent); background-clip: padding-box; }
+
+/* ============================================================
+   ⑩ 音乐开关（右上角 🔊/🔇）
+   ============================================================ */
+.music-toggle.music-off {
+  opacity: 0.55;
+  filter: grayscale(0.4);
+}
+
+/* ============================================================
+   ⑪ 装扮商店（2026-10-07 现代网游化）
+   ============================================================ */
+.shop-shell {
+  border: 1px solid var(--hairline);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35), var(--glow-gold);
+}
+.shop-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 22px 24px 18px;
+  background:
+    linear-gradient(135deg,
+      color-mix(in srgb, var(--gold) 16%, transparent),
+      transparent 55%),
+    var(--glass-1);
+  border-bottom: 1px solid var(--hairline);
+}
+.shop-title {
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  background: linear-gradient(120deg, var(--gold-light), #fff 45%, var(--gold));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.shop-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.shop-top-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.shop-coin {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 15px;
+  color: var(--gold-light);
+  background: color-mix(in srgb, var(--gold) 14%, transparent);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--inner-hi), var(--glow-gold);
+}
+.shop-coin-icon { font-size: 16px; }
+.shop-redeem { display: flex; gap: 8px; align-items: center; }
+.shop-redeem .input {
+  width: 160px;
+  padding: 8px 12px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+
+.shop-section { padding: 18px 24px 8px; }
+.shop-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.shop-section-hint { font-size: 11px; color: var(--text-dim); font-weight: 400; }
+
+.shop-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+.shop-slot {
+  position: relative;
+  border: 1px solid var(--hairline-soft);
+  border-radius: 14px;
+  padding: 12px 12px 10px;
+  background: var(--glass-2);
+  cursor: pointer;
+  transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+}
+.shop-slot:hover {
+  border-color: var(--hairline);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  transform: translateY(-2px);
+}
+.shop-slot-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+}
+.shop-slot-name {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shop-slot.empty .shop-slot-name { color: var(--text-dim); font-weight: 500; }
+.shop-slot-unequip {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.shop-slot:hover .shop-slot-unequip { opacity: 1; }
+
+.shop-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.shop-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.shop-tab {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.16s;
+}
+.shop-tab:hover { color: var(--text); background: var(--glass-2); }
+.shop-tab.active {
+  color: var(--gold-light);
+  background: color-mix(in srgb, var(--gold) 14%, transparent);
+  border-color: var(--hairline);
+  box-shadow: var(--glow-gold);
+  font-weight: 700;
+}
+.shop-search {
+  width: min(220px, 100%);
+  padding: 8px 12px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+
+.shop-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 12px;
+  padding-bottom: 10px;
+}
+
+.shop-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  border: 1px solid var(--hairline-soft);
+  background:
+    linear-gradient(160deg,
+      color-mix(in srgb, var(--bg-3) 70%, transparent),
+      var(--glass-2));
+  overflow: hidden;
+  transition: transform 0.18s, box-shadow 0.18s, border-color 0.18s;
+}
+.shop-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--hairline);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35), var(--glow-gold);
+}
+.shop-card.rarity-R { border-color: color-mix(in srgb, var(--gold) 40%, transparent); }
+.shop-card.rarity-SR {
+  border-color: color-mix(in srgb, #e06bff 55%, transparent);
+  box-shadow: 0 0 18px color-mix(in srgb, #e06bff 22%, transparent);
+}
+.shop-card.rarity-SR:hover {
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4), 0 0 28px color-mix(in srgb, #e06bff 40%, transparent);
+}
+.shop-card.equipped {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px var(--gold), var(--glow-gold-strong);
+}
+
+.shop-card-art {
+  height: 92px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 40px;
+  background:
+    radial-gradient(circle at 50% 20%,
+      color-mix(in srgb, var(--gold) 12%, transparent),
+      transparent 70%);
+  user-select: none;
+}
+.shop-card-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.shop-card-art .glyph {
+  filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.35));
+}
+.shop-card-art .shop-piece-cell {
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.shop-card-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  backdrop-filter: blur(6px);
+}
+.shop-card-badge.rarity-N { color: #cfd4dc; }
+.shop-card-badge.rarity-R { color: var(--gold-light); }
+.shop-card-badge.rarity-SR {
+  color: #f0b3ff;
+  background: rgba(80, 20, 100, 0.55);
+}
+.shop-card-badge.owned {
+  left: auto;
+  right: 8px;
+  background: color-mix(in srgb, var(--green, #3dcf7a) 70%, transparent);
+}
+.shop-card-badge.equipped-tag {
+  left: auto;
+  right: 8px;
+  top: 8px;
+  background: color-mix(in srgb, var(--gold) 85%, transparent);
+  color: #1a1408;
+}
+
+.shop-card-body {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+.shop-card-name {
+  font-size: 13px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shop-card-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.45;
+  min-height: 2.9em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.shop-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+.shop-price {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--gold-light);
+}
+.shop-price.free { color: var(--green, #3dcf7a); }
+.shop-card .btn { flex-shrink: 0; }
+.shop-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.shop-preview {
+  padding: 2px 8px !important;
+  font-size: 11px !important;
+  opacity: 0.9;
+}
+.shop-preview.playing {
+  color: var(--gold-light);
+  border-color: var(--gold);
+}
+
+.shop-msg {
+  display: none;
+  margin: 8px 24px 20px;
+  font-size: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+.shop-msg.err {
+  display: block;
+  color: var(--danger, #e05252);
+  background: color-mix(in srgb, var(--danger, #e05252) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger, #e05252) 35%, transparent);
+}
+.shop-msg.ok {
+  display: block;
+  color: var(--gold-light);
+  background: color-mix(in srgb, var(--gold) 12%, transparent);
+  border: 1px solid var(--hairline);
+}
+
+.shop-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 28px 12px;
+}
+
+@media (max-width: 640px) {
+  .shop-top { padding: 16px; }
+  .shop-section { padding: 14px 16px 6px; }
+  .shop-msg { margin: 8px 16px 16px; }
+  .shop-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .shop-redeem .input { width: 120px; }
+}

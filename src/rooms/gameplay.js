@@ -1,0 +1,367 @@
+/**
+ * rooms/gameplay.js — 对局内动作与结算（PLAN §M1，从 `rooms.js` 拆出）
+ *
+ * 「一局棋从开局到落盘」的写路径都在这里：走子 → 认输 / 入玉宣言 → 判终局 → 结算落谱 → 再来一局 / 离开。
+ *
+ * 拆出来的理由：这是**规则与数据落盘的交汇处**——每手都要算耗时、判终局、推状态，
+ * 终局还要结算 ELO/经验、写棋谱、通知赛事、广播 `game_over`。单独成文件后,
+ * 「结算逻辑改了什么」一目了然，不必在两千里外的状态机里找。
+ *
+ * 注入方式：`applyGameplay(RoomManager)` 挂到 prototype 上，`this.*` 调用链不变。
+ *
+ * ⚠️ 改动这一块要格外小心：`_finalize()` 是**唯一的落盘出口**（ELO / 经验 / 棋谱 /
+ * 赛事回调全在这），出错会污染战绩数据。`_checkGameOver()` 有**幂等保护**
+ * （`room.status === 'FINISHED'` 直接 return），避免重复结算。
+ *
+ * 依赖：`ratings`（ELO/经验）、`records.saveRecord`（棋谱）、`game.newGame`（再来一局）、
+ *       `rooms/config`（时制与钟状态）、`tournaments.onMatchFinished`（按需 require）。
+ */
+'use strict';
+
+const ratings = require('../ratings');
+const { newGame } = require('../game');
+const { saveRecord } = require('../records');
+const { TIME_CONTROLS, DEFAULT_TIME_CONTROL, initClockState } = require('./config');
+const log = require('../logger'); // 结算落盘的独立兜错需要日志（2026-10-02 审查 P2-6）
+
+module.exports = function applyGameplay(X) {
+  Object.assign(X.prototype, {
+    /**
+     * 走子。返回 {ok, error?}。
+     */
+    makeMove(clientId, usi) {
+      const seat = this.clientToPlayer.get(clientId);
+      if (!seat) return { ok: false, error: '你不在对局中' };
+      const room = this._room(seat.roomId);
+      if (!room || room.status !== 'PLAYING') return { ok: false, error: '对局未在进行' };
+      const game = room.game;
+      if (seat.seat !== game.turn) return { ok: false, error: '还没轮到你' };
+      if (!game.isGameOver()) {
+        // 每手耗时（秒）：自该方上一手（或开局）起算——KIF 消費時間/累計時間用
+        const now = Date.now();
+        const spent = Math.max(0, Math.round((now - (room.lastMoveTs || room.createdAt)) / 1000));
+        const r = game.applyMove(usi);
+        if (!r.ok) return { ok: false, error: r.error || '非法走法' };
+        room.moveTimes = room.moveTimes || [];
+        room.moveTimes.push(spent);
+        room.lastMoveTs = now;
+        room.lastActiveAt = now;
+        // 走子后重置下一手玩家的读秒（进入新回合计时）
+        if (room.inByoyomi) {
+          const nextTurn = game.turn;
+          room.inByoyomi[nextTurn] = false;
+          room.curByoyomi[nextTurn] = room.byoyomi;
+        }
+        this._checkGameOver(room);
+        this._pushState(room);
+        return { ok: true };
+      }
+      return { ok: false, error: '对局已结束' };
+    },
+
+    resign(clientId) {
+      const seat = this.clientToPlayer.get(clientId);
+      if (!seat) return { ok: false, error: '你不在对局中' };
+      const room = this._room(seat.roomId);
+      if (!room || room.status !== 'PLAYING') return { ok: false, error: '对局未在进行' };
+      if (room.game.isGameOver()) return { ok: false, error: '对局已结束' };
+      // 认输：判「认输座位」负，而不是当前手番方（避免非手番方认输误判对手）
+      room.game.result = seat.seat === 'b' ? 'w' : 'b';
+      room.game.resultDetail = '投了';
+      this._checkGameOver(room);
+      this._pushState(room);
+      return { ok: true };
+    },
+
+    /**
+     * 入玉宣言（PLAN §P1 R-d；用户 2026-09-10 拍板 **AJSA 全套**）。
+     *
+     * 由**玩家主动申请**，服务端做权威判定——前端只传一个"我要宣言"的意图，
+     * 成不成立全部由 `game.declareNyugyoku()` 判定（条件见 game.js 的注释）。
+     * 这样规则只有一处实现，前端不需要（也不应该）自己算点数。
+     */
+    declareNyugyoku(clientId) {
+      const seat = this.clientToPlayer.get(clientId);
+      if (!seat) return { ok: false, error: '你不是本局玩家，不能宣言' };
+      const room = this._room(seat.roomId);
+      if (!room || room.status !== 'PLAYING') return { ok: false, error: '对局未在进行' };
+      if (room.game.isGameOver()) return { ok: false, error: '对局已结束' };
+      const r = room.game.declareNyugyoku(seat.seat);
+      if (!r.ok) return { ok: false, error: r.error };
+      this._checkGameOver(room);
+      this._pushState(room);
+      return { ok: true, detail: r.detail, points: r.points, count: r.count };
+    },
+
+    /**
+     * 房间聊天：玩家或观战者发言，广播给房间内所有人（含观战者）。
+     * 防刷屏：单客户端 2 秒内最多 1 条。
+     */
+    chat(clientId, text) {
+      const msg = String(text || '').trim().slice(0, 200);
+      if (!msg) return { ok: false, error: '消息为空' };
+      const roomId = this.clientToRoom.get(clientId);
+      if (!roomId) return { ok: false, error: '你不在任何房间中' };
+      const room = this._room(roomId);
+      if (!room) return { ok: false, error: '房间不存在' };
+      // 节流
+      const now = Date.now();
+      if (this._lastChatTs && this._lastChatTs[clientId] && now - this._lastChatTs[clientId] < 2000) {
+        return { ok: false, error: '发言太频繁，请稍候' };
+      }
+      this._lastChatTs = this._lastChatTs || {};
+      this._lastChatTs[clientId] = now;
+      // 发言者身份：玩家用座位名；观战者用其会话真名（旧实现一律显示"观众"，互动体验差）
+      const seat = this.clientToPlayer.get(clientId);
+      let name = '观众';
+      let role = 'spectator';
+      let speakerId = null;
+      if (seat && room.players[seat.seat]) {
+        name = room.players[seat.seat].name;
+        speakerId = room.players[seat.seat].playerId || null;
+        role = seat.seat === 'b' ? 'player-b' : 'player-w';
+      } else {
+        const info = this.playerRegistry ? this.playerRegistry(clientId) : null;
+        if (info && info.name) name = info.name;
+        if (info) speakerId = info.playerId || null;
+      }
+      this._broadcast(roomId, {
+        type: 'chat',
+        // 头像（2026-09-20）：聊天行上显示发言者头像，靠 playerId 查（不是靠名字）
+        data: { name, text: msg, ts: now, role, avatar: this._playerAvatar(speakerId) },
+      });
+      return { ok: true };
+    },
+
+    /**
+     * 判终局（**幂等**：已 FINISHED 直接 return，避免重复结算）。
+     * 终局后自动进入感想战（`_initDemo`），并清理断线计时器与快照（对局已落盘，无需恢复）。
+     */
+    _checkGameOver(room) {
+      const game = room.game;
+      if (!game.isGameOver()) return;
+      if (room.status === 'FINISHED') return;
+      room.status = 'FINISHED';
+      room.result = game.result;
+      room.resultDetail = game.resultDetail;
+      this._stopClock(room);
+      // 感想战：终局自动初始化演示状态（演示权归房主，见 PLAN §G）
+      this._initDemo(room);
+      // 向全场推送终局 state（含 demo）——双方与观战者据此统一自动进入感想战；
+      // 否则只有触发终局的那个连接能进入（其余成员停在旧画面）
+      this._pushState(room);
+      // 对局结束：清理断线宽限计时器 + 清除快照（对局已落盘 records，无需恢复）
+      const timers = this._disconnectTimers.get(room.id);
+      if (timers) {
+        for (const t of timers.values()) clearTimeout(t);
+        this._disconnectTimers.delete(room.id);
+      }
+      this._clearSnapshot(room.id);
+      this._finalize(room);
+    },
+
+    /** 结算落盘（ELO / 经验 / 棋谱 / 赛事回调 / `game_over` 广播）——**唯一出口** */
+    _finalize(room) {
+      const game = room.game;
+      const b = room.players.b;
+      const w = room.players.w;
+      // 胜者 id（与 rated 无关：赛事对局虽不计 ELO，但必须推进对阵表）
+      let winnerId = null;
+      if (game.result === 'b') winnerId = b ? b.playerId : null;
+      else if (game.result === 'w') winnerId = w ? w.playerId : null;
+      // 2026-10-02 审查 P2-6：结算各副作用独立兜错——任一失败不得连累其余步骤。
+      // （旧实现在任一处抛出即中断 _finalize，而房间此时已置 FINISHED、幂等守卫又使其无法重入
+      //  → 棋谱 / ELO / 赛事回调永久丢失。）
+      const safe = (fn, label) => {
+        try { return fn(); } catch (err) {
+          log.error('rooms', `${label}失败（对局已结束，无法重试）`, { roomId: room.id, err });
+          return null;
+        }
+      };
+      // ELO 结算（仅 rated 房间）
+      if (room.rated && b && w && game.result) {
+        safe(() => ratings.applyGameResult(b.playerId, w.playerId, game.result), 'ELO 结算');
+      }
+      // 对局经验（PLAN §K7）：完成一局双方 +1（含赛事对局；离开/断线判负同样算完成）
+      try {
+        if (b) ratings.addExp(b.playerId, 1, 'game');
+        if (w) ratings.addExp(w.playerId, 1, 'game');
+      } catch (_) {}
+      // 积分（F1，与 ELO 独立）：每完成一局双方各 +1。口径与经验一致——
+      // 胜/负/和、让子局、判负/弃权均计，「再来一局」每局各计 1。**只在服务端累计**，前端只显示。
+      try {
+        if (b) ratings.addPoints(b.playerId, 1);
+        if (w) ratings.addPoints(w.playerId, 1);
+      } catch (_) {}
+      // 保存棋谱
+      // ⚠️ 赛事棋谱**强制公开**（T6/需求 12）——判定放在这里、而不是靠调用方传参：
+      // 只要这局属于某个赛事，就必须能被所有人查看（赛事详情页要展示全部对局）。
+      // 写在落盘路径上，将来新增的建房入口也不会漏掉这条规则。
+      const tournamentId = room.tournamentId || null;
+      const record = safe(() => saveRecord({
+        // 让子局：初始局面已包含"上手少掉的棋子"，棋谱据此才能正确重放与导出
+        startSfen: game.startSfen,
+        handicap: room.handicap || null,
+        handicapLabel: room.handicapLabel || null,
+        moves: game.moves,
+        moveTimes: room.moveTimes || [],
+        timeControl: room.timeControl,
+        names: [b ? b.name : '先手', w ? w.name : '後手'],
+        result: game.result,
+        resultDetail: game.resultDetail,
+        playerIds: { b: b ? b.playerId : null, w: w ? w.playerId : null },
+        winnerId,
+        // P3：用**本局起点**（「再来一局」会重置）算时长，避免第 2 局起把 durationSec 算成整个房龄
+        durationSec: Math.round((Date.now() - (room.gameStartedAt || room.createdAt)) / 1000),
+        // 棋谱上的「是否计入评分」要与房间实际一致：私人房、让子局都不计 ELO。
+        // ⚠️ 此前没传，`saveRecord` 里 `data.rated !== false` 于是恒为 true ——
+        // 棋谱列表会把这些对局标成"计入评分"，与事实不符。
+        rated: room.rated !== false,
+        tournamentId,
+        visibility: tournamentId ? 'public' : undefined,
+      }), '棋谱保存');
+      room.recordId = record ? record.id : null;
+      // 赛事回调。⚠️ 2026-10-02 审查 P1-5：**和棋（'-'）也要通知赛事**，
+      // 否则千日手/持将棋的对局永远不推进赛程 → 赛事永久卡死；P2-6：独立兜错。
+      if (room.tournamentId && (winnerId || game.result === '-')) {
+        try {
+          const { onMatchFinished } = require('../tournaments');
+          onMatchFinished(room.tournamentId, room.id, winnerId || '-');
+        } catch (err) {
+          log.error('rooms', '赛事回调失败', { roomId: room.id, err });
+        }
+      }
+      // 广播对局结束（record 可能为 null：棋谱保存失败时仍必须广播终局）
+      this._broadcast(room.id, {
+        type: 'game_over',
+        data: {
+          roomId: room.id,
+          result: game.result,
+          resultDetail: game.resultDetail,
+          winnerId,
+          recordId: record ? record.id : null,
+          names: [b ? b.name : '先手', w ? w.name : '後手'],
+        },
+      });
+      this._pushState(room);
+    },
+
+    rematch(clientId) {
+      const seat = this.clientToPlayer.get(clientId);
+      if (!seat) return { ok: false, error: '你不在对局中' };
+      const room = this._room(seat.roomId);
+      if (!room || room.status !== 'FINISHED') return { ok: false, error: '对局尚未结束' };
+      // ⚠️ 2026-10-02 体验修复：赛事对局不能"再来一局"——重开会污染赛事对阵/finished 结果。
+      // 此前只靠前端隐藏按钮，而感想战工具条的按钮按「是不是选手」显示 → 赛事终局仍可点到。
+      if (room.tournamentId || room.type === 'tournament') {
+        return { ok: false, error: '赛事对局不能再来一局' };
+      }
+      room.rematchVotes = room.rematchVotes || {};
+      const already = !!room.rematchVotes[seat.seat];
+      room.rematchVotes[seat.seat] = true;
+      if (room.rematchVotes.b && room.rematchVotes.w) {
+        // 双方同意，重置对局。
+        // ⚠️ 必须用**本房间的初始局面**重建，不能 `newGame()` 了事：让子局一旦被重置成平手局，
+        //    "再来一局"就会悄悄变成另一盘棋（上手突然多了 2~10 枚棋子，而双方都没察觉）。
+        room.game = newGame(room.game.startSfen);
+        room.status = 'PLAYING';
+        room.result = null;
+        room.resultDetail = null;
+        // 先后手互换（F2）：上局先手变后手、后手变先手。
+        // ⚠️ 让子局：手合（少掉的棋子）固定在 `b` 座 → 换座即「上下手一并互换」，
+        //    新的先手就是新上手；前端据 `state.handicapLabel` 继续标注「上手先手 · 不计 ELO」。
+        this._swapSeats(room);
+        const tc = TIME_CONTROLS[room.timeControl] || TIME_CONTROLS[DEFAULT_TIME_CONTROL];
+        Object.assign(room, initClockState(tc));
+        room.lastMoveTs = Date.now();
+        room.lastActiveAt = Date.now();
+        room.gameStartedAt = Date.now(); // P3：本局起点（durationSec 用，避免算成整个房龄）
+        room.recordId = null;
+        room.moveTimes = [];
+        room.demo = null; // 再来一局：退出感想战，清空推演
+        room.rematchVotes = {};
+        this._startClock(room);
+        this._broadcast(room.id, { type: 'game_start', data: { roomId: room.id, code: room.code } });
+        this._pushState(room);
+      } else if (!already) {
+        // 仅一方请求：通知对手「对手请求再来一局」
+        const requester = room.players[seat.seat];
+        const oppSeat = seat.seat === 'b' ? 'w' : 'b';
+        const opp = room.players[oppSeat];
+        const payload = {
+          type: 'rematch_requested',
+          data: {
+            requesterName: requester ? requester.name : '对手',
+            seat: seat.seat,
+          },
+        };
+        if (opp && opp.clientId) this._send(opp.clientId, payload);
+      }
+      return { ok: true };
+    },
+
+    /**
+     * 交换房间两位玩家的座位（b↔w）——F2「再来一局：先后手互换」。
+     *
+     * ⚠️ 必须**同步更新 clientToPlayer 的座位映射**：`state.seat` 是按连接算出来的
+     * （见 state.js `getRoomStateForClient`），不同步的话前端 `mySeat` 不变 →
+     * 棋盘朝向 / 「先手·后手」标识 / 可动判断都不会跟着换（外包书 F2 明确要求）。
+     * 让子局不特殊处理：手合固定在 `b` 座，换座即"上下手一并互换"。
+     */
+    _swapSeats(room) {
+      const pb = room.players.b;
+      const pw = room.players.w;
+      room.players.b = pw;
+      room.players.w = pb;
+      // 用 _bindClient 重绑：顺带修正 clientToPlayer、room.players[seat].clientId、playerToClient
+      if (pw && pw.clientId) this._bindClient(pw.clientId, room.id, 'b');
+      if (pb && pb.clientId) this._bindClient(pb.clientId, room.id, 'w');
+    },
+
+    leave(clientId) {
+      this.cancelMatch(clientId);
+      // 观战者：从观战列表移除并解绑（否则残留导致继续收广播 + 内存泄漏）
+      const specRoomId = this.clientToRoom.get(clientId);
+      if (specRoomId && !this.clientToPlayer.has(clientId)) {
+        const specRoom = this._room(specRoomId);
+        const specName = this._specName(clientId); // 必须在清理之前取
+        const specs = this.spectatorsByRoom.get(specRoomId);
+        if (specs) {
+          specs.delete(clientId);
+          if (specs.size === 0) this.spectatorsByRoom.delete(specRoomId);
+        }
+        this.spectatorNames.delete(clientId);
+        this.clientToRoom.delete(clientId);
+        // §R3：播报「XX 离开观战」
+        if (specRoom) this._sysChat(specRoom, `${specName} 离开观战`, 'spectate-leave');
+        return { ok: true };
+      }
+      const seat = this.clientToPlayer.get(clientId);
+      if (!seat) return { ok: true };
+      const room = this._room(seat.roomId);
+      if (!room) return { ok: true };
+      // 等待中房间：房主/玩家主动离开 → 立即销毁整个房间（关键修复）
+      // 否则房间永远残留成为「幽灵房间」，其他人用 code 加入会开局但对手是空壳
+      if (room.status === 'WAITING') {
+        // 通知仍在房间里的观战者（若有）
+        this._broadcast(room.id, { type: 'room_closed', data: { roomId: room.id, reason: 'host_left' } });
+        this._dissolveRoom(room.id, 'host_left');
+        this.clientToPlayer.delete(clientId);
+        this.clientToRoom.delete(clientId);
+        return { ok: true };
+      }
+      // 对局中离开 → 判「离开座位」负（而不是当前手番方）
+      // 修复：原 resultDetail 写「投了」误导对手；中途退出/断线超时应提示「接続切断」
+      if (room.status === 'PLAYING' && !room.game.isGameOver()) {
+        // 聊天区留痕（2026-09-20）：与「掉线等待重连」区分——主动退出是**立即判负**，
+        // 对手看到的消息必须说清是哪一种，否则会以为还有 60 秒宽限。
+        this._sysChat(room, `🚪 ${(room.players[seat.seat] || {}).name || '对手'} 退出了对局（判负）`, 'player-exit');
+        room.game.result = seat.seat === 'b' ? 'w' : 'b';
+        room.game.resultDetail = '接続切断';
+        this._checkGameOver(room);
+      }
+      this._unbindClient(clientId);
+      return { ok: true };
+    },
+  });
+};

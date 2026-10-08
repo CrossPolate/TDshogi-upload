@@ -1,0 +1,203 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>对局 · TDShogi</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/motion.css">
+  <link rel="stylesheet" href="css/theme-pro.css">
+  <link rel="stylesheet" href="css/board.css">
+</head>
+<body>
+  <header class="nav"></header>
+
+  <main class="container">
+    <div id="roomTop" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <div style="font-size:14px;color:var(--text-dim);">
+        <span id="roomCodeLabel"></span>
+        <span id="spectatorTag" style="display:none;margin-left:12px;background:var(--bg-3);padding:3px 10px;border-radius:6px;color:var(--gold-light);font-size:12px;">👁 观战中</span>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" id="btnViewpoint" style="display:none;" title="切换观战视角（先手 / 后手）">🔄 视角·先手</button>
+        <button class="btn btn-ghost btn-sm" id="btnSound" title="音效开关">🔊 音效</button>
+        <!-- 举报（2026-09-20）：移到顶部交互栏（原先埋在右侧「操作」卡里，要滚动才看得到）。
+             只在对局中、对面确实有人时出现；类别清单由服务端在 hello 里下发（src/reports.js）。 -->
+        <button class="btn btn-ghost btn-sm" id="btnReport" style="display:none;"
+          title="举报对手：作弊 / 辱骂 / 恶意挂机等">🚩 举报</button>
+        <!-- ⚠️ 2026-10-02 体验修复：补 tooltip（此前退出对局按钮无任何说明，易与「认输」混淆） -->
+        <button class="btn btn-ghost btn-sm" id="btnLeave" title="退出对局并返回大厅（不影响已开始的棋局）">退出对局</button>
+      </div>
+    </div>
+
+    <div class="play-layout">
+      <div class="play-main">
+        <!-- 感想战工具条（终局自动进入，PLAN §G v6） -->
+        <div id="demoBar" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;margin-bottom:10px;background:var(--bg-2);border:1px solid rgba(201,162,39,0.35);border-radius:10px;">
+          <span id="demoStatus" style="font-size:13px;font-weight:700;color:var(--gold-light);">🎤 感想战中</span>
+          <span id="turnHint" style="font-size:12px;color:var(--text-dim);"></span>
+          <!-- ⚠️ 2026-10-02 体验修复：演示工具条若干按钮补 tooltip（此前只有「撤销」有说明） -->
+          <button class="btn btn-primary btn-sm" id="btnDemoClaim" style="display:none;" title="取得演示权：由你按规则走棋演示（不入正式棋谱）">🙋 我来演示</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoTransfer" style="display:none;" title="把演示权交给对方">🤝 交给对方</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoUndo" style="display:none;" title="撤销一手（推演谱为空时回退原谱一手）">↩️ 撤销</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoClear" style="display:none;" title="清空当前推演，回到原谱">🗑 清空推演</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoLatest" style="display:none;" title="跳到推演谱最新一手">⏭ 回到最新</button>
+          <button class="btn btn-ghost btn-sm" id="btnDemoRematch" style="display:none;" title="向对手发起再来一局">🔁 再来一局</button>
+          <button class="btn btn-ghost btn-sm" id="btnFreeMode" style="display:none;" title="自由摆棋：不校验规则、不入谱，可随意摆放棋子">✋ 自由摆棋</button>
+          <span style="font-size:11px;color:var(--text-dim);margin-left:auto;">按规则行棋 · 不计入棋谱</span>
+        </div>
+
+        <!-- 上方玩家栏（对面）—— 由 play.js 按视角动态渲染 -->
+        <div class="player-bar" id="topPlayerBar">
+          <!-- 头像（2026-09-20）：由 play.js 从 state.players[].avatar 填充 -->
+          <span class="player-avatar" id="topAvatar"></span>
+          <div>
+            <div class="name" id="topName">—</div>
+            <div class="rating" id="topRating"></div>
+          </div>
+          <div class="player-clock" id="topClock">10:00</div>
+        </div>
+
+        <!-- ⚠️ 2026-10-03 新功能：道具系统骨架 —— 立绘舞台（相对定位容器，供棋盘两侧的立绘绝对定位，不改动现有布局） -->
+        <div id="spriteStage" style="position:relative;width:100%;display:flex;justify-content:center;">
+        <!-- 棋盘区：左=对手持驹，中=棋盘，右=自己持驹（由 play.js 按视角摆放） -->
+        <div class="board-area">
+          <div class="hand-row" id="oppHand">
+            <span class="hand-label">持驹</span>
+            <div class="hand-pieces" id="oppHandPieces"></div>
+          </div>
+          <div class="board-wrap" id="boardContainer"></div>
+          <div class="hand-row" id="myHand">
+            <span class="hand-label">持驹</span>
+            <div class="hand-pieces" id="myHandPieces"></div>
+          </div>
+        </div>
+        <!-- ⚠️ 2026-10-03 新功能：道具系统骨架 —— 左右立绘（b=先手方 / w=后手方，由 play.js 按视角填充；空则隐藏） -->
+        <div id="spriteB" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:150px;display:none;align-items:center;pointer-events:none;"></div>
+        <div id="spriteW" style="position:absolute;right:0;top:50%;transform:translateY(-50%);width:150px;display:none;align-items:center;justify-content:flex-end;pointer-events:none;"></div>
+        </div>
+
+        <!-- 下方玩家栏（自己） -->
+        <div class="player-bar" id="bottomPlayerBar">
+          <span class="player-avatar" id="bottomAvatar"></span>
+          <div>
+            <div class="name" id="bottomName">—</div>
+            <div class="rating" id="bottomRating"></div>
+          </div>
+          <div class="player-clock" id="bottomClock">10:00</div>
+        </div>
+      </div>
+
+      <!-- 右侧面板 -->
+      <div class="play-side">
+        <div class="panel">
+          <h3>走子记录</h3>
+          <div class="move-list" id="moveList"></div>
+        </div>
+        <div class="panel">
+          <h3>观众（<span id="spectatorCount">0</span>）</h3>
+          <div id="spectatorList" style="font-size:13px;min-height:20px;color:var(--text);"><div style="color:var(--text-dim);font-size:12px;">暂无观众</div></div>
+        </div>
+        <div class="panel">
+          <h3>操作</h3>
+          <div style="display:flex;flex-direction:column;gap:10px;">
+            <!-- ⚠️ 2026-10-02 体验修复：认输 / 再来一局补 tooltip（此前无说明） -->
+            <button class="btn btn-danger" id="btnResign" title="认输：本局立即判负并结束">认输</button>
+            <button class="btn btn-ghost" id="btnDeclare" style="display:none;"
+              title="入玉宣言：玉在敌阵 + 敌阵内 10 枚以上 + 点数先手 28 / 后手 27 以上，且自己手番、未被王手 → 宣言方胜（AJSA 规则）">🏯 入玉宣言</button>
+            <button class="btn btn-primary" id="btnRematch" style="display:none;" title="向对手发起再来一局">再来一局</button>
+          </div>
+          <div id="reportPanel" style="display:none;margin-top:10px;">
+            <select class="input" id="reportCategory" style="font-size:12px;padding:5px 8px;"></select>
+            <input class="input" id="reportDetail" maxlength="200" placeholder="补充说明（可选）"
+              style="margin-top:6px;font-size:12px;padding:5px 8px;">
+            <div style="display:flex;gap:6px;margin-top:6px;">
+              <button class="btn btn-primary btn-sm" id="btnReportSubmit" title="把举报提交给管理员审核">提交举报</button>
+              <button class="btn btn-ghost btn-sm" id="btnReportCancel" title="取消并收起举报表单">取消</button>
+            </div>
+          </div>
+        </div>
+        <!-- 聊天：§R2 kibitz 分区（全部 / 对局 / 观战），并按发言者身份配色区分 -->
+        <div class="panel">
+          <h3>聊天</h3>
+          <div class="chat-tabs" id="chatTabs">
+            <button class="chat-tab active" data-tab="all">全部</button>
+            <button class="chat-tab" data-tab="players">对局</button>
+            <button class="chat-tab" data-tab="spectators">观战</button>
+          </div>
+          <div class="chat-box" id="chatBox"></div>
+          <!-- 快捷语（2026-09-20）：高频寒暄点一下直接发，省去对局中打字。
+               内容与渲染见 js/play-chat.js 的 QUICK_PHRASES -->
+          <div class="chat-quick" id="chatQuick"></div>
+          <div style="display:flex;gap:6px;margin-top:8px;">
+            <input class="input" id="chatInput" placeholder="说点什么…" style="padding:6px 10px;font-size:13px;">
+            <button class="btn btn-primary btn-sm" id="btnChatSend" style="flex-shrink:0;">发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 升变弹层 -->
+  <div class="promote-overlay" id="promoteOverlay" role="dialog" aria-modal="true" aria-label="选择是否升变">
+    <div class="promote-box">
+      <h3>是否升变？</h3>
+      <div class="promote-actions">
+        <!-- ⚠️ 2026-10-02 体验修复：「成」放前（成为默认焦点/主按钮），并加「取消」——
+             此前「不成」在前导致回车默认选「不成」，且弹层无法取消、误触即强制落子。 -->
+        <button class="btn btn-primary btn-lg" id="btnPromote">成</button>
+        <button class="btn btn-ghost btn-lg" id="btnNoPromote">不成</button>
+      </div>
+      <div style="margin-top:12px;">
+        <button class="btn btn-ghost btn-sm" id="btnPromoteCancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 胜负横幅 -->
+  <div class="banner" id="banner">
+    <div id="bannerText" style="font-size:28px;font-weight:900;margin-bottom:16px;font-family:var(--font-serif);"></div>
+    <div style="display:flex;gap:12px;justify-content:center;">
+      <button class="btn btn-primary" id="bannerRematch" title="向对手发起再来一局">再来一局</button>
+      <button class="btn btn-ghost" data-act="banner-close">关闭</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+    <script src="js/play.bundle.js"></script>
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+</body>
+</html>

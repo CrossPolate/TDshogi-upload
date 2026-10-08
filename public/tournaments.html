@@ -1,0 +1,167 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>赛事 · TDShogi</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/motion.css">
+  <link rel="stylesheet" href="css/theme-pro.css">
+</head>
+<body>
+  <header class="nav"></header>
+
+  <main class="container">
+    <!-- 顶部：标题 + 入口（创建需登录正式账号，后端审核流程见 docs/PLAN.md 与 docs/TOURNAMENT.md） -->
+    <div class="card" style="padding:24px;margin-bottom:28px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;">
+      <div>
+        <div class="section-title" style="margin-bottom:6px;">棋手赛事</div>
+        <div style="font-size:13px;color:var(--text-dim);">单败淘汰 / 瑞士制 · 报名满员自动开赛 · 赛事对局不计 ELO</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
+        <!-- 「我的赛事」紧挨创建按钮（2026-09-13 用户要求）：我的赛事 = 我主办的 + 我参赛/报名的 -->
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-lg" id="btnMyTournaments">📋 我的赛事</button>
+          <button class="btn btn-primary btn-lg" id="btnCreateTournament">🏆 我要创建赛事</button>
+        </div>
+        <!-- 等级特权提示（2026-09-20）：等级不足时禁用创建按钮并说明差多少 -->
+        <div id="createLevelHint" style="font-size:12px;color:var(--gold-light);display:none;max-width:320px;text-align:right;line-height:1.6;"></div>
+      </div>
+    </div>
+
+    <!-- 我的赛事视图（点顶部按钮切换；默认隐藏） -->
+    <div id="mineSection" style="display:none;">
+      <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+        <span>我的赛事</span>
+        <button class="btn btn-ghost btn-sm" id="btnBackFromMine">← 返回全部赛事</button>
+      </div>
+      <div id="mineList"></div>
+      <!-- 分页条（2026-09-13）：赛事列表每页 20 条，避免赛事一多把页面撑爆 -->
+      <div id="minePager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
+    </div>
+
+    <!-- 主视图 -->
+    <div id="mainSection">
+      <!-- 进行中的赛事（报名中 / 比赛中 / 审核中） -->
+      <div class="section-title">进行中的赛事</div>
+      <div id="ongoingList"></div>
+      <div id="ongoingPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin:10px 0 32px;flex-wrap:wrap;"></div>
+
+      <!-- 往期赛事：**只列一行摘要**，不展开对阵图与参赛名单
+           （2026-09-13 用户要求；赛事一多，每张卡片都铺开对阵表会把页面拉得很长） -->
+      <div class="section-title">往期赛事</div>
+      <div id="finishedList"></div>
+      <div id="finishedPager" style="display:flex;gap:10px;align-items:center;justify-content:center;margin-top:10px;flex-wrap:wrap;"></div>
+    </div>
+  </main>
+
+  <!-- 创建赛事弹窗（T2：完整申请表，需求 9） -->
+  <div class="modal-overlay" id="createModal" role="dialog" aria-modal="true" aria-label="创建赛事" style="display:none;">
+    <div class="card" style="width:540px;max-width:94vw;max-height:88vh;overflow-y:auto;padding:24px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <div style="font-size:19px;font-weight:800;">赛事创建申请</div>
+        <button class="btn btn-ghost btn-sm" id="btnCloseCreateModal">关闭</button>
+      </div>
+
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">赛事名称</div>
+      <input class="input" id="tName" placeholder="如：暑期棋王赛" maxlength="20" style="width:100%;">
+
+      <div style="display:flex;gap:12px;margin-top:14px;">
+        <div style="flex:1;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">参赛人数</div>
+          <select class="select" id="tSize" style="width:100%;">
+            <option value="4">4 人</option>
+            <option value="8">8 人</option>
+            <option value="16" selected>16 人</option>
+            <option value="32">32 人</option>
+          </select>
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">赛制</div>
+          <select class="select" id="tFormat" style="width:100%;">
+            <option value="single-elimination" selected>单败淘汰</option>
+            <option value="swiss">瑞士制（积分编排）</option>
+            <option value="round-robin" disabled>循环赛（待实装）</option>
+          </select>
+        </div>
+        <!-- 轮数（仅瑞士制）：不填则按人数自动给建议值 -->
+        <div style="flex:1;" id="tRoundsWrap">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">轮数（瑞士制）</div>
+          <select class="select" id="tRounds" style="width:100%;">
+            <option value="">按人数自动（推荐）</option>
+            <option value="3">3 轮</option>
+            <option value="4">4 轮</option>
+            <option value="5">5 轮</option>
+            <option value="6">6 轮</option>
+            <option value="7">7 轮</option>
+            <option value="8">8 轮</option>
+            <option value="9">9 轮</option>
+          </select>
+        </div>
+      </div>
+      <div id="tSwissHint" style="font-size:12px;color:var(--text-dim);margin-top:8px;display:none;">
+        瑞士制按积分逐轮配对（强者遇强者、不重复对阵），没有淘汰——输一两场仍有机会。
+        人数为奇数时，每轮积分最低且未轮空过的一人轮空（视同胜）。
+      </div>
+
+      <div style="font-size:12px;color:var(--text-dim);margin:14px 0 6px;">举办理由（10–200 字，管理员据此审核）</div>
+      <textarea class="input" id="tReason" rows="3" maxlength="200" placeholder="说明办赛目的、面向人群、赛程安排等" style="width:100%;resize:vertical;font-family:inherit;"></textarea>
+
+      <div style="display:flex;gap:12px;margin-top:14px;">
+        <div style="flex:1;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">报名开始</div>
+          <input class="input" type="datetime-local" id="tRegStart" style="width:100%;">
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">报名结束</div>
+          <input class="input" type="datetime-local" id="tRegEnd" style="width:100%;">
+        </div>
+      </div>
+
+      <div style="display:flex;gap:12px;margin-top:12px;">
+        <div style="flex:1;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">比赛开始</div>
+          <input class="input" type="datetime-local" id="tMatchStart" style="width:100%;">
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">比赛结束</div>
+          <input class="input" type="datetime-local" id="tMatchEnd" style="width:100%;">
+        </div>
+      </div>
+
+      <label style="display:flex;align-items:center;gap:8px;margin-top:16px;font-size:13px;cursor:pointer;">
+        <input type="checkbox" id="tRequireApproval" checked>
+        <span>报名需我审核（关闭则报名即参赛）</span>
+      </label>
+
+      <div style="font-size:12px;color:var(--text-dim);margin-top:12px;line-height:1.7;">
+        提交后进入<b>管理员审核</b>，通过后才开放报名。<br>
+        <b>主办人不会自动参赛</b>——想下棋请另外报名。<br>
+        时间未填写的项视为「不限」。
+      </div>
+
+      <button class="btn btn-primary" id="btnSubmitCreate" style="width:100%;margin-top:16px;">提交申请</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+    <script src="js/tournaments.bundle.js"></script>
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+</body>
+</html>

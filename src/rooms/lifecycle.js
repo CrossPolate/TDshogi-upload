@@ -1,0 +1,737 @@
+/**
+ * rooms/lifecycle.js — 房间生命周期：建房 / 加入 / 匹配 / 开局 / 赛事对局（PLAN §M1，从 `rooms.js` 拆出）
+ *
+ * 这是**玩家进入一张棋桌的全部路径**：建房、凭码加入、快速匹配，以及赛事系统直接建房。
+ * `joinRoom` / `quickMatch` 采用**三段式**（P1-1，2026-09-23）：
+ *  ① 非破坏性校验（目标存在/密码/未开赛/未满/对局中 → 只回 error，**当前对局分毫不动**）
+ *  ② 校验全过后才动当前状态（`_autoLeaveFinished` / `_autoLeaveAllRooms` / `_abandonRestoredFor` / 换房销毁）
+ *  ③ 落座 / 入队
+ *  这些清理是幽灵房问题的长期修复成果：
+ *  - 旧连接残留的座位会被回位扫描捞出来，把新连接绑回旧对局 → `_autoLeaveAllRooms` 按 playerId 清；
+ *  - 房主刷新后 WAITING 房没人销毁 → 房间码仍可被加入、开局后对手是空壳 → 建房/换房时立即销毁旧等待房；
+ *  - 对局中换玩法 → 自动认输退出（用户拍板，PLAN §H）。
+ *
+ * 注入方式：`applyLifecycle(RoomManager)` 挂到 prototype 上，`this.*` 调用链不变。
+ *
+ * ⚠️ `_playerTitle()` 里的 30s TTL 缓存**不能删**：`auth.load()` 是同步读磁盘，
+ * 而它被 `_gameState()` 在每次走子时调用（每局 2 次）——直接读等于把磁盘 I/O 塞进对局主循环。
+ *
+ * 依赖：`game.newGame`、`auth`（genId / load）、`room-password`（私人房）、
+ *       `rooms/config`（时制与钟状态）、`logger`。
+ */
+'use strict';
+
+const { newGame } = require('../game');
+const handicap = require('../handicap'); // 駒落ち（让子）手合割表与初始局面生成
+const { genId } = require('../auth');
+const roomPassword = require('../room-password');
+const log = require('../logger');
+const { TIME_CONTROLS, DEFAULT_TIME_CONTROL, initClockState } = require('./config');
+
+module.exports = function applyLifecycle(X) {
+  Object.assign(X.prototype, {
+    /**
+     * 创建房间（host 作为先手或随机）。
+     * @param {object} host { clientId, playerId, name }
+     * @param {string} timeControlId 时间控制预设 id
+     * @param {{isPrivate?:boolean, password?:string, handicap?:string}} [opts]
+     *        私人房间（PLAN §T2）：休闲模式 + 可选密码；`handicap` = 手合割 id（駒落ち让子）
+     * @returns {{ok:true, roomId, code, seat, handicap, handicapLabel}|{ok:false, error}}
+     */
+    createRoom(host, timeControlId, opts) {
+      // ⚠️ 2026-10-02 体验修复（问题 3「静默判负防护覆盖全部入口」）：**先查、后清**。
+      // 原先"按 playerId 检查已有进行中对局"的那段排在下方的 `_autoLeaveAllRooms()` **之后**，
+      // 而 `_autoLeaveAllRooms()` 会把同一 playerId 名下、**另一条连接**（第二个标签页）
+      // 正在下的对局直接判负（resultDetail='投了'）→ 检查跑到时候那局已经是 FINISHED，
+      // `room.status === 'PLAYING'` 不成立 → 检查形同虚设：第二个标签页点「建房」
+      // 依然会静默判负另一标签的对局。提到最前面后，本语义才真正成立。
+      // （同一条连接在对局中点「建房」的既有语义不变：仍由下方 `_autoResignAndLeave`
+      //   自动认输退出，见 PLAN §H。）
+      const playingElsewhere = [...this.rooms.values()].find((r) => r.status === 'PLAYING'
+        && !r.game.isGameOver()
+        && this.clientToRoom.get(host.clientId) !== r.id
+        && ((r.players.b && r.players.b.playerId === host.playerId)
+          || (r.players.w && r.players.w.playerId === host.playerId)));
+      if (playingElsewhere) {
+        return {
+          ok: false,
+          code: 'ALREADY_PLAYING',
+          backRoomId: playingElsewhere.id,
+          error: '你已在对局中，请先结束当前对局',
+        };
+      }
+      // 若在已结束的对局中则自动退出；对局中自动认输退出（用户确认，PLAN §H）
+      this._autoLeaveFinished(host.clientId);
+      this._autoResignAndLeave(host.clientId);
+      this._autoLeaveAllRooms(host.playerId, host.clientId); // 旧连接残留的座位一并退出（幽灵房修复）
+      this._abandonRestoredFor(host.playerId);
+      // 同一 playerId 名下已有进行中房间（另一连接/另一窗口）→ 拒绝；
+      // 仅等待中的旧房 → 视为放弃并销毁（防止一人占多个房间）
+      for (const room of [...this.rooms.values()]) {
+        if (room.status === 'FINISHED') continue;
+        const seat = ['b', 'w'].find((s) => room.players[s] && room.players[s].playerId === host.playerId);
+        if (!seat) continue;
+        if (room.status === 'PLAYING' && !room.game.isGameOver()) {
+          // ⚠️ 2026-10-02 体验修复（问题 3）：结构化 error（backRoomId / code）——
+          // 前端据此停掉等待 UI 并把用户送回自己正在进行的那一局，
+          // 而不是只弹一句"请先结束当前对局"让人摸不着北。
+          return {
+            ok: false,
+            code: 'ALREADY_PLAYING',
+            backRoomId: room.id,
+            error: '你已在对局中，请先结束当前对局',
+          };
+        }
+        this._broadcast(room.id, { type: 'room_closed', data: { roomId: room.id, reason: 'host_switch' } });
+        this._dissolveRoom(room.id, 'host_recreate_other_connection');
+      }
+      // 同一玩家已处于进行中/等待中房间 → 阻止重复建房
+      // 修复：原先未拦截，导致同连接连建多房，留下大量幽灵 WAITING 房间，
+      //      其他人用旧 code 加入会「开局但对手是断连的空壳」（即"加进来的人不能正常游戏"）
+      const curRoomId = this.clientToRoom.get(host.clientId);
+      if (curRoomId) {
+        const cur = this._room(curRoomId);
+        if (cur && cur.status === 'PLAYING') {
+          return { ok: false, error: '你已在对局中，请先结束当前对局' };
+        }
+        if (cur && cur.status === 'WAITING') {
+          // 旧等待房已存在 → 立即销毁，再建新房（避免幽灵）
+          this._dissolveRoom(curRoomId, 'host_recreate');
+          this._unbindClient(host.clientId);
+        }
+      }
+      // ⚠️ 2026-10-02 体验修复：按 playerId 跨连接检查（同域多标签）——避免在另一标签
+      // 有进行中对局时建新房间，随后把那一局静默判负。
+      const inPlayingRoom = [...this.rooms.values()].find((r) => r.status === 'PLAYING'
+        && ((r.players.b && r.players.b.playerId === host.playerId)
+          || (r.players.w && r.players.w.playerId === host.playerId)));
+      if (inPlayingRoom) return { ok: false, error: '你已在对局中，请先结束当前对局' };
+      const tc = TIME_CONTROLS[timeControlId] || TIME_CONTROLS[DEFAULT_TIME_CONTROL];
+      const o = opts || {};
+      // 让子（駒落ち）：`''`/`'even'` = 平手；**未知 id 必须拒绝** ——
+      // 静默当成平手会让建房者以为生效了，打完整局才发现对手用的是全部棋子。
+      const hd = handicap.normalize(o.handicap);
+      if (hd === false) return { ok: false, error: '未知的手合割' };
+      // 私人房间（PLAN §T2）：休闲模式——**不计 ELO**（`_finalize` 只对 rated 房间结算）；
+      // 经验值在 `_finalize` 里是**无条件**加的，所以「经验照常加」无需额外处理。
+      const isPrivate = o.isPrivate === true;
+      const password = typeof o.password === 'string' ? o.password.trim() : '';
+      if (isPrivate && !roomPassword.isValid(password)) {
+        return { ok: false, error: `房间密码需 ${roomPassword.MIN}–${roomPassword.MAX} 位` };
+      }
+      const code = this._genRoomCode();
+      const roomId = genId();
+      const room = {
+        id: roomId,
+        code,
+        // 让子局的初始局面由手合割生成（落掉上手的若干棋子）；平手用 `newGame()` 的默认局面
+        game: newGame(hd ? hd.startSfen : undefined),
+        players: { b: null, w: null },
+        status: 'WAITING',       // WAITING | PLAYING | FINISHED
+        type: 'room',
+        creatorId: host.playerId,
+        createdAt: Date.now(),
+        timeControl: tc.id,
+        ...initClockState(tc),
+        lastMoveTs: null,
+        lastActiveAt: Date.now(),
+        result: null,
+        resultDetail: null,
+        // 让子局一并计不计 ELO：段位差已经用"落子"补偿过了，再按平手口径结算评分没有意义
+        rated: !isPrivate && !hd,
+        isPrivate,               // §T2：不进观战列表 / 不可观战 / 排除随机观战
+        passwordHash: (isPrivate && password) ? roomPassword.hash(password) : null,
+        tournamentId: null,
+        // 駒落ち（让子）：id + 显示名。没让子则为 null（前端据此不显示）
+        handicap: hd ? hd.id : null,
+        handicapLabel: hd ? hd.label : null,
+      };
+      // 平手局：host 随机执先手。
+      // ⚠️ 让子局**固定为 `b`**（上手）：上手必须先行，而落子取自 `b` 的初形，
+      //    这两件事只有在"上手 = b"时才能同时成立（`handicap.js` 顶部有完整说明）。
+      const seat = hd ? 'b' : (Math.random() < 0.5 ? 'b' : 'w');
+      room.players[seat] = {
+        clientId: host.clientId,
+        playerId: host.playerId,
+        name: host.name,
+        connected: true,
+      };
+      this.rooms.set(roomId, room);
+      this.byCode.set(code, roomId);
+      this._bindClient(host.clientId, roomId, seat);
+      return {
+        ok: true, roomId, code, seat,
+        handicap: room.handicap,
+        handicapLabel: room.handicapLabel,
+        rated: room.rated,
+      };
+    },
+
+    /**
+     * 加入房间（按房间码）。
+     * @param {object} player { clientId, playerId, name }
+     * @param {string} code
+     * @param {string} [password] 私人房间密码（PLAN §T2）
+     */
+    joinRoom(player, code, password) {
+      // ========== ① 非破坏性校验（P1-1：重复/必然失败的请求 = no-op，绝不先动当前对局） ==========
+      // 修复前这里一上来就 _autoResignAndLeave —— 输错房间码、重复 join 都会把当前对局
+      // 判负（对手立刻收到 game_over detail=投了）。产品决定：这些请求只回 error。
+      // ⚠️ 顺序红线（PLAN §T2 遗训）：密码校验必须在"处理当前所在房间"之前 ——
+      //    否则密码输错也会先把玩家从原等待房踢出去（试错一次就被赶出房间）。
+      const roomId = this.byCode.get(String(code).trim().toUpperCase());
+      if (!roomId) return { ok: false, error: '房间不存在或房间码错误' };
+      const target = this._room(roomId);
+      if (!target) return { ok: false, error: '房间不存在或房间码错误' };
+      // 同一身份不能加入自己的房间（房主座位已是自己的 playerId → 再加入即一人占两位）
+      if (['b', 'w'].some((s) => target.players[s] && target.players[s].playerId === player.playerId)) {
+        return { ok: false, error: '这是你自己创建/所在的房间，同一身份不能加入（可在对局结束后再来，或换一个身份测试）' };
+      }
+      // 私人房间密码校验（PLAN §T2）——仍在非破坏阶段
+      if (target.isPrivate && !roomPassword.verify(target.passwordHash, password)) {
+        return {
+          ok: false,
+          needPassword: true, // 结构化标志：前端据此显示密码输入框再重试
+          error: password ? '房间密码错误' : '该房间是私人房间，需要密码',
+        };
+      }
+      if (target.status !== 'WAITING') return { ok: false, error: '对局已经开始，无法加入' };
+      if (target.players.b && target.players.w) return { ok: false, error: '房间已满' };
+      // 当前连接所在对局：对局中 → 拒绝（no-op）；已在目标等待房 → 已在房间中
+      const curId = this.clientToRoom.get(player.clientId);
+      const curRoom = curId ? this._room(curId) : null;
+      if (curRoom && curRoom.status === 'PLAYING') {
+        return { ok: false, error: '你正在对局中，请先结束当前对局' };
+      }
+      if (curRoom && curRoom.status === 'WAITING' && curId === roomId) {
+        return { ok: false, error: '你已在房间中' };
+      }
+      // ⚠️ 2026-10-02 体验修复（问题 3「静默判负」）：再按 **playerId 跨连接**检查一遍。
+      // 同域开第二个标签时，新连接没有绑定任何房间，上面的"当前连接"检查会放行，
+      // 随后 ② 的 `_autoLeaveAllRooms()` 会把另一标签正在下的对局**静默判负**
+      //（对手只收到 detail=投了，本人毫不知情）。create_room / quick_match 已有同款防护，
+      // join_room 此前**漏了**——补上，并返回结构化 error（backRoomId / code）
+      // 让前端能停掉等待 UI 并把用户送回自己那一局。
+      const inPlaying = [...this.rooms.values()].find((r) => r.status === 'PLAYING'
+        && ((r.players.b && r.players.b.playerId === player.playerId)
+          || (r.players.w && r.players.w.playerId === player.playerId)));
+      if (inPlaying) {
+        return {
+          ok: false,
+          code: 'ALREADY_PLAYING',
+          backRoomId: inPlaying.id,
+          error: '你已有一局正在进行，请先结束后再加入',
+        };
+      }
+      // ========== ② 校验全过后才动当前状态 ==========
+      // FINISHED 房解绑；旧连接残留的座位一并退出（幽灵房修复）；放弃恢复局
+      this._autoLeaveFinished(player.clientId);
+      this._autoLeaveAllRooms(player.playerId, player.clientId);
+      this._abandonRestoredFor(player.playerId);
+      // 自己的等待房未开赛：换房 → 销毁旧等待房（避免幽灵房）
+      if (curRoom && curRoom.status === 'WAITING') {
+        this._dissolveRoom(curId, 'switch_room');
+        this._unbindClient(player.clientId);
+      }
+      // ========== ③ 落座 + 开局（② 期间目标房可能被销毁/开赛，重查一遍） ==========
+      const room = this._room(roomId);
+      if (!room) return { ok: false, error: '房间不存在或房间码错误' };
+      if (room.status !== 'WAITING') return { ok: false, error: '对局已经开始，无法加入' };
+      // 空位
+      let seat = null;
+      if (!room.players.b) seat = 'b';
+      else if (!room.players.w) seat = 'w';
+      else return { ok: false, error: '房间已满' };
+      room.players[seat] = {
+        clientId: player.clientId,
+        playerId: player.playerId,
+        name: player.name,
+        connected: true,
+      };
+      this._bindClient(player.clientId, roomId, seat);
+      this._startGame(room);
+      return { ok: true, roomId, code, seat };
+    },
+
+    /** 对局中自动认输并退出（用户确认：匹配/建房时若在对局中自动退出，PLAN §H） */
+    _autoResignAndLeave(clientId) {
+      const seat = this.clientToPlayer.get(clientId);
+      if (!seat) return;
+      const room = this._room(seat.roomId);
+      if (!room || room.status !== 'PLAYING' || room.game.isGameOver()) return;
+      room.game.result = seat.seat === 'b' ? 'w' : 'b';
+      room.game.resultDetail = '投了';
+      this._checkGameOver(room);
+      this._autoLeaveFinished(clientId);
+    },
+
+    /**
+     * 快速匹配：将玩家放入队列，两人即配对。
+     */
+    quickMatch(player) {
+      // ========== ① 非破坏性校验（P1-1：双击/对局中点匹配 = no-op，绝不把当前对局判负） ==========
+      // ⚠️ **只拦 PLAYING**：不能写成"状态不是 WAITING 就拒绝"——那会把既有的
+      // 「对局结束后不退出、直接再匹配」也挡掉（FINISHED 房靠 _autoLeaveFinished 解绑）。
+      // 修复前这里一上来就 _autoResignAndLeave → 双击匹配直接把当前对局判负。
+      const curId = this.clientToRoom.get(player.clientId);
+      if (curId) {
+        const cur = this._room(curId);
+        if (cur && cur.status === 'PLAYING') {
+          return { ok: false, error: '你正在对局中，请先结束当前对局' };
+        }
+      }
+      // ⚠️ 2026-10-02 体验修复：再按 **playerId** 跨连接检查——同域开第二个标签时，新连接未绑定
+      // 任何房间，上面的检查会放行，随后 _autoLeaveAllRooms 会把另一标签那一局静默判负。
+      const inPlaying = [...this.rooms.values()].find((r) => r.status === 'PLAYING'
+        && ((r.players.b && r.players.b.playerId === player.playerId)
+          || (r.players.w && r.players.w.playerId === player.playerId)));
+      if (inPlaying && inPlaying.id !== curId) {
+        // ⚠️ 2026-10-02 体验修复（问题 3）：补结构化 error（backRoomId / code）——
+        // 前端据此复位"匹配中"的转圈与计时，并把用户送回自己那一局；
+        // 此前只有一句文案，前端无法判断该回哪、该不该停表（两条错误文案都不含"匹配"）。
+        return {
+          ok: false,
+          code: 'ALREADY_PLAYING',
+          backRoomId: inPlaying.id,
+          error: '你已有一局正在进行，请先结束后再匹配',
+        };
+      }
+      // ========== ② 校验过后才动当前状态 ==========
+      this._autoLeaveFinished(player.clientId);
+      this._autoLeaveAllRooms(player.playerId, player.clientId); // 旧连接残留的座位一并退出（幽灵房修复）
+      this._abandonRestoredFor(player.playerId);
+      // 已绑在自己的等待房（未开赛）→ 销毁旧房再入队
+      // （否则房主换玩法后 WAITING 房残留，其他人凭旧 code 加入会开局但对手是空壳）
+      if (curId) {
+        const cur = this._room(curId);
+        if (cur && cur.status === 'WAITING') {
+          this._dissolveRoom(curId, 'switch_to_match');
+          this._unbindClient(player.clientId);
+        }
+      }
+      // ========== ③ 入队与配对 ==========
+      // 先清理**失效的队列残留**：身份切换（游客→账号）后旧连接可能已消失或换了 id，
+      // 死条目若留着会一直占位、毒化后续配对。队列只保留「仍在 playerRegistry 里的连接」。
+      this.matchQueue = this.matchQueue.filter((cid) => this.playerRegistry(cid));
+      // 同一身份已在队列 → 拒绝（防止同浏览器双窗口/双标签自己和自己配对，占两个位置）。
+      // Bug4：守卫此前只认 playerId 相等，而注册后 playerId 变了（guest id → account id），
+      // 旧队列项（旧 id）与新连接（新 id）被当成两个「不同身份」→ 自己和自己配对。
+      // 现改用**身份组**判定：账号与其来源 guestId 视为同一人。
+      if (this.matchQueue.some((cid) => {
+        const p = this.playerRegistry(cid);
+        return p && this._shareIdentity(p.playerId, player.playerId);
+      })) {
+        return { ok: false, error: '同一身份已在匹配队列中——不能自己和自己对弈' };
+      }
+      if (this.matchQueue.includes(player.clientId)) return { ok: false, error: '已在匹配队列中' };
+      this.matchQueue.push(player.clientId);
+      // 配对
+      if (this.matchQueue.length >= 2) {
+        const c1 = this.matchQueue.shift();
+        const c2 = this.matchQueue.shift();
+        // 从广播器/玩家表取会话信息（由 protocol 层注入 player registry）
+        const p1 = this.playerRegistry ? this.playerRegistry(c1) : null;
+        const p2 = this.playerRegistry ? this.playerRegistry(c2) : null;
+        // 配对安全网：同一身份（含游客升级来源的旧 id）永远不配到一起
+        if (p1 && p2 && this._shareIdentity(p1.playerId, p2.playerId)) {
+          this.matchQueue.unshift(c1);
+          return { ok: false, error: '同一身份不能自己和自己对弈' };
+        }
+        if (p1 && p2) {
+          this._startQuickMatch(p1, p2);
+        } else {
+          // 无法配对则回退到创建房间
+          const p = p1 || p2;
+          if (p) this.createRoom(p);
+        }
+      }
+      return { ok: true };
+    },
+
+    cancelMatch(clientId) {
+      const idx = this.matchQueue.indexOf(clientId);
+      if (idx >= 0) this.matchQueue.splice(idx, 1);
+      return { ok: true };
+    },
+
+    /**
+     * 某玩家的「身份组」：playerId 本身 + 其**账号升级来源** guestId（双向）。
+     *
+     * 游客注册后会从 guestId 变成 accountId —— 同一人在系统里从此有两个 id。
+     * 匹配防自战必须把这两个 id 视为**同一身份**，否则「注册前用 guest 排一次、注册后用
+     * account 再排一次」就能自己打自己（Bug4）。依据是 `accounts.listAccountsRaw()` 的
+     * `guestId` 追溯字段（register 时保留，见 accounts.js）；**不按 IP**（会误伤 NAT 后的正常玩家）。
+     *
+     * @param {string} playerId
+     * @returns {Set<string>} 关联 id 集合（含自身）
+     */
+    _identityGroup(playerId) {
+      const set = new Set();
+      if (!playerId) return set;
+      set.add(playerId);
+      try {
+        const accounts = require('../accounts'); // 延迟 require，避免顶部循环依赖
+        for (const a of accounts.listAccountsRaw()) {
+          if (!a) continue;
+          if (a.id === playerId && a.guestId) set.add(a.guestId);
+          if (a.guestId === playerId && a.id) set.add(a.id);
+        }
+      } catch (_) { /* accounts 不可用时退化为仅比对 playerId 本身 */ }
+      return set;
+    },
+
+    /** 两个 playerId 是否属于同一身份组（同一人，含游客升级来源） */
+    _shareIdentity(idA, idB) {
+      if (!idA || !idB) return false;
+      if (idA === idB) return true;
+      return this._identityGroup(idA).has(idB);
+    },
+
+    /**
+     * 若玩家当前绑定的房间已结束（FINISHED），自动解除绑定。
+     * 这样赢家/输家无需手动点「退出」即可再次匹配或建房。
+     * @returns {boolean} 是否发生了解绑
+     */
+    _autoLeaveFinished(clientId) {
+      const curRoomId = this.clientToRoom.get(clientId);
+      if (!curRoomId) return false;
+      const room = this._room(curRoomId);
+      if (room && room.status === 'FINISHED') {
+        // 从结束房间的座位记录中移除该客户端（避免继续广播到此连接）
+        const seat = this.clientToPlayer.get(clientId);
+        if (seat && room.players[seat.seat]) {
+          this.playerToClient.delete(room.players[seat.seat].playerId);
+          room.players[seat.seat] = null;   // 清空座位，房间可被再次加入（若 WAITING 已不可能，但保持干净）
+        }
+        this._unbindClient(clientId);
+        return true;
+      }
+      return false;
+    },
+
+    /**
+     * 自动退出该身份名下所有其他房间的座位（按 playerId，含已断线的旧连接座位——幽灵房修复）。
+     * 既有 _autoLeaveFinished/_autoResignAndLeave 只查「当前连接」绑定的房间，覆盖不到
+     * 已关闭旧连接留下的座位；这些座位残留在回位扫描里，会把新连接绑回旧对局（幽灵房）。
+     *  - PLAYING 未终局 → 自动认输（投了，PLAN §H 同款）
+     *  - FINISHED（含复盘中）→ 移除座位记录（与 _autoLeaveFinished 口径一致）；
+     *    由此大厅列表不再把他认作该局选手，重访旧局走观战入口
+     *  - 复盘中持有演示权 → 释放
+     * exceptClientId：当前连接所在的房间不动（WAITING 换房/对局中认输由既有逻辑处理）
+     */
+    _autoLeaveAllRooms(playerId, exceptClientId = null) {
+      if (!playerId) return;
+      const keepRoomId = exceptClientId ? this.clientToRoom.get(exceptClientId) : null;
+      for (const room of this.rooms.values()) {
+        if (room.restored) continue;               // 恢复局由 _abandonRestoredFor 专门处理
+        if (keepRoomId && room.id === keepRoomId) continue;
+        for (const seat of ['b', 'w']) {
+          const p = room.players[seat];
+          if (!p || p.playerId !== playerId) continue;
+          if (room.status === 'PLAYING' && !room.game.isGameOver()) {
+            room.game.result = seat === 'b' ? 'w' : 'b';
+            room.game.resultDetail = '投了';
+            this._checkGameOver(room);
+          }
+          if (room.status !== 'FINISHED') continue; // WAITING 房间由既有换房/销毁逻辑处理
+          if (room.demo && room.demo.demonstratorSeat === seat) {
+            room.demo.demonstratorSeat = null;
+            room.demo.updatedAt = Date.now();
+            this._broadcastDemo(room);
+          }
+          if (p.clientId) {
+            // 该 clientId 若仍连着（多窗口场景），同步解除其房间绑定
+            this.clientToRoom.delete(p.clientId);
+            this.clientToPlayer.delete(p.clientId);
+          }
+          this.playerToClient.delete(playerId);
+          room.players[seat] = null;
+          this._pushState(room);
+        }
+      }
+    },
+
+    _startQuickMatch(p1, p2) {
+      const code = this._genRoomCode();
+      const roomId = genId();
+      const tc = TIME_CONTROLS[DEFAULT_TIME_CONTROL]; // 快速匹配固定 10 分钟包干
+      const room = {
+        id: roomId,
+        code,
+        game: newGame(),
+        players: { b: null, w: null },
+        status: 'PLAYING',
+        type: 'quick',
+        creatorId: null,
+        createdAt: Date.now(),
+        timeControl: tc.id,
+        ...initClockState(tc),
+        lastMoveTs: Date.now(),
+        lastActiveAt: Date.now(),
+        gameStartedAt: Date.now(), // P3：本局起点（durationSec 用）
+        result: null,
+        resultDetail: null,
+        rated: true,
+        tournamentId: null,
+      };
+      const seatB = Math.random() < 0.5 ? p1 : p2;
+      const seatW = seatB === p1 ? p2 : p1;
+      room.players.b = { ...seatB, connected: true, clientId: seatB.clientId };
+      room.players.w = { ...seatW, connected: true, clientId: seatW.clientId };
+      this.rooms.set(roomId, room);
+      this.byCode.set(code, roomId);
+      this._bindClient(seatB.clientId, roomId, 'b');
+      this._bindClient(seatW.clientId, roomId, 'w');
+      this._startClock(room);
+      // 通知双方开赛
+      this._broadcast(roomId, { type: 'game_start', data: { roomId, code, seat: this.clientToPlayer.get(seatB.clientId).seat } });
+      this._send(seatB.clientId, { type: 'matched', data: { roomId, code } });
+      this._send(seatW.clientId, { type: 'matched', data: { roomId, code } });
+      this._pushState(room);
+    },
+
+    _startGame(room) {
+      room.status = 'PLAYING';
+      room.lastMoveTs = Date.now();
+      room.gameStartedAt = Date.now(); // P3：本局起点（durationSec 用；此前只有 rematch 设过 → 首局时长会算成整个房龄）
+      room.demo = null;      // 新对局开始：清除上一局的感想战演示状态
+      room.emptySince = null;
+      this._startClock(room);
+      this._broadcast(room.id, { type: 'game_start', data: { roomId: room.id, code: room.code } });
+      this._pushState(room);
+      // 若任一座位开局时已失联（典型场景：房主建房后断线 → joiner 凭 code 加入），
+      // 立即为该座位启动断线判负计时，避免「开局但对手是空壳、永远等不到走子」。
+      for (const seat of ['b', 'w']) {
+        const p = room.players[seat];
+        if (p && !p.connected && !room.game.isGameOver()) {
+          this._scheduleDisconnectLoss(room.id, seat);
+        }
+      }
+    },
+
+    /**
+     * 为赛事创建一场对局（双方由 playerId 指定，系统直接建房，无等待期）。
+     * @param {string} tournamentId
+     * @param {string[]} playerIds [先手, 后手]
+     * @returns {{roomId:string}|null}
+     */
+    createTournamentMatch(tournamentId, playerIds) {
+      if (!tournamentId || !Array.isArray(playerIds) || playerIds.length !== 2) return null;
+      const code = this._genRoomCode();
+      const roomId = genId();
+      const tc = TIME_CONTROLS[DEFAULT_TIME_CONTROL];
+      const room = {
+        id: roomId,
+        code,
+        game: newGame(),
+        players: { b: null, w: null },
+        status: 'PLAYING',
+        type: 'tournament',
+        creatorId: null,
+        createdAt: Date.now(),
+        timeControl: tc.id,
+        ...initClockState(tc),
+        lastMoveTs: Date.now(),
+        lastActiveAt: Date.now(),
+        gameStartedAt: Date.now(), // P3：本局起点（durationSec 用）
+        result: null,
+        resultDetail: null,
+        rated: false, // 赛事对局不计 ELO
+        tournamentId,
+      };
+      // 绑定双方（若在线；不在线则由其主动 joinTournamentMatch 进入）
+      const attach = (seat, playerId) => {
+        const clientId = this.playerToClient.get(playerId);
+        if (clientId) {
+          room.players[seat] = { clientId, playerId, name: this._playerName(playerId), connected: true };
+          this._bindClient(clientId, roomId, seat);
+        } else {
+          room.players[seat] = { clientId: null, playerId, name: this._playerName(playerId), connected: false };
+        }
+      };
+      const seatB = Math.random() < 0.5 ? playerIds[0] : playerIds[1];
+      const seatW = seatB === playerIds[0] ? playerIds[1] : playerIds[0];
+      attach('b', seatB);
+      attach('w', seatW);
+      this.rooms.set(roomId, room);
+      this.byCode.set(code, roomId);
+      this._startClock(room);
+      this._broadcast(roomId, { type: 'game_start', data: { roomId, code } });
+      this._pushState(room);
+      return { roomId };
+    },
+
+    _playerName(playerId) {
+      const sess = require('../auth').load(playerId);
+      return sess && sess.name ? sess.name : playerId.slice(0, 6);
+    },
+
+    /**
+     * §R5：取玩家称号。
+     * 称号**不在** `ratings.profile()` 里（那里只有 rating / exp / 战绩），而是挂在会话对象上，
+     * 因此必须单独从 auth 读——否则玩家栏的称号会永远是空的。
+     *
+     * ⚠️ 必须缓存：`auth.load()` 是**同步读磁盘**，而本函数在 `_gameState()` 里每次走子都会调用
+     * （每局 2 次）——直接读等于把磁盘 I/O 塞进对局主循环，与 §Q7-2 修掉的是同一类问题。
+     * 称号是低频数据，用 TTL 兜住「管理员改称号」的可见延迟即可。
+     */
+    _playerTitle(playerId) {
+      if (!playerId) return null;
+      const TTL_MS = 30000;
+      const now = Date.now();
+      const cached = this._titleCache.get(playerId);
+      if (cached && now - cached.at < TTL_MS) return cached.title;
+      let title = null;
+      try {
+        const sess = require('../auth').load(playerId);
+        title = (sess && sess.title) || null;
+      } catch (_) { title = null; }
+      // 缓存不是关键数据：超限整体清空，避免长时间运行后无界增长
+      if (this._titleCache.size > 1000) this._titleCache.clear();
+      this._titleCache.set(playerId, { title, at: now });
+      return title;
+    },
+
+    /**
+     * 头像变更后刷新（2026-09-20）：清缓存 + 按需重推 state。
+     *
+     * ⚠️ 必须**主动失效缓存**：`_playerAvatar` 带 30 秒 TTL，
+     * 不失效的话改完头像要等半分钟才在对局页生效——用户会以为"没保存上"再点一次。
+     */
+    refreshAvatar(playerId) {
+      if (!playerId) return;
+      this._avatarCache.delete(playerId);
+      // 该玩家若在某个房间里，重推一次，让对手与观战者立刻看到新头像
+      for (const room of this.rooms.values()) {
+        for (const seat of ['b', 'w']) {
+          const p = room.players[seat];
+          if (p && p.playerId === playerId) { this._pushState(room); return; }
+        }
+      }
+    },
+
+    /**
+     * ⚠️ 2026-10-03 新功能：道具系统骨架 —— 道具（立绘/皮肤）变更后刷新。
+     * 装备变更后调用：清缓存 + 按需重推 state，让对手与观战者立刻看到新立绘。
+     * 与 `refreshAvatar` 完全同款（同样的失效 + seat 遍历 + `_pushState` 重推方式）——
+     * 两者只是命中的缓存表不同（`_itemsCache` / `_avatarCache`）。
+     */
+    refreshItems(playerId) {
+      if (!playerId) return;
+      this._itemsCache.delete(playerId);
+      // 该玩家若在某个房间里，重推一次，让对手与观战者立刻看到新立绘/皮肤
+      for (const room of this.rooms.values()) {
+        for (const seat of ['b', 'w']) {
+          const p = room.players[seat];
+          if (p && p.playerId === playerId) { this._pushState(room); return; }
+        }
+      }
+    },
+
+    /**
+     * 玩家头像（2026-09-20）。
+     *
+     * ⚠️ 与 `_playerTitle` 完全同款：同样要**缓存**——`auth.load()` 是同步读磁盘，
+     * 而本函数在 `_gameState()` 里每次走子都会调用（玩家栏要显示对手头像），
+     * 不缓存就等于把磁盘 I/O 塞进对局主循环。
+     */
+    _playerAvatar(playerId) {
+      if (!playerId) return null;
+      const TTL_MS = 30000;
+      const now = Date.now();
+      const cached = this._avatarCache.get(playerId);
+      if (cached && now - cached.at < TTL_MS) return cached.avatar;
+      let avatar = null;
+      try {
+        const sess = require('../auth').load(playerId);
+        avatar = (sess && sess.avatar) || null;
+      } catch (_) { avatar = null; }
+      if (this._avatarCache.size > 1000) this._avatarCache.clear();
+      this._avatarCache.set(playerId, { avatar, at: now });
+      return avatar;
+    },
+
+    /**
+     * ⚠️ 2026-10-03 新功能：道具系统骨架 —— 玩家道具装备（立绘/皮肤）。
+     * 取 `items.skinFor(playerId)` 的 `{ sprite, pieces, board }`（一次读取，供对局 state）。
+     *
+     * ⚠️ **必须容错**：`src/items` 模块可能尚未就绪或内部异常，对局主循环绝不能因此挂掉——
+     * 因此 require 与调用都包在 try/catch 里，任何异常一律降级为 `{}`（等价于「无道具」）。
+     * ⚠️ 同样要**缓存**：本函数在 `_gameState()` 里每次走子都会调用（玩家栏要显示对手立绘），
+     * 不缓存就等于把潜在 I/O 塞进对局主循环（与 `_playerAvatar` 同因）。
+     */
+    _playerItems(playerId) {
+      if (!playerId) return {};
+      const TTL_MS = 30000;
+      const now = Date.now();
+      const cached = this._itemsCache.get(playerId);
+      if (cached && now - cached.at < TTL_MS) return cached.items;
+      let items = {};
+      try {
+        const it = require('../items');
+        items = it.skinFor(playerId) || {};
+      } catch (_) { items = {}; }
+      if (this._itemsCache.size > 1000) this._itemsCache.clear();
+      this._itemsCache.set(playerId, { items, at: now });
+      return items;
+    },
+
+    /**
+     * 玩家主动进入自己的赛事对局（建局时可能不在线）。
+     */
+    joinTournamentMatch(clientId, roomId, playerId) {
+      const room = this._room(roomId);
+      if (!room || room.type !== 'tournament') return { ok: false, error: '赛事对局不存在' };
+      // ⚠️ 2026-10-02 体验修复（问题 3「静默判负防护覆盖全部入口」）：入座前按 **playerId**
+      // 检查"是否已在**别的**进行中对局里"（与 create_room / join_room / quick_match /
+      // spectate 同一口径，这也是最后一个漏掉的入口）。放行的后果是同一身份同时挂在两局上：
+      // 座位绑到赛事局后，另一局仍在走钟，结束时互相覆盖状态 —— 表现为"莫名其妙丢了一局"。
+      // 返回结构化 error（backRoomId / code），前端据此把用户先送回自己那一局。
+      const elsewhere = [...this.rooms.values()].find((r) => r.status === 'PLAYING' && r.id !== roomId
+        && ((r.players.b && r.players.b.playerId === playerId)
+          || (r.players.w && r.players.w.playerId === playerId)));
+      if (elsewhere) {
+        return {
+          ok: false,
+          code: 'ALREADY_PLAYING',
+          backRoomId: elsewhere.id,
+          error: '你已有一局正在进行，请先结束后再进入赛事对局',
+        };
+      }
+      let seat = null;
+      for (const s of ['b', 'w']) {
+        const p = room.players[s];
+        if (p && p.playerId === playerId) { seat = s; break; }
+      }
+      if (!seat) return { ok: false, error: '你不是该对局的参赛者' };
+      if (room.players[seat].connected && room.players[seat].clientId !== clientId) {
+        return { ok: false, error: '该座位已有连接' };
+      }
+      const p = room.players[seat];
+      p.clientId = clientId;
+      p.connected = true;
+      p.name = this._playerName(playerId);
+      this._bindClient(clientId, roomId, seat);
+      this._pushState(room);
+      return { ok: true, roomId, seat };
+    },
+
+    /** 玩家改名同步：更新对局中双方的名字并推送 */
+    updatePlayerName(playerId, newName) {
+      for (const room of this.rooms.values()) {
+        let updated = false;
+        for (const seat of ['b', 'w']) {
+          const p = room.players[seat];
+          if (p && p.playerId === playerId && p.name !== newName) {
+            p.name = newName;
+            updated = true;
+          }
+        }
+        if (updated) {
+          log.info('rooms', `玩家 ${playerId} 改名→${newName}，房间 ${room.id} state 广播`, { roomId: room.id, playerId });
+          this._pushState(room);
+        }
+      }
+    },
+  });
+};

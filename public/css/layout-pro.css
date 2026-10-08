@@ -1,0 +1,115 @@
+/* ============================================================
+   TDShogi 布局升级层 — layout-pro.css
+   适用：重点页 index（首页 Dashboard）、lobby（对战大厅）
+   加载顺序：style.css → motion.css → theme-pro.css → **layout-pro.css**
+   定位：只调**布局与栅格**（列数/间距/对齐/响应式），不碰视觉皮肤。
+   ============================================================ */
+
+/* ---------- 页头（统一重点页标题区） ---------- */
+.page-head { margin: 8px 0 24px; }
+.page-title {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  line-height: 1.25;
+}
+.page-sub { color: var(--text-dim); font-size: 14px; margin-top: 6px; }
+
+/* ---------- 首页 Dashboard：主内容 + 侧栏 ---------- */
+.dash-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 24px;
+  margin-bottom: 32px;
+  align-items: start;
+}
+.dash-main { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.dash-side {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  position: sticky;              /* 侧栏跟随滚动 */
+  top: calc(var(--nav-h) + 16px);
+}
+.section-block { margin: 0; }
+.pad-card { padding: 22px; }
+
+/* 版块标题右侧的「更多」链接与弹性占位 */
+.section-title .spacer { flex: 1; }
+.section-link {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--gold-light);
+  transition: color 0.2s ease;
+}
+.section-link:hover { color: var(--gold); }
+
+/* Hero 按钮行 */
+.hero-actions {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* ---------- 大厅：三栏动作卡（修正原 2 栏放 3 卡的空洞） ---------- */
+.lobby-grid { grid-template-columns: repeat(3, 1fr); }
+.lobby-card { display: flex; flex-direction: column; }
+/* 卡片内主操作按钮贴底，三张卡按钮同一水平线 */
+.lobby-card .btn-primary,
+.lobby-card .btn-ghost:last-of-type { margin-top: auto; }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 1080px) {
+  .dash-grid { grid-template-columns: minmax(0, 1fr) 300px; }
+}
+@media (max-width: 980px) {
+  .dash-grid { grid-template-columns: 1fr; }
+  .dash-side { position: static; }
+  .lobby-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 640px) {
+  .lobby-grid { grid-template-columns: 1fr; }
+  .page-title { font-size: 24px; }
+}
+
+/* ---------- Tab 切换（个人页：概览/棋谱/装扮） ---------- */
+.tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0 0 22px;
+  padding: 6px;
+  width: fit-content;
+  max-width: 100%;
+  border-radius: 14px;
+  background: var(--glass-1, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--hairline-soft, rgba(255, 255, 255, 0.08));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 6%, transparent);
+}
+.tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 8px 18px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
+}
+.tab:hover { color: var(--text); background: color-mix(in srgb, var(--gold) 10%, transparent); }
+.tab.active {
+  color: #171a1f;
+  background: linear-gradient(135deg, var(--gold-light), var(--gold));
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--gold) 35%, transparent);
+}
+.tab-panel { display: none; }
+.tab-panel.active { display: block; animation: anim-fade var(--dur-base, 0.22s) var(--ease-out, ease) both; }
+@media (max-width: 640px) {
+  .tabs { width: 100%; }
+  .tab { flex: 1; text-align: center; }
+}
