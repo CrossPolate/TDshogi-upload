@@ -473,15 +473,21 @@
       a.volume = bgmGain();
       a.onerror = () => fail(true);
       // ⚠️ 2026-10-08：换页续播 —— 同一首曲从上次位置继续，不从头来
+      // 立刻 seek（metadata 可能尚未就绪，失败无害），再用 canplay 兜底
+      const savedT = restoreBgmPosition(url);
       const seekSaved = () => {
         try {
-          const t = restoreBgmPosition(url);
-          if (t > 0 && Number.isFinite(a.duration) && t < a.duration - 1) a.currentTime = t;
+          if (savedT > 0 && Number.isFinite(a.duration) && savedT < a.duration - 1 && Math.abs(a.currentTime - savedT) > 0.5) {
+            a.currentTime = savedT;
+          }
         } catch (_) { /* ignore */ }
       };
+      seekSaved();
       if (typeof a.addEventListener === 'function') {
         a.addEventListener('loadedmetadata', seekSaved);
+        a.addEventListener('canplay', seekSaved, { once: true });
       }
+      setTimeout(seekSaved, 300);
       if (alt) {
         a.onended = () => {
           if (gen !== bgmGen) return;
@@ -518,8 +524,9 @@
     const url = wantOn ? currentTrackUrl() : null;
     const name = url ? url.split('/').pop().replace(/\.[^.]+$/, '') : bgmPhase;
 
-    if (!force && url && ((bgmMode === 'file' && bgmUrl === url) || (bgmMode === 'synth' && bgmSynthName === name))) {
-      if (bgmMode === 'file' && bgmEl && bgmEl.paused) {
+    // ⚠️ 同一首曲已在播/暂停 → 只恢复，不重建（重建会丢失播放进度）
+    if (url && bgmMode === 'file' && bgmUrl === url && bgmEl) {
+      if (bgmEl.paused) {
         try { const p = bgmEl.play(); if (p && p.catch) p.catch(() => {}); } catch (_) {}
       }
       return;
@@ -814,6 +821,8 @@
       // ⚠️ 2026-10-08：换页前存播放位置（换页不从头播）
       global.addEventListener('pagehide', saveBgmPosition);
       global.addEventListener('beforeunload', saveBgmPosition);
+      // 每 2 秒自动存一次（pagehide 在某些浏览器/SPA 导航时不触发）
+      setInterval(saveBgmPosition, 2000);
     }
   } catch (_) { /* 测试环境 */ }
 
