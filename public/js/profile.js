@@ -1047,14 +1047,13 @@
           if (window.Sound && window.Sound.bgmResumeFromPreview) window.Sound.bgmResumeFromPreview();
         }
         function togglePreview(btn, src) {
-          if (previewEl && previewEl.dataset && previewEl.dataset.src === src) { stopPreview(); return; }
+          if (previewEl && previewEl._pvSrc === src) { stopPreview(); return; }
           stopPreview();
           // 2026-10-08：试听前先停 BGM，避免叠音
           if (window.Sound && window.Sound.bgmPauseForPreview) window.Sound.bgmPauseForPreview();
           try {
             const a = new Audio(encodeURI(src));
-            a.dataset = a.dataset || {};
-            a.dataset.src = src;
+            a._pvSrc = src;
             a.volume = 0.7;
             a.onended = stopPreview;
             a.onerror = () => { stopPreview(); note('试听失败：音频不可用', true); };
