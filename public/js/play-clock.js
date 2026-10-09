@@ -6,8 +6,9 @@
  *   - `getState()`     取最新对局状态（原闭包变量 `state`）
  *   - `getViewpoint()` 取当前显示视角（原 `mySeat === 'w' ? 'w' : 'b'`）
  *
- * 对外接口（由 play.js 调用）：
- *   PlayClock.init({ getState, getViewpoint })  注入依赖并启动 tick
+ * 对外接口（由 play.js 的 View 生命周期驱动）：
+ *   PlayClock.init({ getState, getViewpoint })  注入依赖并启动 tick（play.mount 调）
+ *   PlayClock.destroy()                         停表并复位模块状态（play.unmount 调）
  *   PlayClock.syncFromState(state)              state 消息里的棋钟字段
  *   PlayClock.syncFromServer(data)              clock 消息（走子后以服务端校准）
  *   PlayClock.resetTick()                       以"此刻"为基准（收到服务端消息时）
@@ -264,8 +265,27 @@
     start();
   }
 
+  /**
+   * SPA 生命周期（2026-10-09）：`play.unmount` 调用——停掉 500ms tick 定时器，
+   * 并把模块状态复位到「刚加载」的样子（含注入回调），保证下一次 `init` 不残留上一局的
+   * 读秒/提醒边界/闭包引用（否则切走再进会看到旧棋钟数字、或 tick 摸到已销毁的 DOM）。
+   */
+  function destroy() {
+    stop();
+    getState = function () { return null; };
+    getViewpoint = function () { return 'b'; };
+    onTick = null;
+    localClocks = { b: 15 * 60 * 1000, w: 15 * 60 * 1000 };
+    localByoyomi = { b: 0, w: 0 };
+    inByoyomi = { b: false, w: false };
+    byoyomiDuration = 0;
+    lastTickTs = Date.now();
+    lastAnchorTurn = null;
+    resetMarks();
+  }
+
   window.PlayClock = {
-    init, syncFromState, syncFromServer, resetTick, update, start, stop,
+    init, destroy, syncFromState, syncFromServer, resetTick, update, start, stop,
     advance,    // 单测用：不经定时器直接推进 dtMs
     isDanger,   // §U2 棋盘红框用：当前手番方是否读秒 ≤10 秒（调用方需自行排除观战者）
     resetMarks, // 单测用：重置提醒边界

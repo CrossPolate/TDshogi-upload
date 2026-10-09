@@ -114,7 +114,11 @@ function adminEntryGate(req, res, next) {
   try { path = decodeURIComponent(path); } catch (_) { /* 非法编码：保持原样 */ }
   // ⚠️ 2026-10-02 审查 P3：大小写不敏感文件系统（macOS/Windows）上 /Admin.html 会绕过门禁
   //（serve-static 仍能命中 admin.html）→ 用 toLowerCase 归一后比较。
-  if (ADMIN_ENTRY_KEY && path.toLowerCase() === '/admin.html' && req.query.k !== ADMIN_ENTRY_KEY) {
+  // ⚠️ 2026-10-09 全量 SPA 迁移：后台既可用干净路径 `/admin`、也保留老 `/admin.html` 深链，
+  // 两者都会经前端 router 渲染后台视图 → 门禁必须**一并拦**，否则干净路径会绕过入口隐蔽。
+  const p = path.toLowerCase();
+  const isAdminEntry = p === '/admin.html' || p === '/admin';
+  if (ADMIN_ENTRY_KEY && isAdminEntry && req.query.k !== ADMIN_ENTRY_KEY) {
     return res.status(404).send('Not Found');
   }
   next();

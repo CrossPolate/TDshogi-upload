@@ -9,7 +9,10 @@
  *   注入进来（core → demo）：`getState` / `getFb` / `getSeat` / `getViewpoint` /
  *                            `ensureBoard` / `renderPlayerBars`
  *   暴露出去（demo → core）：`isActive` / `enter` / `exit` / `applyMode` / `updateUI` /
- *                            `sendMove` / `setPendingPromo` / `takePendingPromo`
+ *                            `sendMove` / `setPendingPromo` / `takePendingPromo` / `destroy`
+ *
+ * SPA 迁移（2026-10-09）：本模块**绝不自启**——`init(ctx)` 由 `play.js` 的 mount 调用
+ * （注入依赖 + 注册订阅/监听，句柄记内部 teardown），`destroy()` 由 unmount 调用全清。
  *
  * ⚠️ 迁移原则：**逻辑一字未改**，只把「读 core 的闭包变量」换成注入的回调调用
  * （`reviewActive`→`isActive()`、`state`→`getState()`、`mySeat/isPlayer`→`getSeat()`、
@@ -45,6 +48,7 @@
   let pendingDemoPromo = null;    // 感想战升变选择
   let freeMode = false;           // 自由摆棋（本地草稿，不入谱不同步）
   let demoLegalCache = {};        // 历史手合法走法按需缓存（PLAN §H）
+  let teardown = [];              // SPA：本模块的副作用句柄（api.on 退订 + DOM 解绑），destroy 全清
 
   function demoEdge() {
     return demoInfo ? demoInfo.baseIndex + demoInfo.moves.length : 0;
@@ -257,6 +261,8 @@
   }
 
   function init(ctx) {
+    // SPA：重复 mount 先清上一轮的订阅/监听（幂等接线，不会双收消息）
+    destroy();
     const c = ctx || {};
     if (typeof c.getState === 'function') getState = c.getState;
     if (typeof c.getFb === 'function') getFb = c.getFb;
@@ -266,22 +272,28 @@
     if (typeof c.renderPlayerBars === 'function') renderPlayerBars = c.renderPlayerBars;
     if (typeof c.clearSelection === 'function') clearSelection = c.clearSelection;
 
-    api.on('demo_legal', (d) => {
+    teardown.push(api.on('demo_legal', (d) => {
       demoLegalCache[demoLegalKey(d.index)] = d.legalTargetsBySq;
       const fb = getFb();
       if (fb && reviewActive && demoCursor === d.index) {
         fb.setLegalTargets(d.legalTargetsBySq);
         fb.render();
       }
-    });
+    }));
 
-    $('btnDemoClaim').addEventListener('click', () => api.send({ type: 'demo_claim' }));
-    $('btnDemoTransfer').addEventListener('click', () => api.send({ type: 'demo_transfer' }));
-    $('btnDemoUndo').addEventListener('click', () => api.send({ type: 'demo_undo' }));
-    $('btnDemoClear').addEventListener('click', () => { if (confirm('清空全部推演手，回到本谱终局局面？')) api.send({ type: 'demo_reset' }); });
-    $('btnDemoLatest').addEventListener('click', () => { demoCursor = demoEdge(); applyDemoMode(); updateDemoUI(); });
-    $('btnDemoRematch').addEventListener('click', () => { api.send({ type: 'rematch' }); toast('已请求再来一局，等待对方同意…'); });
-    $('btnFreeMode').addEventListener('click', () => {
+    // DOM 监听统一经 bind() 登记（unmount/destroy 一并解绑，双保险）
+    const bind = (el, fn) => {
+      if (!el) return;
+      el.addEventListener('click', fn);
+      teardown.push(() => el.removeEventListener('click', fn));
+    };
+    bind($('btnDemoClaim'), () => api.send({ type: 'demo_claim' }));
+    bind($('btnDemoTransfer'), () => api.send({ type: 'demo_transfer' }));
+    bind($('btnDemoUndo'), () => api.send({ type: 'demo_undo' }));
+    bind($('btnDemoClear'), () => { if (confirm('清空全部推演手，回到本谱终局局面？')) api.send({ type: 'demo_reset' }); });
+    bind($('btnDemoLatest'), () => { demoCursor = demoEdge(); applyDemoMode(); updateDemoUI(); });
+    bind($('btnDemoRematch'), () => { api.send({ type: 'rematch' }); toast('已请求再来一局，等待对方同意…'); });
+    bind($('btnFreeMode'), () => {
       if (!getFb()) return;
       freeMode = !freeMode;
       if (freeMode) {
@@ -296,7 +308,7 @@
       updateDemoUI();
     });
 
-    api.on('demo_state', (d) => {
+    teardown.push(api.on('demo_state', (d) => {
       if (!reviewActive) {
         const state = getState();
         if (state && state.status === 'FINISHED' && state.result) enterDemo(state);
@@ -309,11 +321,37 @@
       applyDemoMode();
       renderDemoMoveList();
       updateDemoUI();
-    });
+    }));
+  }
+
+  /**
+   * SPA 生命周期（2026-10-09）：`play.unmount` 调用——退订 WS（demo_legal / demo_state）、
+   * 解绑演示栏按钮，并把感想战状态（推演谱 / 光标 / 自由摆棋 / 缓存 / 注入回调）全部复位，
+   * 保证下次进对局页是干净的初始态。
+   */
+  function destroy() {
+    teardown.forEach((fn) => { try { fn(); } catch (_) {} });
+    teardown = [];
+    reviewActive = false;
+    demoInfo = null;
+    demoCursor = 0;
+    originalPositions = null;
+    pendingDemoPromo = null;
+    freeMode = false;
+    demoLegalCache = {};
+    // 注入回调复位为安全默认值（避免 destroy 后仍摸到旧页面的 DOM / 闭包）
+    getState = function () { return null; };
+    getFb = function () { return null; };
+    getSeat = function () { return { mySeat: null, isPlayer: false }; };
+    getViewpoint = function () { return 'b'; };
+    ensureBoard = function () {};
+    renderPlayerBars = function () {};
+    clearSelection = function () {};
   }
 
   window.PlayDemo = {
     init,
+    destroy,                                       // SPA：play.unmount 调（清订阅/监听/状态）
     isActive: function () { return reviewActive; },
     enter: enterDemo,
     exit: exitDemo,

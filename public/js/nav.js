@@ -213,14 +213,23 @@
       }
       return;
     }
-    // 身份换人了（登录 / 登出 / 换号）：本标签的连接仍是旧身份，必须整页重载才会重连。
-    try { window.sessionStorage.setItem('tdshogi_flash', '身份已在其他标签页变更，正在刷新…'); } catch (_) {}
-    location.reload();
+    // 身份换人了（登录 / 登出 / 换号）：SPA 下**不再整页 reload**（会销毁文档、打断 BGM）。
+    // 身份变化的「关旧连接 → 用新身份重连 → 重挂当前 View」由 boot.js 的 storage 监听统一处理；
+    // 这里只就地刷一下徽章占位。
+    renderedIdentityId = next.id;
+    refreshBadge();
   }
   try { global.addEventListener('storage', onStorageSync); } catch (_) { /* 极老浏览器没有 storage 事件：忽略 */ }
 
   function renderNav(current) {
     const guest = getGuest();
+    // SPA 幂等：导航已渲染过就绝不整块重建（重建会闪烁、丢监听、换掉正在点的按钮）。
+    // 只就地更新 active 态与徽章即可；这也让「迁移期某个还没转 View 的页面误调 renderNav」无害化。
+    if (renderedIdentityId != null && document.querySelector('.nav-links')) {
+      if (current != null) setActive(current);
+      refreshBadge();
+      return guest;
+    }
     renderedIdentityId = guest.id; // 记录本标签已渲染的身份 id（供上面的 storage 同步判断）
     const isAccount = typeof guest.id === 'string' && guest.id.includes('.');
     // 头像（2026-09-20）：徽标改成显示头像；**登录态改由 title 表达**——
@@ -296,6 +305,47 @@
     return guest;
   }
 
+  // ==================================================================
+  // SPA 增量（2026-10-09）：导航只渲染一次，切页仅就地更新 active / 徽章。
+  // 整块 innerHTML 重建会把用户正在点的按钮换掉、并让音乐按钮等状态闪烁。
+  // ==================================================================
+
+  /** 视图名 → 顶部导航项 id（没有对应项则为 null，表示不高亮任何项） */
+  const VIEW_TO_NAV = {
+    home: 'home', lobby: 'lobby', gallery: null,
+    tournaments: 'tournaments', tournament: 'tournaments',
+    profile: 'profile', review: null, play: null, admin: null,
+  };
+
+  /** 切页时就地更新导航 active 态（不重建元素） */
+  function setActive(viewName) {
+    const navId = VIEW_TO_NAV[viewName];
+    document.querySelectorAll('.nav-links a[data-nav]').forEach((a) => {
+      a.classList.toggle('active', navId != null && a.getAttribute('data-nav') === navId);
+    });
+  }
+
+  /** 就地刷新用户徽章（名字 / 头像），不重建导航 */
+  function refreshBadge() {
+    const g = getGuest();
+    renderedIdentityId = g.id;
+    const badge = document.querySelector('.nav-user span');
+    if (badge) badge.textContent = g.name || '载入中…';
+    const av = document.querySelector('.nav-user .nav-avatar');
+    if (av && global.UI) {
+      if (global.UI.setAvatarContent) global.UI.setAvatarContent(av, g.avatar, g.name);
+      else if (global.UI.avatarGlyph) av.textContent = global.UI.avatarGlyph(g.avatar, g.name);
+    }
+    // 管理员入口可见性随身份变化
+    const entry = document.querySelector('.admin-entry');
+    if (isAdminSession() && !entry) {
+      // 已是管理员但没入口 → 需要重建导航才能加回（罕见，安全兜底）
+      renderNav(null); setActive(global.Router && global.Router.current);
+    } else if (!isAdminSession() && entry) {
+      entry.remove();
+    }
+  }
+
   /**
    * 绑定导航里的三个按钮（2026-09-23，安全审查遗留项 13f：去掉 inline `onclick`）。
    *
@@ -337,5 +387,5 @@
     applyTheme();
   }
 
-  global.NAV = { renderNav, applyLocale, toggleLocale, getGuest, saveGuest, updateUserName, updateAvatar, randomName, genId, genKey, GUEST_KEY, THEME_KEY, ADMIN_KEY, isAdminSession, toggleTheme, getTheme, applyTheme };
+  global.NAV = { renderNav, setActive, refreshBadge, applyLocale, toggleLocale, getGuest, saveGuest, updateUserName, updateAvatar, randomName, genId, genKey, GUEST_KEY, THEME_KEY, ADMIN_KEY, isAdminSession, toggleTheme, getTheme, applyTheme };
 })(window);

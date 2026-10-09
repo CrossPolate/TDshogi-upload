@@ -3,17 +3,21 @@
  *
  * 从 `play.js` 抽出（第一步是 `play-clock.js`）。选它先搬的原因：**与对局状态零耦合**——
  * 聊天记录、分区 tab、观众名单都是自成一体的（只碰 DOM 与 WS 事件），
- * 不像感想战那样要读写 `state` / `fb` / `cursor` 一堆闭包变量。**搬过来逻辑一字未改**。
+ * 不像感想战那样要读写 `state` / `fb` / `cursor` 一堆闭包变量。
  *
- * 对外接口（由 `play.js` 调用）：
- *   PlayChat.init()                  注册 WS 事件与 DOM 交互（在 `api.connect()` 之后调；幂等）
- *   PlayChat.renderSpectators(list)  state 快照里的观众名单（首屏初始化用——此前只有
- *                                    `spectator_update` 才渲染，导致刚进场的人一直看到「暂无观众」）
+ * SPA 迁移（2026-10-09）：本模块**绝不自启**，由 `play.js` 的 View 生命周期驱动：
+ *   PlayChat.mount()     注册 WS 事件与 DOM 交互（play.mount 调；可重复，先 destroy 旧的）
+ *   PlayChat.destroy()   退订 WS / 解绑 DOM / 清空聊天记录（play.unmount 调）
+ *   PlayChat.init()      = mount（兼容旧名）
+ *   PlayChat.system(text)               重要提示写入聊天区留痕
+ *   PlayChat.renderSpectators(list)     state 快照里的观众名单（首屏初始化用）
+ *
+ * ⚠️ 旧版在**模块顶层**捕获 `#chatBox` / `#chatInput` —— 多页应用下脚本执行时 DOM 已就绪
+ * 没问题，但 SPA 单文档里脚本在 `#view` 渲染**之前**就加载了，顶层拿到的永远是 null。
+ * 现在所有 DOM 都在用的时候经 `UI.$` 现查。
  *
  * 依赖：`window.API`、`window.UI`（`$` / `esc`）、`window.Settings`（观众进出提示开关）
  *       DOM：`#chatBox` `#chatInput` `#btnChatSend` `#chatTabs` `#spectatorList` `#spectatorCount`
- *
- * ⚠️ 加载顺序：必须在 `play.js` **之前**（play.js 会调它的接口）。
  */
 (function () {
   'use strict';
@@ -47,8 +51,6 @@
   // ==================================================================
   // 聊天（§R2 kibitz 分区）
   // ==================================================================
-  const chatBox = $('chatBox');
-  const chatInput = $('chatInput');
   // §R2 kibitz 分区：保存全量消息，切 tab 时按当前筛选整体重渲染（否则切不回来）
   let chatLog = [];
   let chatTab = 'all'; // all | players | spectators
@@ -63,6 +65,7 @@
   }
 
   function appendChatRow(msg) {
+    const chatBox = $('chatBox');
     if (!chatBox) return;
     const row = document.createElement('div');
     // §R2：玩家金色 / 观战者冷蓝 / 系统暗色斜体（配色见 style.css）
@@ -88,6 +91,7 @@
   }
 
   function renderChat() {
+    const chatBox = $('chatBox');
     if (!chatBox) return;
     chatBox.innerHTML = '';
     for (const m of chatLog) if (chatMatch(m)) appendChatRow(m);
@@ -99,10 +103,13 @@
     while (chatLog.length > 100) chatLog.shift();
     if (!chatMatch(msg)) return; // 当前分区不显示，但仍记入全量，切回来还在
     appendChatRow(msg);
+    const chatBox = $('chatBox');
     if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
   }
 
   function sendChat() {
+    const chatInput = $('chatInput');
+    if (!chatInput) return;
     const text = chatInput.value.trim();
     if (!text) return;
     api.send({ type: 'chat', data: { text } });
@@ -125,7 +132,7 @@
     '再来一局？',
   ];
 
-  /** 渲染快捷语胶囊（幂等：`init()` 可能被重复调用） */
+  /** 渲染快捷语胶囊（幂等：`mount()` 可能被重复调用） */
   function renderQuick() {
     const box = $('chatQuick');
     if (!box || box.dataset.ready === '1') return;
@@ -140,30 +147,45 @@
     });
   }
 
-  /** 注册 DOM 交互与 WS 事件（**幂等**：重复调用不会重复绑定/重复收消息） */
-  let inited = false;
-  function init() {
-    if (inited) return;
-    inited = true;
+  // ==================================================================
+  // 生命周期（SPA）：mount 注册、destroy 全清——由 play.js 的 mount/unmount 驱动
+  // ==================================================================
+  let teardown = [];   // 副作用句柄（api.on 退订函数 + DOM 解绑函数）
+  let mounted = false;
 
-    if ($('btnChatSend')) $('btnChatSend').addEventListener('click', sendChat);
-    if (chatInput) chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+  /** 注册 DOM 交互与 WS 事件（play.mount 调；重复调用先清旧的，不会重复收消息） */
+  function mount() {
+    if (mounted) destroy();
+    mounted = true;
+    teardown = [];
+    chatLog = [];      // 新一局不残留上一局的聊天
+    chatTab = 'all';
+
+    const on = (el, ev, fn) => {
+      if (!el) return;
+      el.addEventListener(ev, fn);
+      teardown.push(() => el.removeEventListener(ev, fn));
+    };
+
+    on($('btnChatSend'), 'click', sendChat);
+    on($('chatInput'), 'keydown', (e) => { if (e.key === 'Enter') sendChat(); });
     renderQuick(); // 快捷语胶囊
 
     // §R2 分区切换
-    if ($('chatTabs')) {
-      $('chatTabs').addEventListener('click', (e) => {
+    const tabs = $('chatTabs');
+    if (tabs) {
+      on(tabs, 'click', (e) => {
         const btn = e.target.closest('.chat-tab');
         if (!btn) return;
         chatTab = btn.getAttribute('data-tab') || 'all';
-        $('chatTabs').querySelectorAll('.chat-tab').forEach((b) => {
+        tabs.querySelectorAll('.chat-tab').forEach((b) => {
           b.classList.toggle('active', b === btn);
         });
         renderChat();
       });
     }
 
-    api.on('chat', (data) => {
+    teardown.push(api.on('chat', (data) => {
       if (!data) return;
       // §R3：观众进出提示可关闭（人多时避免刷屏）；其余系统消息不受影响
       if (data.kind && data.kind.indexOf('spectate-') === 0
@@ -179,15 +201,24 @@
         // 不存就只有"刚收到的那条"有头像，一切 tab 就没了。
         avatar: data.avatar || null,
       });
-    });
+    }));
 
     // 观战者进入时系统提示（rebind=选手掉线重进回位，不算观战）
-    api.on('spectating', (data) => {
+    teardown.push(api.on('spectating', (data) => {
       if (data && data.rebind) return;
       appendChat({ name: '系统', text: '你已进入观战，欢迎交流！', sys: true });
-    });
+    }));
 
-    api.on('spectator_update', (d) => renderSpectators(d.spectators || []));
+    teardown.push(api.on('spectator_update', (d) => renderSpectators(d.spectators || [])));
+  }
+
+  /** play.unmount 调用：退订 WS、解绑 DOM、清空聊天状态，切页零残留 */
+  function destroy() {
+    teardown.forEach((fn) => { try { fn(); } catch (_) {} });
+    teardown = [];
+    mounted = false;
+    chatLog = [];
+    chatTab = 'all';
   }
 
   /**
@@ -203,5 +234,5 @@
     appendChat({ name: '系统', text: String(text), sys: true });
   }
 
-  window.PlayChat = { init, renderSpectators, system };
+  window.PlayChat = { init: mount, mount, destroy, renderSpectators, system };
 })();

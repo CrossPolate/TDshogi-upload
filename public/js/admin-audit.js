@@ -1,20 +1,26 @@
-/* global fmtTime */
 /**
- * admin-audit.js — 操作审计
+ * admin-audit.js — 操作审计（admin 子模块）
  *
- * §M5（2026-09-28）：从 `public/js/admin.js`（原 1254 行）按 tab **整段原样搬出**，
- * 逻辑一字未改，只整体左移 2 格缩进。共用工具（token / $ / esc / maskIp / 分页）仍由
- * `admin.js` 装配时注入（见下方 `make(deps)`）。
+ * §M5（2026-09-28）：从 `public/js/admin.js`（原 1254 行）按 tab **整段原样搬出**。
  *
- * ⚠️ 本文件必须在 `admin.js` **之前**加载（见 public/admin.html 的 <script> 顺序）；
- * `admin.js` 装配时会检查，缺失即抛错——不然症状是"某个 tab 点了没反应"这种静默故障。
+ * SPA 迁移（2026-10-09）：改为**被 admin View 的 mount/unmount 驱动**的函数集合
+ * （`window.AdminParts.audit`）——加载本文件零副作用：
+ *   mount(ctx)  → 绑定筛选控件、导出 loadAudit 到 ctx.hub，句柄记内部 teardown
+ *   unmount()   → 统一清理；hub 条目由 admin.unmount 清空。
+ * 异步回调恢复处一律先查 `ctx.isAlive()`，切页后不向已销毁 DOM 写入。
+ *
+ * 共用工具（token / $ / esc / maskIp / 分页 / AdminUI / fmtTime）由 admin.js 的 mount 注入。
  */
 (function (global) {
   'use strict';
 
-  function make(deps) {
-    // 共用工具（由 admin.js 装配时注入）
-    const { esc, getToken, maskIp, renderPaged, setToken, toast } = deps;
+  /** 本模块的副作用句柄（unmount 全清） */
+  let _td = [];
+
+  function mount(ctx) {
+    const { $, esc, getToken, maskIp, renderPaged, setToken, toast, hub, fmtTime } = ctx;
+    const on = ctx.on;
+    const alive = () => ctx.isAlive();
 
     // ---- 操作审计（PLAN §K4）----
     let allAudit = [];
@@ -27,29 +33,32 @@
     let auditFilterReady = false;
 
     /** 统一取列表容器 */
-    function auditListEl() { return document.getElementById('auditList'); }
+    function auditListEl() { return $('auditList'); }
 
     async function loadAudit() {
       // ⚠️ 2026-10-02 体验修复（加载态统一）：先铺"正在加载"占位——此前是上一轮的残留/一片空白，
       // 点开 tab 的头几百毫秒看起来像页面坏了（尤其这条接口是 heavy 限流档）。
       const box = auditListEl();
-      if (box) box.innerHTML = window.AdminUI ? window.AdminUI.loading('正在加载审计记录…') : '';
+      if (box) box.innerHTML = ctx.AdminUI ? ctx.AdminUI.loading('正在加载审计记录…') : '';
       try {
-        const data = await window.ApiUtils.get(`/api/admin/audit?token=${encodeURIComponent(getToken())}`);
+        const data = await global.ApiUtils.get(`/api/admin/audit?token=${encodeURIComponent(getToken())}`);
+        if (!alive()) return;
         allAudit = data.events || [];
         initAuditFilters();
         renderAuditFiltered(false);
       } catch (e) {
+        if (!alive()) return;
         if (e.message && (e.message.includes('403') || e.message.includes('401'))) {
           setToken(null);
           // ⚠️ 2026-10-02 体验修复：令牌过期/失效时回退到登录态（此前只清 token，
-          // 页面仍停在后台样式 → 后续每个请求继续 403，看起来像后台彻底坏了）
-          location.reload();
+          // 页面仍停在后台样式 → 后续每个请求继续 403，看起来像后台彻底坏了）。
+          // 铁律3：整页 location.reload() → SPA 路由重挂当前视图（回到登录卡片）。
+          global.Router.reload();
           return;
         }
         toast('加载审计记录失败');
-        if (box) box.innerHTML = window.AdminUI
-          ? window.AdminUI.empty(`加载审计记录失败：${(e && e.message) || '网络错误'}`) : '';
+        if (box) box.innerHTML = ctx.AdminUI
+          ? ctx.AdminUI.empty(`加载审计记录失败：${(e && e.message) || '网络错误'}`) : '';
       }
     }
 
@@ -79,7 +88,7 @@
     function renderAuditFiltered(reset) {
       const list = filteredAudit();
       renderPaged('audit', list, 'auditPager', renderAudit, !!reset);
-      const hint = document.getElementById('auditFilterHint');
+      const hint = $('auditFilterHint');
       if (hint) {
         const active = !!(auditFilter.action || auditFilter.ok || auditFilter.hours);
         hint.textContent = active
@@ -89,13 +98,13 @@
     }
 
     /**
-     * 初始化筛选控件：动作下拉按**实际出现过的动作**填充；三个控件与"清除筛选"只绑一次。
-     * 事件绑一次即可（控件是 admin.html 里的静态元素，不像列表那样整块重建）。
+     * 初始化筛选控件：动作下拉按**实际出现过的动作**填充；三个控件与"清除筛选"每次 mount 绑一次。
+     *（控件是 render() 里的静态元素，不像列表那样整块重建；unmount 统一解绑。）
      */
     function initAuditFilters() {
-      const actSel = document.getElementById('auditAction');
-      const okSel = document.getElementById('auditOk');
-      const rngSel = document.getElementById('auditRange');
+      const actSel = $('auditAction');
+      const okSel = $('auditOk');
+      const rngSel = $('auditRange');
       if (actSel) {
         const acts = [...new Set(allAudit.map((e) => String(e.action || '')).filter(Boolean))].sort();
         const keep = auditFilter.action;
@@ -106,11 +115,11 @@
       }
       if (auditFilterReady) return;
       auditFilterReady = true;
-      if (actSel) actSel.addEventListener('change', () => { auditFilter.action = actSel.value; renderAuditFiltered(true); });
-      if (okSel) okSel.addEventListener('change', () => { auditFilter.ok = okSel.value; renderAuditFiltered(true); });
-      if (rngSel) rngSel.addEventListener('change', () => { auditFilter.hours = rngSel.value; renderAuditFiltered(true); });
-      const resetBtn = document.getElementById('btnAuditReset');
-      if (resetBtn) resetBtn.addEventListener('click', () => {
+      if (actSel) on(actSel, 'change', () => { auditFilter.action = actSel.value; renderAuditFiltered(true); });
+      if (okSel) on(okSel, 'change', () => { auditFilter.ok = okSel.value; renderAuditFiltered(true); });
+      if (rngSel) on(rngSel, 'change', () => { auditFilter.hours = rngSel.value; renderAuditFiltered(true); });
+      const resetBtn = $('btnAuditReset');
+      if (resetBtn) on(resetBtn, 'click', () => {
         auditFilter.action = '';
         auditFilter.ok = '';
         auditFilter.hours = '';
@@ -134,14 +143,16 @@
 
     function renderAudit(events) {
       // ⚠️ 2026-10-02 体验修复：标题数字用**总数**（此前用当页条数，恒 ≤20，管理员会误判量级）
-      document.getElementById('auditCount').textContent = allAudit.length;
-      const el = document.getElementById('auditList');
+      const cnt = $('auditCount');
+      if (cnt) cnt.textContent = allAudit.length;
+      const el = $('auditList');
+      if (!el) return;
       if (!events.length) {
         // ⚠️ 2026-10-02 体验修复（空状态统一）：区分"本来就空"与"被筛空"，
         // 免得筛完没结果时让人以为审计坏了。
         const filtered = !!(auditFilter.action || auditFilter.ok || auditFilter.hours);
         const msg = filtered ? '没有符合当前筛选的操作记录（可点「清除筛选」）' : '暂无管理员操作记录';
-        el.innerHTML = window.AdminUI ? window.AdminUI.empty(msg) : '';
+        el.innerHTML = ctx.AdminUI ? ctx.AdminUI.empty(msg) : '';
         return;
       }
       el.innerHTML = events.map((e) => `
@@ -157,18 +168,15 @@
       `).join('');
     }
 
-    // ---- 供其它模块调用（admin.js 装配时按依赖顺序执行，见该文件）----
-    global.loadAudit = loadAudit;
-
-    return {
-      allAudit,
-      auditFilter,
-      filteredAudit,
-      loadAudit,
-      renderAudit,
-      renderAuditFiltered,
-    };
+    // ---- 供其它模块调用（admin.js 装配，见该文件）----
+    hub.loadAudit = loadAudit;
   }
 
-  global.AdminAudit = { make };
+  function unmount() {
+    _td.forEach((fn) => { try { fn(); } catch (_) {} });
+    _td = [];
+  }
+
+  global.AdminParts = global.AdminParts || {};
+  global.AdminParts.audit = { mount, unmount };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -1,25 +1,33 @@
-/* global getToken, setToken, toast */
 /**
- * admin-items.js — 「道具发放」tab（2026-10-03 新功能：道具系统）
+ * admin-items.js — 「道具发放」tab（admin 子模块）（2026-10-03 新功能：道具系统）
  *
  * 一期没有独立的道具后台：把 `tools/item-admin.js` 的三个动作搬到这里——
  *   1. 查目录（拿 itemId / 价格 / 稀有度）
  *   2. 按账号查「钱包 / 拥有 / 装备」
  *   3. 发道具（grant）/ 加减货币（coin）/ 定义兑换码（code）
  *
- * ⚠️ 与其它 admin-*.js 同款：共用工具（esc / getToken / setToken / toast）由 `admin.js`
- * 装配时注入（见下方 `make(deps)`）；本文件必须在 `admin.js` **之前**加载。
- * ⚠️ 鉴权走 `x-admin-token` 头（POST）与 `?token=`（GET），与 admin-users.js 一致。
+ * SPA 迁移（2026-10-09）：改为**被 admin View 的 mount/unmount 驱动**的函数集合
+ * （`window.AdminParts.items`）——加载本文件零副作用：
+ *   mount(ctx)  → 绑定表单按钮、导出 loadItemsAdmin 到 ctx.hub，句柄记内部 teardown
+ *   unmount()   → 统一清理；hub 条目由 admin.unmount 清空。
+ * 异步回调恢复处一律先查 `ctx.isAlive()`，切页后不向已销毁 DOM 写入。
+ *
+ * ⚠️ 共用工具（esc / getToken / setToken / toast / AdminUI）由 `admin.js` 的 mount 注入；
+ * 鉴权走 `x-admin-token` 头（POST）与 `?token=`（GET），与 admin-users.js 一致。
  */
 (function (global) {
   'use strict';
 
-  function make(deps) {
-    const { esc, getToken, setToken, toast } = deps;
-    const $ = (id) => document.getElementById(id);
-    // 空/加载态统一走 AdminShell 提供的 AdminUI（admin.js 把 AdminShell 排在 MODULES 首位）
-    const empty = (t) => (global.AdminUI ? global.AdminUI.empty(t) : '');
-    const loading = (t) => (global.AdminUI ? global.AdminUI.loading(t) : '');
+  /** 本模块的副作用句柄（unmount 全清） */
+  let _td = [];
+
+  function mount(ctx) {
+    const { $, esc, getToken, setToken, toast, hub } = ctx;
+    const on = ctx.on;
+    const alive = () => ctx.isAlive();
+    // 空/加载态统一走 admin.js 注入的 AdminUI
+    const empty = (t) => (ctx.AdminUI ? ctx.AdminUI.empty(t) : '');
+    const loading = (t) => (ctx.AdminUI ? ctx.AdminUI.loading(t) : '');
 
     let CATALOG = [];
     let ASSETS = [];
@@ -43,11 +51,12 @@
     }
     // 令牌失效 → 退回登录态（与 admin-users/admin-audit 同一处理）
     function onErr(e) {
+      if (!alive()) return;
       const msg = (e && e.message) || '操作失败';
       if (/40[13]|无权|令牌|登录/.test(msg)) {
         setToken(null);
         toast('管理员登录已失效，请重新登录');
-        if (global.initUI) global.initUI();
+        if (hub.initUI) hub.initUI();
         return;
       }
       toast(msg);
@@ -60,6 +69,7 @@
       if (box) box.innerHTML = loading('正在加载道具目录…');
       try {
         const data = await apiGet('/api/admin/items/catalog');
+        if (!alive()) return;
         CATALOG = data.catalog || [];
         BY_ID.clear();
         for (const it of CATALOG) BY_ID.set(it.id, it);
@@ -68,6 +78,7 @@
         loadAssets();
         loadBgmRoles();
       } catch (e) {
+        if (!alive()) return;
         if (box) box.innerHTML = empty('加载道具目录失败');
         onErr(e);
       }
@@ -88,10 +99,11 @@
           <button class="btn btn-ghost btn-sm" data-del-item="${esc(it.id)}" type="button">删除</button>
         </div>`).join('');
       box.innerHTML = rows;
+      // 目录列表整块重建、容器是静态元素 —— 用 onclick 赋值（每次覆盖，不累积监听器）
       box.onclick = (e) => {
-        const ed = e.target.closest('[data-edit-item]');
+        const ed = e.target.closest && e.target.closest('[data-edit-item]');
         if (ed) return fillItemForm(ed.getAttribute('data-edit-item'));
-        const del = e.target.closest('[data-del-item]');
+        const del = e.target.closest && e.target.closest('[data-del-item]');
         if (del) return deleteItem(del.getAttribute('data-del-item'));
       };
     }
@@ -116,18 +128,19 @@
     }
 
     async function upsertItem() {
-      const id = ($('itemEditId') && $('itemEditId').value || '').trim();
+      const id = (($('itemEditId') && $('itemEditId').value) || '').trim();
       const type = $('itemEditType') && $('itemEditType').value;
-      const name = ($('itemEditName') && $('itemEditName').value || '').trim();
-      const desc = ($('itemEditDesc') && $('itemEditDesc').value || '').trim();
+      const name = (($('itemEditName') && $('itemEditName').value) || '').trim();
+      const desc = (($('itemEditDesc') && $('itemEditDesc').value) || '').trim();
       const rarity = $('itemEditRarity') && $('itemEditRarity').value;
-      const priceRaw = ($('itemEditPrice') && $('itemEditPrice').value || '').trim();
-      const assetVal = ($('itemEditAsset') && $('itemEditAsset').value || '').trim();
+      const priceRaw = (($('itemEditPrice') && $('itemEditPrice').value) || '').trim();
+      const assetVal = (($('itemEditAsset') && $('itemEditAsset').value) || '').trim();
+
       if (!id || !type || !assetVal) return toast('请填写 id / 类型 / 素材 URL');
       const price = priceRaw === '' ? null : Number(priceRaw);
       if (price !== null && !Number.isFinite(price)) return toast('价格必须是数字或留空（免费）');
       const kind = type === 'bgm' ? 'audio' : (assetVal.charAt(0) === '/' ? 'image' : 'glyph');
-      const roleVal = type === 'bgm' && $('itemEditBgmRole') ? ($('itemEditBgmRole').value || '').trim() : '';
+      const roleVal = type === 'bgm' && $('itemEditBgmRole') ? (($('itemEditBgmRole').value) || '').trim() : '';
       try {
         const body = {
           id, type: type === 'bgm' ? 'bgm' : type, name: name || id, desc, rarity, price,
@@ -135,6 +148,7 @@
         };
         if (type === 'bgm' && roleVal) body.role = roleVal;
         const r = await apiPost('/api/admin/items/catalog', body);
+        if (!alive()) return;
         toast(`已保存商品「${(r.item && r.item.name) || id}」`);
         loadItemsAdmin();
       } catch (e) { onErr(e); }
@@ -144,6 +158,7 @@
       if (!confirm(`确认删除商品 ${id}？（内置项会提示不可删）`)) return;
       try {
         await apiPost(`/api/admin/items/catalog/${encodeURIComponent(id)}/delete`, {});
+        if (!alive()) return;
         toast('已删除');
         loadItemsAdmin();
       } catch (e) { onErr(e); }
@@ -166,7 +181,7 @@
 
     async function doUpload() {
       const kind = $('uploadKind') && $('uploadKind').value;
-      const name = ($('uploadName') && $('uploadName').value || '').trim();
+      const name = (($('uploadName') && $('uploadName').value) || '').trim();
       const input = $('uploadFile');
       const file = input && input.files && input.files[0];
       const out = $('uploadResult');
@@ -177,6 +192,7 @@
         const r = await apiPost('/api/admin/items/upload', {
           kind, filename: name || file.name, data,
         });
+        if (!alive()) return;
         const a = r.asset || {};
         if (out) {
           out.innerHTML = `<span style="color:var(--green);">上传成功</span> `
@@ -194,6 +210,7 @@
         loadAssetOptions();
         toast('素材已上传');
       } catch (e) {
+        if (!alive()) return;
         if (out) out.innerHTML = `<span style="color:var(--danger);">${esc(e.message || '上传失败')}</span>`;
         onErr(e);
       }
@@ -224,6 +241,7 @@
     async function loadBgmRoles() {
       try {
         const d = await apiGet('/api/admin/items/bgm-roles');
+        if (!alive()) return;
         const r = d.roles || {};
         if ($('bgmMenu')) $('bgmMenu').value = r.menu || '';
         if ($('bgmGame')) $('bgmGame').value = r.game || '';
@@ -237,6 +255,7 @@
       const endgame = ($('bgmEndgame') && $('bgmEndgame').value) || '';
       try {
         await apiPost('/api/admin/items/bgm-roles', { menu, game, endgame });
+        if (!alive()) return;
         toast('BGM 三轨已保存');
       } catch (e) { onErr(e); }
     }
@@ -244,6 +263,7 @@
     async function loadAssets() {
       try {
         const d = await apiGet('/api/admin/items/assets');
+        if (!alive()) return;
         ASSETS = d.assets || [];
         loadAssetOptions();
       } catch (_) { /* 素材列表失败不阻断目录 */ }
@@ -264,15 +284,17 @@
     // ---------------- 查账号 ----------------
 
     async function lookupAccount() {
-      const raw = ($('itemAccountId') && $('itemAccountId').value || '').trim();
+      const raw = (($('itemAccountId') && $('itemAccountId').value) || '').trim();
       const box = $('itemAccountResult');
       if (!raw) { if (box) box.innerHTML = empty('请填写账号 id'); return null; }
       if (box) box.innerHTML = loading('正在查询…');
       try {
         const data = await apiGet(`/api/admin/items/account/${encodeURIComponent(raw)}`);
+        if (!alive()) return null;
         renderAccount(data);
         return data;
       } catch (e) {
+        if (!alive()) return null;
         if (box) box.innerHTML = empty(e.message || '查询失败');
         return null;
       }
@@ -302,44 +324,47 @@
     // ---------------- 发放动作 ----------------
 
     async function doGrant() {
-      const raw = ($('itemAccountId') && $('itemAccountId').value || '').trim();
+      const raw = (($('itemAccountId') && $('itemAccountId').value) || '').trim();
       const itemId = $('itemGrantId') && $('itemGrantId').value;
       if (!raw || !itemId) return toast('请先填写账号并选择道具');
       if (!confirm(`确认给 ${raw} 发放「${(BY_ID.get(itemId) || {}).name || itemId}」？`)) return;
       try {
         const r = await apiPost(`/api/admin/items/account/${encodeURIComponent(raw)}/grant`, { itemId });
+        if (!alive()) return;
         toast(`已发放（该账号现拥有 ${r.owned.length} 件）`);
         lookupAccount();
       } catch (e) { onErr(e); }
     }
 
     async function doCoin() {
-      const raw = ($('itemAccountId') && $('itemAccountId').value || '').trim();
-      const amount = Number(($('itemCoinAmount') && $('itemCoinAmount').value || '').trim());
+      const raw = (($('itemAccountId') && $('itemAccountId').value) || '').trim();
+      const amount = Number((($('itemCoinAmount') && $('itemCoinAmount').value) || '').trim());
       if (!raw || !Number.isFinite(amount) || amount === 0) return toast('请填写账号与非零整数金额');
       if (!confirm(`确认给 ${raw} ${amount > 0 ? '增加' : '扣减'} ${Math.abs(amount)} 货币？`)) return;
       try {
         const r = await apiPost(`/api/admin/items/account/${encodeURIComponent(raw)}/coin`, { amount });
+        if (!alive()) return;
         toast(`已处理，该账号货币现为 ${r.wallet.coin}`);
         lookupAccount();
       } catch (e) { onErr(e); }
     }
 
     async function doCode() {
-      const code = ($('itemCode') && $('itemCode').value || '').trim();
-      const itemId = ($('itemCodeId') && $('itemCodeId').value) || '';
-      const coin = Number(($('itemCodeCoin') && $('itemCodeCoin').value || '').trim()) || 0;
-      const maxUses = Number(($('itemCodeMax') && $('itemCodeMax').value || '').trim()) || 1;
+      const code = (($('itemCode') && $('itemCode').value) || '').trim();
+      const itemId = (($('itemCodeId') && $('itemCodeId').value)) || '';
+      const coin = Number((($('itemCodeCoin') && $('itemCodeCoin').value) || '').trim()) || 0;
+      const maxUses = Number((($('itemCodeMax') && $('itemCodeMax').value) || '').trim()) || 1;
       if (!code) return toast('请填写兑换码');
       if (!itemId && !coin) return toast('兑换码至少要发一件道具或一些货币');
       try {
         const r = await apiPost('/api/admin/items/code', { code, itemId: itemId || null, coin, maxUses });
+        if (!alive()) return;
         toast(`兑换码已定义：道具=${(BY_ID.get(itemId) || {}).name || '（无）'} 币=${r.code.coin} 上限=${r.code.maxUses}`);
       } catch (e) { onErr(e); }
     }
 
-    // ---------------- 事件绑定（本模块自己绑，避免改动 admin-shell 的委托表）----------------
-    const bind = (id, fn) => { const el = $(id); if (el) el.addEventListener('click', fn); };
+    // ---------------- 事件绑定（本模块自己绑，句柄记 teardown 由 unmount 全清）----------------
+    const bind = (id, fn) => { on($(id), 'click', fn); };
     bind('btnItemsRefresh', () => loadItemsAdmin());
     bind('btnItemLookup', () => lookupAccount());
     bind('btnItemGrant', () => doGrant());
@@ -351,16 +376,20 @@
 
     // 类型切换时显示/隐藏 BGM 场景选择器
     const typeEl = $('itemEditType');
-    if (typeEl) typeEl.addEventListener('change', () => {
+    if (typeEl) on(typeEl, 'change', () => {
       const roleEl = $('itemEditBgmRole');
       if (roleEl) roleEl.style.display = typeEl.value === 'bgm' ? '' : 'none';
     });
 
-    // 供 admin-shell 的 tab 派发调用（用 window.xxx 以免 eslint no-undef）
-    global.loadItemsAdmin = loadItemsAdmin;
-
-    return { loadItemsAdmin };
+    // 供 admin-shell 的 tab 派发调用（走 hub，不再挂 window.loadItemsAdmin）
+    hub.loadItemsAdmin = loadItemsAdmin;
   }
 
-  global.AdminItems = { make };
+  function unmount() {
+    _td.forEach((fn) => { try { fn(); } catch (_) {} });
+    _td = [];
+  }
+
+  global.AdminParts = global.AdminParts || {};
+  global.AdminParts.items = { mount, unmount };
 })(typeof window !== 'undefined' ? window : globalThis);

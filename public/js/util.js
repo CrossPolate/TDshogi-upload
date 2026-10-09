@@ -441,7 +441,17 @@
     const jump = t.closest('[data-href]');
     if (jump) {
       const href = jump.getAttribute('data-href');
-      if (href) global.location.href = href;
+      if (href) {
+        e.preventDefault();
+        // SPA：站内页面交给路由接管（文档不销毁、BGM 常驻）；下载 / 外链 / API 导出才整页跳。
+        if (global.Router && global.Router.isInternalPage && global.Router.isInternalPage(href)) {
+          global.Router.navigate(href);
+        } else {
+          global.location.href = href;
+        }
+      }
+      // data-href 归本处理器独占（util.js 先于 router 注册），避免 a[href] / data-act 重复处理
+      e.stopImmediatePropagation();
       return;
     }
     const el = t.closest('[data-act]');

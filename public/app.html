@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>TDShogi · 在线将棋对战平台</title>
+  <!-- 全部样式一次性载入（单文档常驻，各页样式并存不冲突） -->
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/motion.css">
+  <link rel="stylesheet" href="css/theme-pro.css">
+  <link rel="stylesheet" href="css/layout-pro.css">
+  <link rel="stylesheet" href="css/board.css">
+  <link rel="stylesheet" href="css/review.css">
+</head>
+<body>
+  <!-- 全局导航：只渲染一次，切页仅更新 active 态 -->
+  <header class="nav"></header>
+
+  <!-- 路由出口：切页只换这里的内容，文档永不销毁（BGM 常驻的关键） -->
+  <div id="view"></div>
+
+  <footer class="footer">TDShogi · 猹狸的将棋道场</footer>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- 单一 SPA bundle：共享内核单例 + 路由 + 全部页面 View -->
+  <script src="js/app.bundle.js"></script>
+</body>
+</html>

@@ -10,6 +10,10 @@
  * （症状：切了视角棋盘不跟着翻）。
  *
  * 装配见 `play.js`：`const views = window.PlayViews.make({ ctx, ... });`
+ * SPA 迁移（2026-10-09）：本文件**绝不自启**——`make()` 由 `play.js` 的 mount 调用，
+ * 每次装配把自己的 WS 订阅 / DOM 监听 / setTimeout 记入内部 teardown，由返回对象的
+ * `destroy()` 全清（play.unmount 调）。`location.href` 跳页一律改经 `Router.navigate`
+ * （btnLeave 的跳转改为调用注入的 `deps.leaveGame()`，与 View 的 confirmLeave 离开守卫协同）。
  * ⚠️ 本文件必须在 `play.js` **之前**加载（`play.js` 装配时会检查，缺失即抛错）。
  */
 (function (global) {
@@ -24,6 +28,19 @@
     const guest = deps.guest;
     const onSelectPiece = deps.onSelectPiece;
     const toast = deps.toast;
+    // 「退出对局」按钮的跳转（确认 + 发 leave + 路由）统一由 play.js 注入——
+    // 它还要置 confirmLeave 放行标志，避免离开守卫二次弹确认。
+    const leaveGame = typeof deps.leaveGame === 'function'
+      ? deps.leaveGame
+      : () => { global.Router.navigate('lobby.html'); };
+
+    // SPA：本次装配的副作用句柄（api.on 退订函数 + DOM 解绑 + clearTimeout）
+    const teardown = [];
+    const bind = (el, ev, fn) => {
+      if (!el) return;
+      el.addEventListener(ev, fn);
+      teardown.push(() => el.removeEventListener(ev, fn));
+    };
 
 function currentViewpoint() {
   return ctx.isPlayer ? (ctx.mySeat === 'w' ? 'w' : 'b') : ctx.spectatorViewpoint;
@@ -101,9 +118,10 @@ function scrollBoardIntoViewOnce() {
   if (window.innerWidth > 900) return;
   const el = $('boardContainer');
   if (!el) return;
-  setTimeout(() => {
+  const t = setTimeout(() => {
     try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) {}
   }, 80);
+  teardown.push(() => clearTimeout(t)); // SPA：切页清掉未触发的滚动
 }
 
 function render(state) {
@@ -264,10 +282,10 @@ function renderReportCategories(list) {
   sel.innerHTML = list.map((c) => `<option value="${window.UI.esc(c.id)}">${window.UI.esc(c.label)}</option>`).join('');
 }
 
-api.on('hello', (d) => { if (d) renderReportCategories(d.reportCategories); });
+teardown.push(api.on('hello', (d) => { if (d) renderReportCategories(d.reportCategories); }));
 
 if ($('btnReport')) {
-  $('btnReport').addEventListener('click', () => {
+  bind($('btnReport'), 'click', () => {
     const p = $('reportPanel');
     const show = p.style.display === 'none';
     p.style.display = show ? '' : 'none';
@@ -275,8 +293,8 @@ if ($('btnReport')) {
     // 不滚过去的话，点完看着像"没反应"（尤其手机窄屏，表单在屏幕外）
     if (show) { try { p.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (_) {} }
   });
-  $('btnReportCancel').addEventListener('click', () => { $('reportPanel').style.display = 'none'; });
-  $('btnReportSubmit').addEventListener('click', () => {
+  bind($('btnReportCancel'), 'click', () => { $('reportPanel').style.display = 'none'; });
+  bind($('btnReportSubmit'), 'click', () => {
     const t = reportTarget();
     if (!t) return toast('找不到可举报的对手');
     api.send({
@@ -290,11 +308,11 @@ if ($('btnReport')) {
       },
     });
   });
-  api.on('reported', () => {
+  teardown.push(api.on('reported', () => {
     toast('举报已提交，管理员会尽快处理');
     $('reportPanel').style.display = 'none';
     $('reportDetail').value = '';
-  });
+  }));
 }
 
 // 「再来一局」：双方同意才重开。请求方此前无任何回执（服务端只通知对手），
@@ -307,23 +325,15 @@ function requestRematch(btn) {
   toast('已请求再来一局，等待对方同意…');
   if (btn) btn.disabled = true;
 }
-$('btnRematch').addEventListener('click', (e) => requestRematch(e.currentTarget));
-$('bannerRematch').addEventListener('click', (e) => {
+bind($('btnRematch'), 'click', (e) => requestRematch(e.currentTarget));
+bind($('bannerRematch'), 'click', (e) => {
   requestRematch(e.currentTarget);
   $('banner').classList.remove('show');
 });
-api.on('game_start', () => { rematchRequested = false; }); // 对局重开 → 复位
-$('btnLeave').addEventListener('click', () => {
-  const inGame = ctx.isPlayer && ctx.state && ctx.state.status === 'PLAYING';
-  // ⚠️ 2026-10-02 体验修复：对局中「退出对局」会被服务端判「接続切断」负，
-  // 此前无任何确认、一点即判负并跳走（认输反有确认）——补一次确认。
-  if (inGame && !window.confirm('退出将对局判负（相当于认输），确定退出吗？')) return;
-  api.send({ type: 'leave' });
-  // 赛事对局退出回赛事页，其余回大厅
-  location.href = (ctx.state && ctx.state.roomType === 'tournament') ? 'tournaments.html' : 'lobby.html';
-});
+teardown.push(api.on('game_start', () => { rematchRequested = false; })); // 对局重开 → 复位
+bind($('btnLeave'), 'click', () => leaveGame());
 // §R1：观战视角切换（先手 ⇄ 后手）。仅观战者可用——对局者固定自己视角。
-$('btnViewpoint').addEventListener('click', () => {
+bind($('btnViewpoint'), 'click', () => {
   if (ctx.isPlayer) return;
   ctx.spectatorViewpoint = ctx.spectatorViewpoint === 'b' ? 'w' : 'b';
   if (ctx.state) render(ctx.state);
@@ -372,6 +382,12 @@ function showResult(st) {
       reportTarget,
       scrollBoardIntoViewOnce,
       showResult,
+      /** SPA：play.unmount 调用——退订 hello/reported/game_start、解绑全部按钮监听、清未触发滚动 */
+      destroy() {
+        teardown.forEach((fn) => { try { fn(); } catch (_) {} });
+        teardown.length = 0;
+        rematchRequested = false;
+      },
     };
   }
 

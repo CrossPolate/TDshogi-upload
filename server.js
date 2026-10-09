@@ -80,6 +80,20 @@ app.use((req, res, next) => {
 app.use('/api', rateLimit.expressMiddleware(rateLimit.api));
 // 管理后台入口门禁（PLAN §J5，见 middleware.adminEntryGate）
 app.use(adminEntryGate);
+// SPA 页面出口（2026-10-09 全量 SPA 迁移）：
+// 单文档常驻，所有「页面路由」（`/`、`/play`、`/review?id=1`、老 `/play.html`…）都回 app.html，
+// 由前端 router.js 解析 pathname 渲染对应 View。真实静态资源（js/css/图片/音频…）放行给 static。
+// ⚠️ 放在 express.static 之前，保证老 .html 深链也被外壳接管（收藏夹 / 外部链接不 404）。
+app.use((req, res, next) => {
+  if (req.method !== 'GET') return next();
+  const p = req.path;
+  if (p.startsWith('/api') || p === '/ws' || p === '/healthz') return next(); // API / WS / 健康探针
+  const base = p.split('/').pop() || '';
+  const isPage = p.endsWith('.html') || base === '' || !base.includes('.');
+  if (!isPage) return next(); // 静态资源（带扩展名的非 .html）
+  res.setHeader('Cache-Control', 'no-cache');
+  return res.sendFile(path.join(PUBLIC_DIR, 'app.html'));
+});
 // 静态资源禁用强缓存（协商缓存）：防止服务进程与磁盘文件版本错位时
 // 浏览器还拿着旧脚本（实机『感想战瘫痪』类问题的环境性根因）
 // 静态资源（2026-10-02 审查 P2-7）：保留 ETag / Last-Modified 校验器 + `no-cache`（强制回源校验），

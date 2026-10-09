@@ -472,22 +472,10 @@
       a.loop = !alt;
       a.volume = bgmGain();
       a.onerror = () => fail(true);
-      // ⚠️ 2026-10-08：换页续播 —— 同一首曲从上次位置继续，不从头来
-      // 立刻 seek（metadata 可能尚未就绪，失败无害），再用 canplay 兜底
-      const savedT = restoreBgmPosition(url);
-      const seekSaved = () => {
-        try {
-          if (savedT > 0 && Number.isFinite(a.duration) && savedT < a.duration - 1 && Math.abs(a.currentTime - savedT) > 0.5) {
-            a.currentTime = savedT;
-          }
-        } catch (_) { /* ignore */ }
-      };
-      seekSaved();
-      if (typeof a.addEventListener === 'function') {
-        a.addEventListener('loadedmetadata', seekSaved);
-        a.addEventListener('canplay', seekSaved, { once: true });
-      }
-      setTimeout(seekSaved, 300);
+      // ⚠️ 2026-10-08（SPA 迁移）：文档不再随切页销毁，`<audio>` 常驻于外壳，
+      // 同一首曲自然从当前时间点继续 —— 无需再把 currentTime 写 sessionStorage、
+      // 换页重建后再 seek 回去（那套「停止→重开→快进」必有静音间隙 + metadata 竞态）。
+      // 这里保留「同曲不重建」的幂等（见 bgmSync），它才是真正有效的防重建。
       if (alt) {
         a.onended = () => {
           if (gen !== bgmGen) return;
@@ -643,29 +631,9 @@
     }
   }
 
-  /**
-   * 跨页面续播：把当前播放位置写入 sessionStorage。
-   * 2026-10-08 用户要求「换页不重新从头播放」。
-   */
-  function saveBgmPosition() {
-    try {
-      if (bgmEl && bgmUrl) {
-        global.sessionStorage.setItem('tdshogi_bgm_pos', JSON.stringify({
-          url: bgmUrl, t: bgmEl.currentTime || 0, phase: bgmPhase,
-        }));
-      }
-    } catch (_) { /* 隐私模式：忽略 */ }
-  }
-  /** 恢复续播位置（返回秒数，无记录返回 0） */
-  function restoreBgmPosition(url) {
-    try {
-      const raw = global.sessionStorage.getItem('tdshogi_bgm_pos');
-      if (!raw) return 0;
-      const o = JSON.parse(raw);
-      if (o && o.url === url && Number.isFinite(o.t)) return Math.max(0, o.t);
-    } catch (_) { /* ignore */ }
-    return 0;
-  }
+  // ⚠️ 2026-10-08（SPA 迁移）：跨页续播不再走 sessionStorage。
+  // 单文档常驻后 `bgmEl` 自始至终是同一个 <audio>，切页自然连续；
+  // 原 saveBgmPosition / restoreBgmPosition 已删除（那是「整页跳转销毁文档」的补丁）。
 
   /** 对局开始：上扬双音 */
   function playStart() {
@@ -818,11 +786,8 @@
       for (const ev of ['pointerdown', 'click', 'keydown', 'touchstart']) {
         global.document.addEventListener(ev, unlockAudio, { once: true, passive: true });
       }
-      // ⚠️ 2026-10-08：换页前存播放位置（换页不从头播）
-      global.addEventListener('pagehide', saveBgmPosition);
-      global.addEventListener('beforeunload', saveBgmPosition);
-      // 每 2 秒自动存一次（pagehide 在某些浏览器/SPA 导航时不触发）
-      setInterval(saveBgmPosition, 2000);
+      // ⚠️ 2026-10-08（SPA 迁移）：不再需要 pagehide/beforeunload 存续播位置，
+      // 也不再需要每 2 秒定时写 sessionStorage —— 文档常驻，<audio> 不销毁。
     }
   } catch (_) { /* 测试环境 */ }
 
@@ -847,7 +812,6 @@
     setGameTrackOverride, gameTrackOverride, initFromServer,
     bgmStart, bgmStop, bgmSync, bgmState,
     bgmPauseForPreview, bgmResumeFromPreview,
-    saveBgmPosition, restoreBgmPosition,
     setEnabled, applyEnabled, isEnabled, ensureCtx,
   };
 })(window);

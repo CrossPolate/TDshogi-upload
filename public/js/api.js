@@ -21,7 +21,13 @@
     }
 
     connect(guestId) {
-      if (this.ws && this.ws.readyState === 1) return;
+      // 单例连接：已在连接中 / 已连上则不重复开（SPA 下 connect 由 boot 调一次，
+      // 各页面只 `on`/`send`；这里做幂等保护，迁移期误调也无害）。
+      if (this.ws && (this.ws.readyState === 1 || this.ws.readyState === 0)) {
+        this.guestId = guestId;
+        return;
+      }
+      this.guestId = guestId;
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       let url = `${proto}://${location.host}/ws?guest=${encodeURIComponent(guestId)}`;
       // B1：带上游客持有证明（非口令，仅作会话归属校验）。
@@ -82,6 +88,36 @@
       // 指数退避，上限 10 秒
       const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 10000);
       this.reconnectTimer = setTimeout(() => this.connect(guestId), delay);
+    }
+
+    /**
+     * SPA 身份变更：关旧连接 → 用新身份重连（不整页刷新，BGM 不断）。
+     * 处理器（`on` 注册的）全部保留，重连后页面无需重新订阅。
+     */
+    reconnectAs(guestId) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectAttempts = 0;
+      if (this.ws) {
+        try {
+          this.ws.onclose = null; // 手动重连，避免旧句柄再触发自动重连
+          this.ws.onmessage = null;
+          this.ws.onerror = null;
+          this.ws.close();
+        } catch (_) { /* ignore */ }
+        this.ws = null;
+      }
+      this.connected = false;
+      this.connect(guestId);
+    }
+
+    /** 显式断开（退出 / 测试用） */
+    disconnect() {
+      clearTimeout(this.reconnectTimer);
+      if (this.ws) {
+        try { this.ws.onclose = null; this.ws.close(); } catch (_) {}
+        this.ws = null;
+      }
+      this.connected = false;
     }
 
     isConnected() { return this.connected; }

@@ -1,45 +1,55 @@
-/* global initUI, I18N */
 /**
- * admin-records.js — 全部棋谱：KIF 导入、列表、搜索、回放/导出、就地编辑展示信息
+ * admin-records.js — 全部棋谱（admin 子模块）：KIF 导入、列表、搜索、回放/导出、就地编辑展示信息
  *
- * §M5（2026-09-28）：从 `public/js/admin.js`（原 1254 行）按 tab **整段原样搬出**，
- * 逻辑一字未改，只整体左移 2 格缩进。共用工具（token / $ / esc / maskIp / 分页）仍由
- * `admin.js` 装配时注入（见下方 `make(deps)`）。
+ * §M5（2026-09-28）：从 `public/js/admin.js`（原 1254 行）按 tab **整段原样搬出**。
  *
- * ⚠️ 本文件必须在 `admin.js` **之前**加载（见 public/admin.html 的 <script> 顺序）；
- * `admin.js` 装配时会检查，缺失即抛错——不然症状是"某个 tab 点了没反应"这种静默故障。
+ * SPA 迁移（2026-10-09）：改为**被 admin View 的 mount/unmount 驱动**的函数集合
+ * （`window.AdminParts.records`）——加载本文件零副作用：
+ *   mount(ctx)  → 绑定 DOM 事件、导出 loadRecords / 就地编辑等到 ctx.hub，句柄记内部 teardown
+ *   unmount()   → 统一清理；hub 条目由 admin.unmount 清空。
+ * 异步回调恢复处一律先查 `ctx.isAlive()`，切页后不向已销毁 DOM 写入。
+ *
+ * 共用工具（token / $ / esc / maskIp / 分页 / AdminUI）由 admin.js 的 mount 通过 `ctx` 注入。
  */
 (function (global) {
   'use strict';
 
-  function make(deps) {
-    // 共用工具（由 admin.js 装配时注入）
-    const { esc, getToken, renderPaged, setToken, toast } = deps;
+  /** 本模块的副作用句柄（unmount 全清） */
+  let _td = [];
+
+  function mount(ctx) {
+    const { $, esc, getToken, renderPaged, setToken, toast, hub } = ctx;
+    const on = ctx.on;
+    const alive = () => ctx.isAlive();
 
     // ---- 导入 KIF ----
-    document.getElementById('btnImportKif').addEventListener('click', () => {
-      document.getElementById('kifFileInput').click();
+    on($('btnImportKif'), 'click', () => {
+      const fi = $('kifFileInput');
+      if (fi) fi.click();
     });
-    document.getElementById('kifFileInput').addEventListener('change', async (e) => {
+    on($('kifFileInput'), 'change', async (e) => {
       const files = Array.from(e.target.files || []);
       if (!files.length) return;
       let okCount = 0, failCount = 0;
-      const resultEl = document.getElementById('importResult');
-      resultEl.textContent = `正在导入 ${files.length} 个棋谱...`;
+      const resultEl = $('importResult');
+      if (resultEl) resultEl.textContent = `正在导入 ${files.length} 个棋谱...`;
       for (const file of files) {
         const text = await file.text();
+        if (!alive()) return;
         try {
           const res = await fetch('/api/admin/records/import', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'x-admin-token': getToken() },
             body: JSON.stringify({ text }),
           });
+          if (!alive()) return;
           const data = await res.json();
           if (res.ok && data.ok) okCount++;
           else failCount++;
         } catch (_) { failCount++; }
       }
-      resultEl.textContent = `导入完成：成功 ${okCount}，失败 ${failCount}`;
+      if (!alive()) return;
+      if (resultEl) resultEl.textContent = `导入完成：成功 ${okCount}，失败 ${failCount}`;
       e.target.value = '';
       loadRecords();
       if (failCount === 0 && okCount > 0) toast(`成功导入 ${okCount} 个棋谱`);
@@ -48,45 +58,42 @@
 
     // ---- 全部棋谱 ----
     let allRecords = [];
-    let recordsRefreshReady = false;
 
     // ⚠️ 2026-10-02 体验修复（刷新按钮）：棋谱列表此前**没有**手动刷新入口——
-    // 导完 KIF 或别处改了数据后，只能切走再切回来。这里补一个（绑定静态按钮，只绑一次）。
-    function initRecordsRefresh() {
-      if (recordsRefreshReady) return;
-      recordsRefreshReady = true;
-      const b = document.getElementById('btnRefreshRecords');
-      if (b) b.addEventListener('click', loadRecords);
-    }
-    initRecordsRefresh();
+    // 导完 KIF 或别处改了数据后，只能切走再切回来。这里补一个（每次 mount 绑一次）。
+    on($('btnRefreshRecords'), 'click', () => loadRecords());
 
     async function loadRecords() {
       // ⚠️ 2026-10-02 体验修复（加载态统一）：先铺"正在加载"占位，别让点开 tab 的头几百毫秒是空白
-      const box = document.getElementById('adminRecordList');
-      if (box) box.innerHTML = window.AdminUI ? window.AdminUI.loading('正在加载棋谱…') : '';
+      const box = $('adminRecordList');
+      if (box) box.innerHTML = ctx.AdminUI ? ctx.AdminUI.loading('正在加载棋谱…') : '';
       try {
-        const data = await window.ApiUtils.get(`/api/history?adminToken=${encodeURIComponent(getToken())}`);
+        const data = await global.ApiUtils.get(`/api/history?adminToken=${encodeURIComponent(getToken())}`);
+        if (!alive()) return;
         allRecords = data.records || [];
         renderPaged('records', allRecords, 'recordPager', renderRecords);
       } catch (e) {
+        if (!alive()) return;
         // token 失效则回到登录
         if (e.message && e.message.includes('403')) setToken(null);
         toast('加载棋谱失败');
-        if (box) box.innerHTML = window.AdminUI
-          ? window.AdminUI.empty('加载棋谱失败，请确认登录状态后点「刷新」重试') : '';
-        initUI();
+        if (box) box.innerHTML = ctx.AdminUI
+          ? ctx.AdminUI.empty('加载棋谱失败，请确认登录状态后点「刷新」重试') : '';
+        if (hub.initUI) hub.initUI();
       }
     }
 
     function renderRecords(records) {
       // ⚠️ 2026-10-02 体验修复：标题用**总数**（此前用当页条数，恒 ≤20）
-      document.getElementById('recordCount').textContent = allRecords.length;
-      const el = document.getElementById('adminRecordList');
+      const cnt = $('recordCount');
+      if (cnt) cnt.textContent = allRecords.length;
+      const el = $('adminRecordList');
+      if (!el) return;
       if (!records.length) {
         // ⚠️ 2026-10-02 体验修复（空状态统一）：区分"本来没有"与"被搜索筛空"
-        const q = (document.getElementById('recordSearch') || {}).value || '';
+        const q = ($('recordSearch') || {}).value || '';
         const msg = q.trim() ? '没有匹配关键词的棋谱（清空搜索框可看全部）' : '暂无棋谱';
-        el.innerHTML = window.AdminUI ? window.AdminUI.empty(msg) : '';
+        el.innerHTML = ctx.AdminUI ? ctx.AdminUI.empty(msg) : '';
         return;
       }
       el.innerHTML = records.map((r) => {
@@ -106,7 +113,7 @@
           <div class="record-item" data-rec-item="${esc(r.id)}">
             <div style="font-size:13px;">${esc(names[0])} vs ${esc(names[1])} <span style="color:var(--text-dim);font-size:11px;">（${r.moveCount || 0}手）</span></div>
             <div class="r-result result-win">${esc(res)}</div>
-            <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${I18N.fmt(r.createdAt)}</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">${global.I18N.fmt(r.createdAt)}</div>
             ${metaHtml}
             <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
               <button class="btn btn-ghost btn-sm" data-act="rb-playback" data-id="${esc(r.id)}">回放</button>
@@ -153,7 +160,7 @@
     }
 
     /** 展开 / 收起某一行的就地编辑表单 */
-    window.adminRecordEdit = (id) => {
+    hub.adminRecordEdit = (id) => {
       const box = findEditBox(id);
       if (!box) return;
       if (box.style.display !== 'none' && box.innerHTML.trim()) { box.style.display = 'none'; return; }
@@ -184,7 +191,7 @@
     };
 
     /** 取消编辑：收起表单即可（不改数据） */
-    window.adminRecordEditCancel = (id) => {
+    hub.adminRecordEditCancel = (id) => {
       const box = findEditBox(id);
       if (box) box.style.display = 'none';
     };
@@ -201,7 +208,7 @@
       return patch;
     }
 
-    window.adminRecordSave = async (id) => {
+    hub.adminRecordSave = async (id) => {
       const box = findEditBox(id);
       if (!box) return;
       const r = findRecord(id);
@@ -215,11 +222,13 @@
           headers: { 'Content-Type': 'application/json', 'x-admin-token': getToken() },
           body: JSON.stringify(readEditBox(box)),
         });
+        if (!alive()) return;
         const data = await res.json().catch(() => ({}));
+        if (!alive()) return;
         if (res.status === 403 || res.status === 401) {
           setToken(null);
           toast('登录已过期，请重新登录');
-          initUI();
+          if (hub.initUI) hub.initUI();
           return;
         }
         if (!res.ok || data.ok === false) {
@@ -232,20 +241,23 @@
         box.style.display = 'none';
         await loadRecords();
       } catch (e) {
+        if (!alive()) return;
         toast('保存失败：' + e.message);
       }
     };
 
     // 回放/导出必须携带管理员 token（否则 403）
-    window.adminPlayback = (id) => {
-      location.href = `review.html?id=${id}&adminToken=${encodeURIComponent(getToken() || '')}`;
+    hub.adminPlayback = (id) => {
+      // 站内整页跳转 → SPA 路由（铁律3）
+      global.Router.navigate(`review.html?id=${id}&adminToken=${encodeURIComponent(getToken() || '')}`);
     };
-    window.adminExport = (id, fmt) => {
+    hub.adminExport = (id, fmt) => {
+      // ⚠️ 例外（铁律3）：指向 /api/... 的导出/下载链接保留 location.href（那是下载不是跳页）
       location.href = `/api/records/${id}/export?fmt=${fmt}&token=${encodeURIComponent(getToken() || '')}`;
     };
 
     // 棋谱搜索（按选手名/ID）
-    document.getElementById('recordSearch').addEventListener('input', (e) => {
+    on($('recordSearch'), 'input', (e) => {
       const q = (e.target.value || '').trim().toLowerCase();
       if (!q) return renderPaged('records', allRecords, 'recordPager', renderRecords, true);
       renderPaged('records', allRecords.filter((r) => {
@@ -255,15 +267,15 @@
       }), 'recordPager', renderRecords, true);
     });
 
-    // ---- 供其它模块调用（admin.js 装配时按依赖顺序执行，见该文件）----
-    global.loadRecords = loadRecords;
-
-    return {
-      allRecords,
-      loadRecords,
-      renderRecords,
-    };
+    // ---- 供其它模块调用（admin.js 装配，见该文件）----
+    hub.loadRecords = loadRecords;
   }
 
-  global.AdminRecords = { make };
+  function unmount() {
+    _td.forEach((fn) => { try { fn(); } catch (_) {} });
+    _td = [];
+  }
+
+  global.AdminParts = global.AdminParts || {};
+  global.AdminParts.records = { mount, unmount };
 })(typeof window !== 'undefined' ? window : globalThis);
