@@ -64,10 +64,14 @@ function genKey() {
  */
 function verifyKey(id, key) {
   const session = id ? getSessionRaw(id) : null;
+  // ⚠️ P1-2（2026-10-10）：会话**不存在**时绝不可当作「持有」——否则会话被 30 天清理后，
+  // 任何人凭公开 guestId 即可无凭据迁移其评级/棋谱（见 accounts.migrateGuestData + register）。
+  // 与「会话存在但未绑 secret」区分：后者按产品契约兼容放行，前者一律拒绝。
+  if (!session) return { ok: false, bound: false };
   // 账号会话的凭据是**会话令牌**（连接握手已验过），不走游客持有证明（B1）。
   // 注册升级时旧游客 secret 若被带进账号会话，会在改名/换头像时报 AUTH_KEY——
   // 这里按设计「账号放行」，并由 register/login/migrate 负责清掉 secret。
-  if (!session || !session.secret || session.isAccount) return { ok: true, bound: false };
+  if (!session.secret || session.isAccount) return { ok: true, bound: false };
   const provided = String(key || '');
   // 先做格式白名单（64 位小写 hex ⇒ 字符数恒等于字节数），再常量时间比较，并兜住异常
   if (!/^[0-9a-f]{64}$/.test(provided) || provided.length !== session.secret.length) {
@@ -174,8 +178,10 @@ function identify(guestId, meta = {}) {
   // 持有证明绑定（B1，TOFU）：会话尚无 secret 且客户端首次携带合法 key → 绑定之。
   // ⚠️ 只**首次**绑定：之后即使断开重连，也用会话里已存的 secret 校验，避免被后续请求覆盖。
   // ⚠️ 账号会话（isAccount）的凭据是令牌，**绝不**绑定游客持有证明（2026-10-02 审查 +P2-13）。
+  // ⚠️ P1-3（2026-10-10）：只在**新建会话**（isNew）时绑定——否则已存在的未绑会话会被
+  // 任意人抢先绑上自己的 key（TOFU 抢绑），原主人此后改名/换头像反被锁死（报 AUTH_KEY）。
   const key = meta && meta.key;
-  if (!session.isAccount && !session.secret && typeof key === 'string' && /^[0-9a-f]{64}$/.test(key)) {
+  if (isNew && !session.isAccount && !session.secret && typeof key === 'string' && /^[0-9a-f]{64}$/.test(key)) {
     session.secret = key;
   }
 

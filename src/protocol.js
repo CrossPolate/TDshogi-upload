@@ -420,7 +420,7 @@ class Protocol {
     });
     return privacy.stripPrivate({
       id: playerId,
-      name: session ? session.name : (card ? card.username : playerId),
+      name: session ? session.name : (card ? (card.nickname || playerId) : playerId), // 显示昵称，绝不暴露登录账号
       title: (session && session.title) || null,   // 用户称号（管理员编辑，PLAN §K7 追加）
       isAccount: !!card,
       rating: prof.rating,

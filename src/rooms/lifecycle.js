@@ -558,6 +558,15 @@ module.exports = function applyLifecycle(X) {
       this._startClock(room);
       this._broadcast(roomId, { type: 'game_start', data: { roomId, code } });
       this._pushState(room);
+      // ⚠️ P1-4（2026-10-10）：离线座位立即启动断线判负计时（同 _startGame 504-509）。
+      // 否则双方都离线时，房间会被 no_members_cleanup 静默销毁且跳过 onMatchFinished，赛程永久卡死。
+      // 断线判负 → _checkGameOver → _finalize → onMatchFinished 推进赛程；宽限期内选手仍可 joinTournamentMatch 回来。
+      for (const seat of ['b', 'w']) {
+        const p = room.players[seat];
+        if (p && !p.connected && !room.game.isGameOver()) {
+          this._scheduleDisconnectLoss(room.id, seat);
+        }
+      }
       return { roomId };
     },
 

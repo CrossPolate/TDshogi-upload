@@ -154,6 +154,7 @@ function register(username, password, guestId = null, migrationKey = null) {
   const account = {
     id,
     username: name,
+    nickname: name, // 昵称（对外显示名）：初始=用户名，此后二者分离；改昵称花积分（见 setNickname）
     salt,
     passHash: hash,
     hashAlg: alg, // 口令哈希版本（校验时按它选 scrypt 参数，见 verifyPassword）
@@ -211,8 +212,8 @@ function login(username, password) {
   if (!verifyPassword(String(password || ''), account.salt, account.passHash, account.hashAlg)) {
     return { ok: false, error: '用户名或密码错误' };
   }
-  // 刷新会话（名字=用户名）；账号身份走令牌，清掉持有证明绑定
-  auth.markAccountSession(account.id, account.username);
+  // 刷新会话（显示名=昵称）；账号身份走令牌，清掉持有证明绑定
+  auth.markAccountSession(account.id, account.nickname || account.username);
   return { ok: true, token: issueToken(account.id), account: publicInfo(account) };
 }
 
@@ -266,6 +267,7 @@ function publicInfo(account) {
   return {
     id: account.id,
     username: account.username,
+    nickname: account.nickname || account.username, // 昵称（对外显示名）；老账号回落用户名
     createdAt: account.createdAt,
   };
 }
@@ -307,6 +309,7 @@ function getOwnProfile(accountId) {
   return {
     id: a.id,
     username: a.username,
+    nickname: a.nickname || a.username, // 昵称（显示名）；老账号回落用户名
     createdAt: a.createdAt,
     profile: {
       phone: (a.profile && a.profile.phone) || '',
@@ -339,16 +342,46 @@ function updateProfile(accountId, { phone, style } = {}) {
 
 /**
  * 公开资料卡字段（玩家信息悬停小窗用）。绝不包含手机号。
+ * ⚠️ 隐私（2026-10-10）：对外只给**昵称**，不暴露登录用户名（防撞库 + 用户要求"他人只看昵称"）。
  */
 function getPublicCard(accountId) {
   const a = getCache()[accountId];
   if (!a) return null;
   return {
     isAccount: true,
-    username: a.username,
+    nickname: a.nickname || a.username, // 显示昵称（原为 username，会暴露登录名）
     createdAt: a.createdAt,
     style: (a.profile && a.profile.style) || '不设定',
   };
+}
+
+/**
+ * 改昵称（花积分）。昵称 = 对外显示名，与登录用户名（username）分离。
+ * 扣 `NICKNAME_COST` 积分（每完成一局 +1，见 ratings.addPoints）；积分不足则拒绝、不扣分。
+ * 成功后同步会话显示名，使对局/榜单即时生效。
+ */
+const NICKNAME_COST = 5;
+function setNickname(accountId, nickname) {
+  const a = getCache()[accountId];
+  if (!a) return { ok: false, error: '账号不存在' };
+  const n = String(nickname || '').trim();
+  if (!USERNAME_RE.test(n)) {
+    return { ok: false, error: `昵称需为 2-${MAX_USERNAME} 个字符（中文/字母/数字/下划线/横线）` };
+  }
+  if (n === (a.nickname || a.username)) return { ok: false, error: '昵称未变化' };
+  // 函数内 require，避免与 ratings 形成模块环（ratings 顶部不依赖本模块）
+  const ratings = require('./ratings');
+  const prof = ratings.profile(accountId);
+  if ((prof.points || 0) < NICKNAME_COST) {
+    return { ok: false, error: `积分不足：改昵称需 ${NICKNAME_COST} 积分（当前 ${prof.points || 0}）` };
+  }
+  ratings.addPoints(accountId, -NICKNAME_COST); // 扣积分
+  a.nickname = n;
+  a.updatedAt = Date.now();
+  persist();
+  // 同步会话显示名（对局/榜单显示昵称）
+  try { auth.markAccountSession(accountId, n); } catch (_) { /* 会话可能不存在，忽略 */ }
+  return { ok: true, nickname: n, points: ratings.profile(accountId).points };
 }
 
 /**
@@ -539,6 +572,7 @@ module.exports = {
   getOwnProfile,
   updateProfile,
   getPublicCard,
+  setNickname, // 改昵称（花积分，见上）
   adminUpdateProfile,
   adminResetPassword,
   deleteAccount,

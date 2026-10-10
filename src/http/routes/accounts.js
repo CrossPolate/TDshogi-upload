@@ -62,4 +62,14 @@ module.exports = function registerAccounts(app) {
     if (!r.ok) return res.status(400).json(r);
     res.json({ ok: true, profile: r.profile });
   });
+
+  // 改昵称（花积分）：{nickname} ——昵称是对外显示名，与登录用户名分离；
+  // 扣 5 积分（每完成一局 +1，见 ratings.addPoints）。格式校验/扣分/改名都在 accounts.setNickname。
+  app.post('/api/account/nickname', rateLimit.expressMiddleware(rateLimit.auth), (req, res) => {
+    const accountId = resolveAccount(req);
+    if (!accountId) return res.status(401).json({ error: '未登录或令牌已失效' });
+    const r = accounts.setNickname(accountId, (req.body || {}).nickname);
+    if (!r.ok) return res.status(400).json(r);
+    res.json({ ok: true, nickname: r.nickname, points: r.points });
+  });
 };

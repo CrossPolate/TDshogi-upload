@@ -180,6 +180,18 @@ module.exports = function applyCleanup(X) {
           if (!room.emptySince) {
             room.emptySince = now;
           } else if (now - room.emptySince >= NO_MEMBER_CLEANUP_MS) {
+            // ⚠️ P1-4（2026-10-10）：赛事对局房间不能"裸销毁"——会跳过 onMatchFinished，赛程永久卡死。
+            // 清理前若未终局，先判结果（走 _checkGameOver → _finalize → onMatchFinished 推进赛程）。
+            // 正常情况下断线判负（见 createTournamentMatch/_startGame）已在宽限期内终局，这里是异常兜底。
+            if (room.tournamentId && room.game && !room.game.isGameOver()) {
+              try {
+                room.game.result = '-'; // 双方离线未归：判和（中立），让赛事走和棋/重赛流程，不再卡死
+                room.game.resultDetail = '接続切断';
+                this._checkGameOver(room);
+              } catch (e) {
+                log.error('rooms', '赛事房间清理前判结果失败', { roomId: room.id, err: e && e.message });
+              }
+            }
             this._dissolveRoom(room.id, 'no_members_cleanup');
           }
           continue;

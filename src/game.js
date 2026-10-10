@@ -54,7 +54,7 @@ function findKing(shi, color) {
  * @param {Shogi} shi 局面
  * @param {{type:string, from?:string, to:string, promote?:boolean, piece?:string}} mv 待验证走法
  */
-function isMoveLegal(shi, mv) {
+function isMoveLegal(shi, mv, noUchifuzume = false) {
   // 服务端权威（Bug1）：shogi.js 的 `move(..., promote=true)` 会**无条件升变**、不做任何
   // 合法性校验。因此「无权升变却请求升变」必须在执行前拦下——否则手工构造的 USI
   // 能让金/王/已成子升变，甚至让阵外→阵外的移动凭空升变。
@@ -64,6 +64,14 @@ function isMoveLegal(shi, mv) {
     if (mv.type === 'drop') {
       const to = usiSquareToXY(mv.to);
       clone.drop(to.x, to.y, DROP_TO_KIND[mv.piece]);
+      // ⚠️ 打歩詰め（打ち歩詰め）禁止（P1-1，2026-10-10）：**用打入的歩将死对方**是反则。
+      // shogi.js 的 getDropsBy 只查二歩与死格、**不查打歩詰**（本文件头注释原写"打步死"有误），
+      // 故在此补上。规则定义：打的这枚歩若直接造成对手詰み（被将且无任何合法应对），该打歩非法。
+      // ⚠️ noUchifuzume 用于断掉递归：isCheckmate 枚举对手应对时会再进 isMoveLegal，
+      //    若那层又查打歩詰会无限嵌套——打歩詰只需判一层，故枚举时置 true。
+      if (!noUchifuzume && DROP_TO_KIND[mv.piece] === 'FU' && isCheckmate(clone)) {
+        return false;
+      }
     } else {
       const from = usiSquareToXY(mv.from);
       const to = usiSquareToXY(mv.to);
@@ -76,6 +84,33 @@ function isMoveLegal(shi, mv) {
   // 修复：原打子分支误查 clone.turn（对手的王），导致「打入对方王周围构成打将」的
   // 合法着法（如金打王侧）被误判非法。打将是否成立由对方应对，不在此过滤。
   return !clone.isCheck(oppositeColor(clone.turn));
+}
+
+/**
+ * 判断 `shi.turn` 一方是否**被将死**（詰み）：被将，且无任何合法着法。
+ * 供打歩詰检测（P1-1）使用。
+ *
+ * ⚠️ 枚举对手应对时以 `noUchifuzume=true` 调 isMoveLegal —— 打歩詰只需判一层，
+ * 断掉「打歩詰检测→枚举应对→又触发打歩詰检测」的递归链。
+ */
+function isCheckmate(shi) {
+  const color = shi.turn;
+  if (!shi.isCheck(color)) return false; // 未被将 → 不是詰み
+  // 盘上己方任一子存在合法着法即非詰み
+  for (let y = 1; y <= 9; y++) {
+    for (let x = 1; x <= 9; x++) {
+      const p = shi.get(x, y);
+      if (p && p.color === color && candidateMovesFrom(shi, x, y, p, true, true).length > 0) {
+        return false;
+      }
+    }
+  }
+  // 打子
+  for (const m of shi.getDropsBy(color)) {
+    const mv = { type: 'drop', piece: RAW_TO_DROP[Piece.unpromote(m.kind)], to: xyToUsiSquare(m.to.x, m.to.y) };
+    if (isMoveLegal(shi, mv, true)) return false;
+  }
+  return true; // 被将且无合法着法 = 詰み
 }
 
 /**
@@ -113,7 +148,7 @@ function oppositeColor(color) {
  * 从某格出发的候选走法（含升变两种情况）。
  * 返回 USI 数组。
  */
-function candidateMovesFrom(shi, x, y, piece, legalOnly = true) {
+function candidateMovesFrom(shi, x, y, piece, legalOnly = true, noUchifuzume = false) {
   const out = [];
   const color = piece.color;
   const rawKind = Piece.unpromote(piece.kind);
@@ -128,16 +163,16 @@ function candidateMovesFrom(shi, x, y, piece, legalOnly = true) {
       && (inPromotionZone(y, color) || inPromotionZone(m.to.y, color));
     if (canPromote) {
       const promoteMv = { type: 'move', from: xyToUsiSquare(x, y), to: toSq, promote: true };
-      if (!legalOnly || isMoveLegal(shi, promoteMv)) out.push(moveToUsi(promoteMv));
+      if (!legalOnly || isMoveLegal(shi, promoteMv, noUchifuzume)) out.push(moveToUsi(promoteMv));
       // 「不成」仅在非强制升变时提供（R-b）：歩/香到底线、桂到最下两段必须升变，
       // 否则会出现「选了不成、实际仍自动升变」的名不副实选项。
       if (!mustPromote(rawKind, m.to.y, color)) {
         const nonPromoteMv = { type: 'move', from: xyToUsiSquare(x, y), to: toSq, promote: false };
-        if (!legalOnly || isMoveLegal(shi, nonPromoteMv)) out.push(moveToUsi(nonPromoteMv));
+        if (!legalOnly || isMoveLegal(shi, nonPromoteMv, noUchifuzume)) out.push(moveToUsi(nonPromoteMv));
       }
     } else {
       const mv = { type: 'move', from: xyToUsiSquare(x, y), to: toSq, promote: false };
-      if (!legalOnly || isMoveLegal(shi, mv)) out.push(moveToUsi(mv));
+      if (!legalOnly || isMoveLegal(shi, mv, noUchifuzume)) out.push(moveToUsi(mv));
     }
   }
   return out;

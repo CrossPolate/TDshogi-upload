@@ -90,13 +90,20 @@
         <div style="flex:1;">
           <div style="font-size:24px;font-weight:800;font-family:var(--font-serif);" id="pName">无名棋士</div>
           <div style="color:var(--text-dim);font-size:13px;margin-top:4px;" id="pRoleLabel">游客账号 · ID: <span id="pId"></span></div>
+          <!-- 游客改名（免费，走 WS rename） -->
           <div style="display:flex;gap:8px;margin-top:12px;" id="renameRow">
             <input class="input" id="renameInput" placeholder="修改名字（12 字内）" style="max-width:220px;">
             <button class="btn btn-ghost btn-sm" id="btnRename">改名</button>
           </div>
-          <!-- ⚠️ 2026-10-02 体验修复：账号登录后**不把改名区藏成空白**——给一句明确说明。 -->
-          <div id="accountNameNote" style="display:none;margin-top:12px;font-size:12px;color:var(--text-dim);">
-            账号名不可更改（与注册用户名一致）；如需更换请联系管理员。
+          <!-- 账号改昵称（花积分）：昵称是对外显示名，与登录账号分离（2026-10-10） -->
+          <div id="changeNickRow" style="display:none;margin-top:12px;gap:8px;flex-wrap:wrap;align-items:center;">
+            <input class="input" id="nickInput" placeholder="新昵称（2-16 字）" style="max-width:220px;">
+            <button class="btn btn-primary btn-sm" id="btnChangeNick">✨ 改昵称（5 积分）</button>
+            <span id="nickHint" style="font-size:12px;color:var(--text-dim);"></span>
+          </div>
+          <!-- 修改资料入口（2026-10-10）：把「我的资料」面板收进来，节约个人页空间 -->
+          <div style="margin-top:12px;" id="editProfileRow">
+            <button class="btn btn-ghost btn-sm" id="btnEditProfile">✏️ 修改资料</button>
           </div>
           <!-- 头像（2026-09-20）：单独一行，游客/账号都能换 -->
           <div style="margin-top:12px;">
@@ -345,19 +352,17 @@
         const logged = isLoggedIn(guest.id);
         $('accountNotLogged').style.display = logged ? 'none' : 'block';
         $('accountLogged').style.display = logged ? 'flex' : 'none';
-        $('myProfileCard').style.display = logged ? 'block' : 'none';
-        // ⚠️ 2026-10-02 体验修复：账号登录后**不再把改名区藏成空白**（这是本次要修的"找不到入口"）。
-        // 查证服务端（src/auth.js `rename` / src/protocol/handlers/social.js `_hRename`）：WS `rename`
-        // 确实支持改**会话显示名**，但它改的是会话文件；而账号每次登录都有
-        // `src/accounts.js` 的 `login → auth.markAccountSession(id, username)` 用**用户名重置显示名**，
-        // 因此账号的显示名恒等于登录用户名，改名对账号不可持久 → 属于「账号名不可更改」。
-        // 于是：隐藏输入行，改为显示一句明确说明（`#accountNameNote`），不留空白让用户找不到。
+        // 「我的资料」默认收起，由「✏️ 修改资料」入口展开（2026-10-10：节约个人页空间）
+        $('myProfileCard').style.display = 'none';
+        // 改名区分流（2026-10-10）：游客=免费改名（WS rename）；账号=改昵称（花积分，见 accounts.setNickname）
         const renameRow = $('renameRow');
         if (renameRow) renameRow.style.display = logged ? 'none' : 'flex';
-        const nameNote = $('accountNameNote');
-        if (nameNote) nameNote.style.display = logged ? 'block' : 'none';
+        const nickRow = $('changeNickRow');
+        if (nickRow) nickRow.style.display = logged ? 'flex' : 'none';
+        const editRow = $('editProfileRow');
+        if (editRow) editRow.style.display = logged ? 'flex' : 'none';
         if (logged) {
-          $('accountName').textContent = guest.name;
+          $('accountName').textContent = guest.name; // 昵称（对外显示名，非登录账号）
           $('accountId').textContent = guest.id.split('.')[0];
           renderAvatars(); // 头像（2026-09-20）：统一走这一处，别再直接写 textContent
           $('pRoleLabel').innerHTML = '正式账号 · ID: <span id="pId"></span>';
@@ -607,14 +612,49 @@
       // 放在头像块之后：`renderAccountUI()` 会经 `renderAvatars()` 读 `myAvatar`
       renderAccountUI();
 
-      // 改名（游客可见；账号身份下这一行会被 `renderAccountUI` 换成"账号名不可更改"的说明）
+      // 游客改名（免费，WS rename）
       on($('btnRename'), 'click', () => {
         const name = $('renameInput').value.trim();
         // ⚠️ 2026-10-02 体验修复（提示风格统一）：校验失败与注册 / 登录失败同款走 `UI.alert`
-        // （可读、可关闭），不再用 2.5 秒就消失的 toast。
         if (!name) return UI.alert('改名', '请输入名字');
         if (!api.connected) return UI.alert('改名', '连接尚未就绪，请稍后再试');
         api.send({ type: 'rename', data: { name } });
+      });
+
+      // 账号改昵称（花 5 积分，2026-10-10）：调 REST 改**持久昵称**（accounts.setNickname），
+      // 与登录账号名分离；成功后同步各处显示与剩余积分。
+      on($('btnChangeNick'), 'click', async () => {
+        const nickname = ($('nickInput') && $('nickInput').value.trim()) || '';
+        if (!nickname) return UI.alert('改昵称', '请输入新昵称');
+        if (nickname === guest.name) return UI.alert('改昵称', '昵称未变化');
+        try {
+          const res = await global.ApiUtils.post('/api/account/nickname', { token: sessionToken(), nickname });
+          if (res && res.ok) {
+            guest.name = res.nickname;
+            global.NAV.saveGuest(guest);
+            $('pName').textContent = res.nickname;
+            $('accountName').textContent = res.nickname;
+            renderAvatars(); // 名字变了，兜底字形也要跟着变
+            const hint = $('nickHint');
+            if (hint) hint.textContent = `已改为「${res.nickname}」· 剩余 ${res.points} 积分`;
+            if ($('nickInput')) $('nickInput').value = '';
+            toast('改昵称成功');
+          } else {
+            UI.alert('改昵称失败', (res && res.error) || '改昵称失败，请重试');
+          }
+        } catch (e) {
+          UI.alert('改昵称失败', '改昵称失败，请重试');
+        }
+      });
+
+      // 修改资料入口（2026-10-10）：展开 / 收起「我的资料」面板，节约个人页空间
+      on($('btnEditProfile'), 'click', () => {
+        const panel = $('myProfileCard');
+        if (!panel) return;
+        const open = panel.style.display !== 'none';
+        panel.style.display = open ? 'none' : 'block';
+        const btn = $('btnEditProfile');
+        if (btn) btn.textContent = open ? '✏️ 修改资料' : '收起资料编辑';
       });
       sub('renamed', (data) => {
         guest.name = data.name;
@@ -658,6 +698,11 @@
           // 积分（F1）：与 ELO 独立的累计值，服务端每完成一局 +1，前端只显示
           const ptsEl = $('sPoints');
           if (ptsEl) ptsEl.textContent = p.points || 0;
+          // 改昵称区提示当前积分（仅本人；改昵称消耗积分，见 accounts.setNickname）
+          if (isSelf) {
+            const hint = $('nickHint');
+            if (hint) hint.textContent = `当前 ${p.points || 0} 积分 · 改昵称需 5（每完成一局 +1）`;
+          }
           renderEloChart(p.history || []);
           renderRecords(data.records || []);
           renderHonors(data.honors);
