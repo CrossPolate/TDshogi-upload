@@ -108,6 +108,7 @@
     showCoords: false,          // 棋盘坐标（筋 1–9 / 段 一–九），默认隐藏
     dragToMove: false,          // 触屏拖拽走子；关闭时用「点选两步」避免误触
     highlightLastMove: true,    // 上一步落点高亮
+    animateMoves: true,         // 走子动画（落子/打子/吃子/升变，2026-10-11）
     spectatorNotices: true,     // §R3：聊天区显示「XX 进入/离开观战」
     // §U4 音效细分。取值：'default'（合成音）/ 'file:<名字>'（真实音频文件，落子音
     // 在 public/sound/）。audio 资源 2026-09-26 实装。
@@ -128,6 +129,8 @@
     { group: '显示', key: 'showCoords', type: 'bool', label: '棋盘坐标',
       hint: '棋盘四周显示 1–9 筋、一–九 段' },
     { group: '显示', key: 'highlightLastMove', type: 'bool', label: '上一步高亮' },
+    { group: '显示', key: 'animateMoves', type: 'bool', label: '走子动画',
+      hint: '落子/打子/吃子/升变的动效；关闭则棋子直接到位' },
     { group: '对局', key: 'sound', type: 'bool', label: '行棋音效' },
     { group: '对局', key: 'dragToMove', type: 'bool', label: '触屏拖拽走子',
       hint: '关闭时用「点棋子 → 点目标格」两步走子，可减少误触' },
@@ -183,6 +186,7 @@
     cache.showCoords = !!cache.showCoords;
     cache.dragToMove = !!cache.dragToMove;
     cache.highlightLastMove = !!cache.highlightLastMove;
+    cache.animateMoves = cache.animateMoves !== false; // 走子动画默认开
     cache.music = cache.music !== false; // 全局音乐开关默认开
     cache.playOpponentBgm = cache.playOpponentBgm !== false; // 默认播对手 BGM
     // 音量：0–100 整数百分比，默认 50
@@ -793,6 +797,17 @@
     return 0.7 * bgmVolume;
   }
 
+  /**
+   * 对外暴露当前 BGM 音量（0–1），给「试听」这类旁路播放用。
+   *
+   * ⚠️ 2026-10-11 修：装扮页试听此前把音量写死成 0.7，而实际 BGM 是 0.7×用户百分比
+   * （默认 50% → 0.35）——试听听感**比正式播放响一倍**，用户误以为"正式播放会是这个音量"。
+   * 试听应与用户设置的音量完全一致，故统一从这里取。
+   */
+  function bgmVolumeValue() {
+    return bgmGain();
+  }
+
   /** 读全局音乐开关（内存态；由 setMusicOn / applyMusicOn 同步，初始从 Settings 读） */
   function musicOn() {
     return bgmMusicOn;
@@ -1255,6 +1270,7 @@
     setMusicOn, applyMusicOn, isMusicOn,
     setGameTrackOverride, gameTrackOverride, initFromServer,
     bgmStart, bgmStop, bgmSync, bgmState,
+    bgmVolumeValue,
     bgmPauseForPreview, bgmResumeFromPreview,
     setEnabled, applyEnabled, isEnabled, ensureCtx,
   };
@@ -4556,6 +4572,97 @@
     return 'pieces/kinki.png';
   }
 
+  /**
+   * 两枚棋子的「身份」是否相同（用于比较前后两帧的同一格）。
+   *
+   * **刻意不含 `sq`**：棋子移动后 `sq` 会变，若把 sq 算进身份，正常移动会被误判成
+   * 「旧子消失 + 新子出现」，diff 就退化成"整盘都变了"。只比 名/色/是否成駒。
+   */
+  function samePiece(a, b) {
+    const pa = (a && a.piece) ? a : null;
+    const pb = (b && b.piece) ? b : null;
+    if (!pa && !pb) return true;
+    if (!pa || !pb) return false;
+    return pa.piece === pb.piece && pa.color === pb.color && !!pa.promoted === !!pb.promoted;
+  }
+
+  /**
+   * 比较前后两帧棋盘，推断「刚刚发生的那一手」（走子动效用）。
+   *
+   * 用 **状态 diff** 而不是解析 USI 是刻意的：`lastMove` 在两条链路上格式并不统一——
+   * 对局页传完整 USI（`7g7f` / `P*5e` / `8h2b+`），回放页只传**落点格**（`7f`）。
+   * diff 对两者都成立，还能顺手认出"升变"（同一个子从 歩 变 と），这是解析 USI
+   * 在回放链路上做不到的（落点格丢掉了 `+`）。
+   *
+   * 只认「本帧恰好出现 1 枚新棋子」的简单局面；一次变化多枚（装载新盘面、悔棋、
+   * 自由编辑多格）一律返回 null → 不播动画（宁可不动，也不要播错）。
+   *
+   * @param {Array} prev 上一帧 board（9×9，服务端坐标系）
+   * @param {Array} cur  本帧 board
+   * @returns {{to:object, from:(object|null), isDrop:boolean, captured:boolean, promoted:boolean}|null}
+   */
+  function diffBoard(prev, cur) {
+    if (!prev || !cur) return null;
+    const added = [];
+    const removed = [];
+    for (let r = 0; r < 9; r++) {
+      for (let c = 0; c < 9; c++) {
+        const p = prev[r] && prev[r][c];
+        const q = cur[r] && cur[r][c];
+        if (samePiece(p, q)) continue;
+        if (q && q.piece) added.push({ r, c, piece: q });
+        if (p && p.piece) removed.push({ r, c, piece: p });
+      }
+    }
+    if (added.length !== 1) return null;         // 不是"一手"的形态
+    const to = added[0];
+    // 同色棋子从别处消失 = 这枚子的出发格（打子时没有）
+    const mine = removed.filter((x) => x.piece.color === to.piece.color);
+    if (mine.length > 1) return null;            // 同色两处变化：说不清，不播
+    const from = mine.length ? mine[0] : null;
+    return {
+      to: { r: to.r, c: to.c, piece: to.piece },
+      from: from ? { r: from.r, c: from.c, piece: from.piece } : null,
+      isDrop: !from,
+      // 除"出发格"外还有棋子消失 → 那是被吃的敌子
+      captured: removed.length > (from ? 1 : 0),
+      // 升变：出发未成駒、落点已成駒（同一枚子，piece 名也变了，如 歩→と）
+      promoted: !!to.piece.promoted && !!from && !from.piece.promoted,
+    };
+  }
+
+  /**
+   * 两帧棋盘的内容是否完全相同（逐格比「棋子身份」，**不比引用**）。
+   *
+   * 必须比内容而非引用：自由摆放/复盘走的是同一个 `model.board` 原地修改
+   * （freeboard.js 的 `_move/_drop`），引用永远相等，diff 就恒为空。
+   */
+  function boardEquals(a, b) {
+    if (!a || !b) return a === b;
+    for (let r = 0; r < 9; r++) {
+      for (let c = 0; c < 9; c++) {
+        if (!samePiece(a[r] && a[r][c], b[r] && b[r][c])) return false;
+      }
+    }
+    return true;
+  }
+
+  /** 局面快照（深拷贝棋子身份字段）——存快照而不是引用，理由见 boardEquals */
+  function snapshotBoard(board) {
+    const out = [];
+    for (let r = 0; r < 9; r++) {
+      const row = [];
+      for (let c = 0; c < 9; c++) {
+        const p = board[r] && board[r][c];
+        row.push(p && p.piece
+          ? { piece: p.piece, color: p.color, promoted: !!p.promoted, sq: p.sq }
+          : { piece: null, color: null, promoted: false, sq: (p && p.sq) || null });
+      }
+      out.push(row);
+    }
+    return out;
+  }
+
   /** 当前格尺寸（px），由 CSS 变量 --cell-size 驱动，窄屏响应式缩小 */
   function cellSize() {
     const v = getComputedStyle(document.documentElement).getPropertyValue('--cell-size');
@@ -4727,6 +4834,7 @@
      * @param {string} viewpoint 'b' | 'w'
      */
     render(state, extra = {}, viewpoint = 'b') {
+      const prevBoard = this._prevBoard;   // 上一帧局面的**快照**（用于 diff 出"刚走的那一手"）
       this.state = state;
       this.extra = extra;
       this.viewpoint = viewpoint;
@@ -4734,26 +4842,107 @@
       const board = state.board;
       const flipRow = viewpoint === 'w'; // 后手视角：行镜像（自己翻到底部）
       const colFrom = (c) => viewpoint === 'b' ? (8 - c) : c; // 列方向（先手9筋左，后手1筋左）
+      const sz = cellSize();
+      const atlas = getAtlas();
       for (let r = 0; r < 9; r++) {
         for (let c = 0; c < 9; c++) {
           const dr = flipRow ? (8 - r) : r;  // 行：后手镜像
           const cell = this.cells[dr][c];
-          cell.innerHTML = '';
           // 必须包含 has-piece：否则吃子目标（方块）的类残留到空格格子上，
           // 导致「合法目标空格」被污染成绿色方块而非绿点
           cell.classList.remove('sel', 'target', 'check', 'last', 'has-piece');
           const col = colFrom(c);
           const piece = board[r][col];
-          if (piece && piece.piece) {
-            cell.innerHTML = renderPiece(piece, cellSize() - 8, viewpoint);
-            cell.dataset.sq = piece.sq;
-          } else {
-            // 空格 sq 应从「服务端」未镜像的行 r 反推
-            cell.dataset.sq = this._rCToSq(r, c, viewpoint);
+          // ---- 增量渲染（2026-10-11）----
+          // 只重建「内容真的变了」的格子，而不是无脑 `innerHTML=''`。两个理由：
+          //  ① 走子动效挂在格子上（`.anim-*` 类 + `.piece-anim` 包裹）。对局页同一帧内
+          //     会连续重绘 4 次（play-views.render：setModel → setCheck → setInteractive
+          //     → 显式 render，每个 setter 内部各自 render），若每次都清空重建，第 1 次
+          //     挂上的动画会被第 2 次立刻抹掉 —— 对局主战场就永远看不到落子动画。
+          //  ② 顺带修「转屏/缩放后格子尺寸不更新」：此前格子宽高只在 build() 写一次，
+          //     而棋子按实时 cellSize() 画，两者会错配。
+          // 签名含 viewpoint：切观战视角时棋子朝向要变，必须重画。
+          const sig = (piece && piece.piece)
+            ? `${atlas}|${viewpoint}|${piece.piece}|${piece.color}|${piece.promoted ? 1 : 0}|${sz}`
+            : '';
+          if (cell._sig !== sig) {
+            cell._sig = sig;
+            cell.innerHTML = (piece && piece.piece) ? renderPiece(piece, sz - 8, viewpoint) : '';
           }
+          if (cell._size !== sz) {
+            cell._size = sz;
+            cell.style.width = sz + 'px';
+            cell.style.height = sz + 'px';
+          }
+          cell.dataset.sq = (piece && piece.piece) ? piece.sq : this._rCToSq(r, c, viewpoint);
         }
       }
       this.applyHighlights(extra);
+      this.animateMove(prevBoard, board, viewpoint);
+      this._prevBoard = snapshotBoard(board);
+    }
+
+    /**
+     * 走子动效：给「本帧刚落下的那一格」打上动画类（CSS 负责演出，见 board.css）。
+     *
+     * 触发条件刻意收紧：
+     *  - 首次渲染（prev 为 null）→ 不播；
+     *  - **本帧局面与上一帧完全相同**（选中/取消选中、切视角、resize、同帧内的后续重绘）
+     *    → 直接返回，**既不清也不挂**：动画类与 `.piece-anim` 包裹保持原样，动画不被打断、
+     *    也不会重播（增量渲染保证这些格子不会被重建）；
+     *  - 只有「本轮 diff 出恰好一枚新棋子」才播；装载新盘面/悔棋（一次变多枚）不播。
+     *
+     * 动画挂在包裹层 `.piece-anim` 上（不是棋子本身）：棋子自带 180° 方向旋转
+     * （内联 transform，后手棋子朝下），落子/翻转的 transform 若直接压在棋子上会把
+     * 方向旋掉——包一层就互不干扰（外层做位移/翻转，内层保留朝向）。
+     *
+     * @param {Array|null} prevBoard 上一帧局面的快照
+     * @param {Array} curBoard 本帧 board
+     * @param {string} viewpoint 'b' | 'w'
+     */
+    animateMove(prevBoard, curBoard, viewpoint) {
+      if (!prevBoard) return;                                // 首次渲染不播
+      if (boardEquals(prevBoard, curBoard)) return;           // 同一局面的重绘：保留已挂动画
+      this.clearAnimClasses();                               // 新的一手 / 新盘面：先清上一帧标记
+      if (window.Settings && window.Settings.get('animateMoves') === false) return;
+      const d = diffBoard(prevBoard, curBoard);
+      if (!d) return;
+      const flipRow = viewpoint === 'w';
+      // ⚠️ `d.to/d.from` 用的是**服务端**行列（diff 直接比较服务端 board），
+      // 必须按视角反解成**显示**格：先手列镜像（服务端 col=6 → 显示 col=2），后手不镜像。
+      const cellAt = (rc) => this.cells[flipRow ? (8 - rc.r) : rc.r][flipRow ? rc.c : (8 - rc.c)];
+      const cell = cellAt(d.to);
+      if (!cell) return;
+      cell.classList.add('anim-enter');
+      if (d.isDrop) cell.classList.add('anim-drop');             // 打子：落得更高更沉
+      if (d.captured) cell.classList.add('anim-capture');        // 吃子：落点红环
+      if (d.promoted) cell.classList.add('anim-promote');        // 升变：再翻一下
+      this.wrapForAnimation(cell);
+      if (d.from) {
+        const fc = cellAt(d.from);
+        if (fc) fc.classList.add('anim-vacate');                 // 出发格：暖光淡出
+      }
+    }
+
+    /** 清掉全部格子的走子动效标记（只在"新的一手到来"时调用） */
+    clearAnimClasses() {
+      const CLS = ['anim-enter', 'anim-drop', 'anim-capture', 'anim-promote', 'anim-vacate'];
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) this.cells[r][c].classList.remove(...CLS);
+      }
+    }
+
+    /** 把格子里的棋子包进 `.piece-anim`（动画载体），返回包裹层（无棋子则 null） */
+    wrapForAnimation(cell) {
+      const img = cell.querySelector ? cell.querySelector('.piece-img') : null;
+      if (!img || !cell.appendChild) return null;
+      const parent = img.parentNode;
+      if (parent && parent.classList && parent.classList.contains('piece-anim')) return parent;
+      const wrap = document.createElement('div');
+      wrap.className = 'piece-anim';
+      cell.appendChild(wrap);      // 真实 DOM 中 appendChild(img) 会把 img 移进来
+      wrap.appendChild(img);
+      return wrap;
     }
 
     _rCToSq(r, c, viewpoint = 'b') {
@@ -4846,6 +5035,9 @@
   }
 
   global.ShogiBoard = ShogiBoard;
+  global.diffBoard = diffBoard;          // 纯函数，供测试直接验证走子识别
+  global.boardEquals = boardEquals;      // 纯函数：两帧局面内容是否相同
+  global.snapshotBoard = snapshotBoard;  // 纯函数：局面快照
   global.renderHands = renderHands;
   global.DROP_SYMBOLS = DROP_SYMBOLS;
   global.DROP_KANJI = DROP_KANJI;
@@ -6365,6 +6557,11 @@
         <div id="matchControls">
           <button class="btn btn-primary btn-lg" id="btnQuickMatch" style="width:100%;">开始匹配</button>
         </div>
+        <!-- 赛事约战（2026-10-11）：有可进行的赛事对局时显示，点击即与指定对手开局 -->
+        <div id="tnMatchBox" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+          <div id="tnMatchHint" style="font-size:12px;color:var(--gold-light);margin-bottom:8px;line-height:1.7;"></div>
+          <button class="btn btn-primary btn-lg" id="btnStartTnMatch" style="width:100%;">⚔️ 开始赛事</button>
+        </div>
         <div class="match-wait" id="matchWait">
           <div class="spinner"></div>
           <div>正在寻找对手…<br><span style="font-size:12px;color:var(--text-dim);">点击下方按钮取消</span></div>
@@ -6595,6 +6792,13 @@
         // → 被弹回大厅并谎报「该对局已结束或不存在」。
         global.Router.navigate(`play.html?room=${data.roomId}&spectate=1`);
       }));
+      // 赛事约战（2026-10-11）：我方发起 或 对手发起 → 都进同一对局房。
+      // 带 &join=1：play 页收到后会发 join_tournament_match 回位到座位（赛事房由系统建、需显式进座）。
+      this._teardown.push(api.on('tournament_match_started', (data) => {
+        if (!data || !data.roomId) return;
+        toast(data.initiator ? '赛事对局已创建，祝好运！' : '对手发起了赛事对局，正在进入…');
+        global.Router.navigate(`play.html?room=${encodeURIComponent(data.roomId)}&join=1`);
+      }));
       this._teardown.push(api.on('error', (data) => {
         if (!data || !data.message) return;
         toast(data.message);
@@ -6613,13 +6817,45 @@
         }
       }));
 
-      // ---- 观战列表 ----
+      // ---- 观战列表 + 赛事约战 ----
       let lastGamesSig = '';
+      let myTnMatch = null;
       async function loadGames() {
         try {
-          const data = await global.ApiUtils.get('/api/lobby');
+          // 带身份拉取：识别「我当前可进行的赛事对局」（约战制，2026-10-11）
+          const data = await global.ApiUtils.get('/api/lobby', guest.id ? { accountToken: guest.id } : undefined);
           renderGames(data.games);
+          myTnMatch = data.myTournamentMatch || null;
+          renderTnMatch();
         } catch (e) { console.error(e); }
+      }
+      /** 渲染「开始赛事」按钮（有可进行的赛事对局时才显示） */
+      let tnBtnBound = false;
+      function renderTnMatch() {
+        const box = $('tnMatchBox');
+        if (!box) return;
+        if (!myTnMatch) { box.style.display = 'none'; return; }
+        const m = myTnMatch;
+        $('tnMatchHint').innerHTML = `🏆 赛事「${esc(m.tournamentName || '')}」有一场轮到你：<br>对阵 <b>${esc(m.opponentName || '对手')}</b>（约定时间内完赛即可）`;
+        box.style.display = 'block';
+        const btn = $('btnStartTnMatch');
+        // ⚠️ 只绑一次：loadGames 每 5 秒轮询都会调本函数，而按钮元素始终是同一个，
+        // 反复 addEventListener 会叠加监听 → 点一下发 N 次请求。
+        if (btn && !tnBtnBound) {
+          tnBtnBound = true;
+          on(btn, 'click', () => {
+            if (!myTnMatch) return;
+            api.send({
+              type: 'start_tournament_match',
+              data: {
+                tournamentId: myTnMatch.tournamentId,
+                nodeIndex: myTnMatch.nodeIndex,
+                round: myTnMatch.round,
+                pairIndex: myTnMatch.pairIndex,
+              },
+            });
+          });
+        }
       }
       function renderGames(games) {
         const el = $('activeGames');
@@ -8021,9 +8257,15 @@
         if (!myPlayerId) return '';
         const rows = [];
 
+        // 已建房 → 可进入
         (T.bracket || []).forEach((n) => {
           if (!n.matchId || !n.players || n.players.indexOf(myPlayerId) < 0) return;
           rows.push(matchRow(n.matchId, (n.players || []).find((id) => id !== myPlayerId), null));
+        });
+        // 约战制（2026-10-11）：已配对、未建房 → 「开始赛事」
+        (T.bracket || []).forEach((n) => {
+          if (!n.ready || n.matchId || n.winnerId || !n.players || n.players.indexOf(myPlayerId) < 0) return;
+          rows.push(pendingMatchRow((n.players || []).find((id) => id !== myPlayerId), null, { nodeIndex: n.index }));
         });
         (T.rounds || []).forEach((r) => {
           (r.pairs || []).forEach((p, i) => {
@@ -8032,12 +8274,30 @@
             rows.push(matchRow(roomId, p[0] === myPlayerId ? p[1] : p[0], r.round));
           });
         });
+        // 瑞士制待打
+        (T.rounds || []).forEach((r) => {
+          (r.pairs || []).forEach((p, i) => {
+            if ((r.matchIds || [])[i]) return;
+            if (r.results && r.results[pairKey(p[0], p[1])]) return;
+            if (p.indexOf(myPlayerId) < 0) return;
+            rows.push(pendingMatchRow(p[0] === myPlayerId ? p[1] : p[0], r.round, { round: r.round, pairIndex: i }));
+          });
+        });
 
         if (!rows.length) return '';
         return `<div class="card" style="padding:16px 20px;">
-          <div style="font-size:13px;color:var(--gold-light);margin-bottom:8px;">⚔️ 你的对局已安排</div>
+          <div style="font-size:13px;color:var(--gold-light);margin-bottom:8px;">⚔️ 你的对局</div>
           ${rows.join('')}
-          <div style="font-size:12px;color:var(--text-dim);margin-top:6px;">对手未到场时可在房内等待；对局开始后离开页面可能被判负。</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:6px;">约定时间内完赛即可；赛事对局可随时离开后再回来继续，不会被判负。</div>
+        </div>`;
+      }
+
+      /** 待开始的赛事对局行（约战制）：点「开始赛事」即与指定对手建房开局 */
+      function pendingMatchRow(opponentId, round, loc) {
+        const attrs = `data-start-tn="${esc(T.id)}" data-node="${loc.nodeIndex != null ? loc.nodeIndex : ''}" data-round="${loc.round != null ? loc.round : ''}" data-pair="${loc.pairIndex != null ? loc.pairIndex : ''}"`;
+        return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:4px 0;font-size:13px;">
+          <span>${round ? `第 ${round} 轮 · ` : ''}对手：<span data-player-id="${esc(opponentId || '')}">${esc(nameOf(opponentId))}</span> <span style="color:var(--gold-light);">⏳ 待开始</span></span>
+          <button class="btn btn-primary btn-sm" ${attrs} type="button">⚔️ 开始赛事</button>
         </div>`;
       }
 
@@ -8691,6 +8951,28 @@
           global.Router.navigate(`play.html?room=${encodeURIComponent(d.roomId)}`);
         }
       }));
+      // 约战制（2026-10-11）：本页点「开始赛事」或对手发起 → 进同一对局房（带 &join=1 回位座位）
+      this._teardown.push(api.on('tournament_match_started', (d) => {
+        if (!d || !d.roomId) return;
+        toast(d.initiator ? '赛事对局已创建，祝好运！' : '对手发起了赛事对局，正在进入…');
+        global.Router.navigate(`play.html?room=${encodeURIComponent(d.roomId)}&join=1`);
+      }));
+      // 「开始赛事」按钮：容器级委托（tnMyArea 每次重绘但容器本身不变，委托只挂一次）
+      const myAreaEl = el('tnMyArea');
+      if (myAreaEl) {
+        myAreaEl.addEventListener('click', (e) => {
+          const btn = e.target.closest && e.target.closest('[data-start-tn]');
+          if (!btn) return;
+          const data = { tournamentId: btn.getAttribute('data-start-tn') };
+          const ni = btn.getAttribute('data-node');
+          const rd = btn.getAttribute('data-round');
+          const pi = btn.getAttribute('data-pair');
+          if (ni) data.nodeIndex = Number(ni);
+          if (rd) data.round = Number(rd);
+          if (pi) data.pairIndex = Number(pi);
+          api.send({ type: 'start_tournament_match', data });
+        });
+      }
 
       // 名单/待办队列里的操作按钮（2026-09-23，审查项 13f）：
       // 从"两处各自 querySelectorAll + 逐个绑定"改为**一处注册 + 整页委托**。
@@ -8831,14 +9113,8 @@
           <div style="margin-top:12px;" id="editProfileRow">
             <button class="btn btn-ghost btn-sm" id="btnEditProfile">✏️ 修改资料</button>
           </div>
-          <!-- 头像（2026-09-20）：单独一行，游客/账号都能换 -->
-          <div style="margin-top:12px;">
-            <button class="btn btn-ghost btn-sm" id="btnPickAvatar">🎨 换头像</button>
-            <div id="avatarPicker" style="display:none;margin-top:10px;">
-              <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">选一个头像（点击即生效）</div>
-              <div id="avatarOptions" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
-            </div>
-          </div>
+          <!-- ⚠️ 2026-10-11（问题5）：个人页「换头像」入口已移除 ——
+               头像属于装扮，统一到「装扮」标签页里换（含限定头像）。游客不再支持换头像。 -->
         </div>
         <div style="text-align:center;">
           <div style="font-size:40px;font-weight:900;color:var(--gold-light);font-family:var(--font-serif);" id="pRating">1500</div>
@@ -9245,7 +9521,12 @@
       // ⚠️ `myAvatar` 必须**在 `renderAccountUI()` 之前**声明：后者会调 `renderAvatars()`，
       // 而 `let` 有 TDZ——先调用就会抛 "Cannot access before initialization"。
       // ==================================================================
-      let myAvatar = null;
+      // ⚠️ 2026-10-11（问题6）：初值取**当前身份已缓存的头像**（`NAV.getGuest().avatar`）。
+      // 不能只等 `hello` —— SPA 是单连接，`hello` 只在 boot 建立 WS 时发过一次；
+      // 用户之后切回个人页时 `sub('hello')` 永远不再触发，`myAvatar` 一直是 null，
+      // 于是"个人页不显示装扮头像"（连免费/道具头像都不显示，回落成名字首字/默认字形）。
+      // nav 的 guest 对象在连接/换装时都会更新 avatar，是切页场景下可靠的来源。
+      let myAvatar = (guest && guest.avatar) || null;
 
       /** 把头像写进两个头像位（账号卡 + 身份卡）；支持字形与图片 URL */
       function paintAvatar(avatarOrGlyph) {
@@ -9271,68 +9552,20 @@
         paintAvatar(myAvatar);
       }
 
-      function renderAvatarOptions() {
-        const box = $('avatarOptions');
-        if (!box) return;
-        const list = api.avatars || [];
-        if (!list.length) return; // 白名单还没到（hello 未回）：宁可为空，也别画一份猜的
-        box.innerHTML = list.map((a) => {
-          const pickOn = a === myAvatar ? ' avatar-pick-on' : '';
-          const isImg = typeof a === 'string' && a.charAt(0) === '/';
-          const face = isImg
-            ? `<img src="${esc(a)}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`
-            : esc(a);
-          return `<button type="button" class="avatar-pick${pickOn}" data-avatar="${esc(a)}">${face}</button>`;
-        }).join('');
-      }
-
-      function togglePicker() {
-        const p = $('avatarPicker');
-        if (!p) return;
-        p.style.display = p.style.display === 'none' ? '' : 'none';
-      }
-
-      on($('btnPickAvatar'), 'click', togglePicker);
-      // ⚠️ 身份卡上的大头像**也**带着换头像入口，只读视图必须拦住：
-      // `setupViewMode()` 藏的是按钮与选择器本身，而点这个头像能把选择器**重新打开** ——
-      // 这正是用户看到"我能改别人头像"的那个入口（2026-09-20 修）。
-      on($('avatar'), 'click', () => { if (isSelf) togglePicker(); });
-      // ⚠️ 2026-10-02 体验修复（头像选择器确认）：把选中态挪到刚点的那个，用户点完立刻看到反馈；
-      // 服务端确认（`avatar_updated`）后再用真实值重绘一次，避免乐观态与实际不符。
-      function markPickedAvatar(avatar) {
-        const box = $('avatarOptions');
-        if (!box) return;
-        box.querySelectorAll('.avatar-pick').forEach((btn) => {
-          btn.classList.toggle('avatar-pick-on', btn.getAttribute('data-avatar') === avatar);
-        });
-      }
-
-      on($('avatarOptions'), 'click', (e) => {
-        if (!isSelf) return; // 只读视图：双保险，连消息都不发（真正改的其实是我自己）
-        const b = e.target.closest('.avatar-pick');
-        if (!b) return;
-        const pick = b.getAttribute('data-avatar');
-        // ⚠️ 2026-10-02 体验修复（"点了没反应"的错觉）：三步都要有反馈——
-        // 1) 立刻把选中态挪到这一格（`avatar-pick-on`），先给视觉确认；
-        // 2) WS 还没连上时 `api.send` 只会进队列、永远等不到回执 → 明确告知，别静默丢弃；
-        // 3) 成功由 `avatar_updated` 收尾（重绘 + toast 提示），失败由 `error` 回滚选中态。
-        markPickedAvatar(pick);
-        if (!api.connected) return UI.alert('操作失败', '连接尚未就绪，请稍后再试');
-        api.send({ type: 'set_avatar', data: { avatar: pick } });
-      });
+      // ⚠️ 2026-10-11（问题5）：个人页的头像选择器（候选网格 + 换头像按钮 + 选中委托）
+      // 已整体移除 —— 头像改由「装扮」页统一管理（含限定头像）。游客不再支持换头像。
+      // 这里只保留「显示」相关的订阅：把服务端确认的头像刷到头像位。
       sub('hello', (d) => {
         if (!d) return;
         if (d.avatar) myAvatar = d.avatar;
         renderAvatars();
-        renderAvatarOptions();
       });
       sub('avatar_updated', (d) => {
         if (!d || !d.avatar) return;
         myAvatar = d.avatar;
         renderAvatars();
-        renderAvatarOptions(); // 用服务端确认过的值重绘，消除乐观选中态的偏差
         if (global.NAV && global.NAV.updateAvatar) global.NAV.updateAvatar(d.avatar);
-        toast('头像已更新'); // 明确成功提示（词典已有该词条）
+        toast('头像已更新');
       });
 
       // 放在头像块之后：`renderAccountUI()` 会经 `renderAvatars()` 读 `myAvatar`
@@ -9391,10 +9624,8 @@
       });
       sub('error', (data) => {
         if (!data || !data.message) return;
-        // ⚠️ 2026-10-02 体验修复（提示风格统一）：本页 WS 错误只来自改名 / 换头像这类
-        // **用户操作失败**，统一走 `UI.alert`（与注册 / 登录失败同一种提示方式）。
-        // 顺带重绘头像选项，回滚刚才可能留下的乐观选中态。
-        renderAvatarOptions();
+        // ⚠️ 2026-10-02 体验修复（提示风格统一）：本页 WS 错误只来自改名等**用户操作失败**，
+        // 统一走 `UI.alert`（与注册 / 登录失败同一种提示方式）。
         UI.alert('操作失败', data.message);
       });
 
@@ -9566,7 +9797,7 @@
        */
       function setupViewMode() {
         if (isSelf) return;
-        for (const id of ['accountCard', 'myProfileCard', 'btnPickAvatar', 'avatarPicker', 'renameRow', 'btnRename', 'renameInput', 'accountNameNote']) {
+        for (const id of ['accountCard', 'myProfileCard', 'renameRow', 'btnRename', 'renameInput', 'accountNameNote']) {
           const el = $(id);
           if (el) el.style.display = 'none';
         }
@@ -9683,6 +9914,9 @@
         function filteredCatalog() {
           const q = searchQ.trim().toLowerCase();
           return (snap.catalog || []).filter((it) => {
+            // ⚠️ 2026-10-11（问题3）：**限定装扮**不进商城陈列（无法购买）。
+            // 例外：已拥有的限定项仍显示，作为装备入口（否则拿到也无处装备）。
+            if (it.limited && !isOwned(it.id)) return false;
             if (catFilter !== 'all' && it.type !== catFilter) return false;
             if (q) {
               const hay = ((it.name || '') + (it.desc || '') + (it.id || '')).toLowerCase();
@@ -9825,7 +10059,9 @@
           try {
             const a = new Audio(encodeURI(src));
             a._pvSrc = src;
-            a.volume = 0.7;
+            // 试听音量 = 用户设置的 BGM 音量（2026-10-11 修：此前写死 0.7，比正式 BGM 响一倍）
+            a.volume = (window.Sound && window.Sound.bgmVolumeValue)
+              ? window.Sound.bgmVolumeValue() : 0.35;
             a.onended = stopPreview;
             a.onerror = () => { stopPreview(); note('试听失败：音频不可用', true); };
             const p = a.play();
@@ -11590,6 +11826,8 @@
       if (sec > 10) lastTickSecond = -1;
     } else {
       localClocks[turn] = Math.max(0, localClocks[turn] - dtMs);
+      // ⚠️ 2026-10-11（问题4）：包干局每秒检查一次「是否进入最后一分钟」⇒ 切终盘曲（幂等）。
+      maybeEndgamePhase();
 
       // §U1：本时每跨过一个整分钟提醒一次（mm = 剩余整分钟数）
       // ⚠️ 条件用 `mm >= 0` 而不是 `>= 1`：`Math.ceil` 使 mm=1 覆盖 (0, 60000]，
@@ -11670,13 +11908,17 @@
 
   /**
    * ⚠️ 2026-10-07 BGM 三轨：任一方进入读秒 ⇒ 切「终盘」曲（制勝 等）。
-   * 只从 game → endgame 单向切换（终盘不会退回开局曲），避免读秒边界反复横跳。
+   * ⚠️ 2026-10-11（问题4）：**包干制**（无读秒）也要有终盘曲 —— 它没有"进入读秒"这个节点，
+   * 原逻辑在包干局里永远不会切换。改为：包干局任一方本时**剩最后 1 分钟**即切终盘曲。
+   * 只从 game → endgame 单向切换（终盘不会退回开局曲），避免边界反复横跳。
    */
   function maybeEndgamePhase() {
     if (!window.Sound || typeof window.Sound.setPhase !== 'function') return;
-    const anyByo = !!(inByoyomi && (inByoyomi.b || inByoyomi.w));
-    if (!anyByo) return;
     if (window.Sound.getPhase && window.Sound.getPhase() === 'endgame') return;
+    const anyByo = !!(inByoyomi && (inByoyomi.b || inByoyomi.w));
+    const packLastMin = byoyomiDuration === 0
+      && Math.min(localClocks.b, localClocks.w) <= 60 * 1000;
+    if (!anyByo && !packLastMin) return;
     window.Sound.setPhase('endgame');
   }
 

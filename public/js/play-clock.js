@@ -110,6 +110,8 @@
       if (sec > 10) lastTickSecond = -1;
     } else {
       localClocks[turn] = Math.max(0, localClocks[turn] - dtMs);
+      // ⚠️ 2026-10-11（问题4）：包干局每秒检查一次「是否进入最后一分钟」⇒ 切终盘曲（幂等）。
+      maybeEndgamePhase();
 
       // §U1：本时每跨过一个整分钟提醒一次（mm = 剩余整分钟数）
       // ⚠️ 条件用 `mm >= 0` 而不是 `>= 1`：`Math.ceil` 使 mm=1 覆盖 (0, 60000]，
@@ -190,13 +192,17 @@
 
   /**
    * ⚠️ 2026-10-07 BGM 三轨：任一方进入读秒 ⇒ 切「终盘」曲（制勝 等）。
-   * 只从 game → endgame 单向切换（终盘不会退回开局曲），避免读秒边界反复横跳。
+   * ⚠️ 2026-10-11（问题4）：**包干制**（无读秒）也要有终盘曲 —— 它没有"进入读秒"这个节点，
+   * 原逻辑在包干局里永远不会切换。改为：包干局任一方本时**剩最后 1 分钟**即切终盘曲。
+   * 只从 game → endgame 单向切换（终盘不会退回开局曲），避免边界反复横跳。
    */
   function maybeEndgamePhase() {
     if (!window.Sound || typeof window.Sound.setPhase !== 'function') return;
-    const anyByo = !!(inByoyomi && (inByoyomi.b || inByoyomi.w));
-    if (!anyByo) return;
     if (window.Sound.getPhase && window.Sound.getPhase() === 'endgame') return;
+    const anyByo = !!(inByoyomi && (inByoyomi.b || inByoyomi.w));
+    const packLastMin = byoyomiDuration === 0
+      && Math.min(localClocks.b, localClocks.w) <= 60 * 1000;
+    if (!anyByo && !packLastMin) return;
     window.Sound.setPhase('endgame');
   }
 

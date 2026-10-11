@@ -24,6 +24,7 @@
     showCoords: false,          // 棋盘坐标（筋 1–9 / 段 一–九），默认隐藏
     dragToMove: false,          // 触屏拖拽走子；关闭时用「点选两步」避免误触
     highlightLastMove: true,    // 上一步落点高亮
+    animateMoves: true,         // 走子动画（落子/打子/吃子/升变，2026-10-11）
     spectatorNotices: true,     // §R3：聊天区显示「XX 进入/离开观战」
     // §U4 音效细分。取值：'default'（合成音）/ 'file:<名字>'（真实音频文件，落子音
     // 在 public/sound/）。audio 资源 2026-09-26 实装。
@@ -44,6 +45,8 @@
     { group: '显示', key: 'showCoords', type: 'bool', label: '棋盘坐标',
       hint: '棋盘四周显示 1–9 筋、一–九 段' },
     { group: '显示', key: 'highlightLastMove', type: 'bool', label: '上一步高亮' },
+    { group: '显示', key: 'animateMoves', type: 'bool', label: '走子动画',
+      hint: '落子/打子/吃子/升变的动效；关闭则棋子直接到位' },
     { group: '对局', key: 'sound', type: 'bool', label: '行棋音效' },
     { group: '对局', key: 'dragToMove', type: 'bool', label: '触屏拖拽走子',
       hint: '关闭时用「点棋子 → 点目标格」两步走子，可减少误触' },
@@ -99,6 +102,7 @@
     cache.showCoords = !!cache.showCoords;
     cache.dragToMove = !!cache.dragToMove;
     cache.highlightLastMove = !!cache.highlightLastMove;
+    cache.animateMoves = cache.animateMoves !== false; // 走子动画默认开
     cache.music = cache.music !== false; // 全局音乐开关默认开
     cache.playOpponentBgm = cache.playOpponentBgm !== false; // 默认播对手 BGM
     // 音量：0–100 整数百分比，默认 50

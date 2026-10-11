@@ -196,3 +196,85 @@
   .board-coords .coords-left { left: 4px; }
   .board-coords .coords-right { right: 4px; }
 }
+
+/* ============================================================
+   棋子质感与走子动效（2026-10-11）
+   ------------------------------------------------------------
+   阴影：棋子图是 64×64 **透明底** PNG，因此用 drop-shadow（沿棋子轮廓投影）
+         而不是 box-shadow（那会按方框投出一整块方形黑影）。
+   动效：board.js 的 diffBoard() 识别出本帧「刚落子/移动/吃子/升变」的那一格，
+         给落点格打类，出发格打 .anim-vacate：
+           .anim-enter  落点（所有走子）
+           .anim-drop   打子（从更高处落下）
+           .anim-capture 吃子（落点红环扩散）
+           .anim-promote 升变（先归位、再翻面）
+           .anim-vacate 出发格（暖光淡出）
+         **动画一律作用在包裹层 .piece-anim 上**：棋子自身带 180° 方向旋转
+         （后手棋子朝下，内联 transform），落子/翻转的 transform 直接压在棋子上
+         会把方向旋掉；包一层即可互不干扰。
+   开关：设置项「走子动画」（Settings.animateMoves）。系统「减少动态效果」
+         由 motion.css 的全局降级统一关闭，这里无需重复处理。
+   ============================================================ */
+.piece-img {
+  filter:
+    drop-shadow(0 1px 1px rgba(35, 22, 8, 0.45))
+    drop-shadow(0 3px 3px rgba(35, 22, 8, 0.26));
+}
+
+/* 动画载体：只做位移/翻转，不碰棋子朝向 */
+.piece-anim { display: block; line-height: 0; }
+
+/* ---- 落子 / 走子：自上方落下、轻微回弹 ---- */
+@keyframes piece-place {
+  0%   { transform: translateY(-16%) scale(1.06); opacity: 0.45; }
+  60%  { transform: translateY(0) scale(0.97); opacity: 1; }
+  80%  { transform: translateY(0) scale(1.02); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+/* ---- 打子：从更高处落下，更「沉」 ---- */
+@keyframes piece-drop {
+  0%   { transform: translateY(-34%) scale(1.10); opacity: 0.30; }
+  55%  { transform: translateY(0) scale(0.95); opacity: 1; }
+  75%  { transform: translateY(0) scale(1.04); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+/* ---- 升变：整体翻面（绕竖轴），内层棋子朝向由自身 transform 保留 ---- */
+@keyframes piece-flip {
+  0%   { transform: perspective(600px) rotateY(0deg) scale(1); }
+  55%  { transform: perspective(600px) rotateY(100deg) scale(1.08); }
+  100% { transform: perspective(600px) rotateY(180deg) scale(1); }
+}
+
+/* ---- 格子上的余晖：落点金圈 / 吃子红环 / 出发格暖光 ---- */
+@keyframes cell-land {
+  0%   { box-shadow: inset 0 0 0 2px rgba(201, 162, 39, 0.65); }
+  100% { box-shadow: inset 0 0 0 2px rgba(201, 162, 39, 0); }
+}
+@keyframes cell-capture {
+  0%   { box-shadow: inset 0 0 0 0 rgba(224, 90, 71, 0.60); }
+  100% { box-shadow: inset 0 0 0 14px rgba(224, 90, 71, 0); }
+}
+@keyframes cell-vacate {
+  0%   { box-shadow: inset 0 0 0 3px rgba(232, 163, 61, 0.50); }
+  100% { box-shadow: inset 0 0 0 3px rgba(232, 163, 61, 0); }
+}
+
+.cell.anim-enter { animation: cell-land var(--dur-slow, 360ms) var(--ease-out, ease-out); }
+.cell.anim-capture { animation: cell-capture var(--dur-slow, 360ms) var(--ease-out, ease-out); }
+.cell.anim-vacate { animation: cell-vacate var(--dur-slow, 360ms) var(--ease-out, ease-out); }
+
+.cell.anim-enter > .piece-anim {
+  animation: piece-place var(--dur-base, 220ms) var(--ease-spring, ease-out);
+}
+.cell.anim-drop > .piece-anim {
+  animation: piece-drop var(--dur-slow, 360ms) var(--ease-spring, ease-out);
+}
+/* 升变：先按落子归位，再翻面（两段动画串行）。写在 anim-enter 规则之后，
+   同特异性下由它胜出，因此升变格最终只跑这一条（含两段）。 */
+.cell.anim-promote > .piece-anim {
+  animation:
+    piece-place var(--dur-base, 220ms) var(--ease-spring, ease-out),
+    piece-flip var(--dur-slow, 360ms) var(--ease-out, ease-out) 140ms;
+}

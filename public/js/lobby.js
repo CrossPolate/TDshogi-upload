@@ -38,6 +38,11 @@
         <div id="matchControls">
           <button class="btn btn-primary btn-lg" id="btnQuickMatch" style="width:100%;">开始匹配</button>
         </div>
+        <!-- 赛事约战（2026-10-11）：有可进行的赛事对局时显示，点击即与指定对手开局 -->
+        <div id="tnMatchBox" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+          <div id="tnMatchHint" style="font-size:12px;color:var(--gold-light);margin-bottom:8px;line-height:1.7;"></div>
+          <button class="btn btn-primary btn-lg" id="btnStartTnMatch" style="width:100%;">⚔️ 开始赛事</button>
+        </div>
         <div class="match-wait" id="matchWait">
           <div class="spinner"></div>
           <div>正在寻找对手…<br><span style="font-size:12px;color:var(--text-dim);">点击下方按钮取消</span></div>
@@ -268,6 +273,13 @@
         // → 被弹回大厅并谎报「该对局已结束或不存在」。
         global.Router.navigate(`play.html?room=${data.roomId}&spectate=1`);
       }));
+      // 赛事约战（2026-10-11）：我方发起 或 对手发起 → 都进同一对局房。
+      // 带 &join=1：play 页收到后会发 join_tournament_match 回位到座位（赛事房由系统建、需显式进座）。
+      this._teardown.push(api.on('tournament_match_started', (data) => {
+        if (!data || !data.roomId) return;
+        toast(data.initiator ? '赛事对局已创建，祝好运！' : '对手发起了赛事对局，正在进入…');
+        global.Router.navigate(`play.html?room=${encodeURIComponent(data.roomId)}&join=1`);
+      }));
       this._teardown.push(api.on('error', (data) => {
         if (!data || !data.message) return;
         toast(data.message);
@@ -286,13 +298,45 @@
         }
       }));
 
-      // ---- 观战列表 ----
+      // ---- 观战列表 + 赛事约战 ----
       let lastGamesSig = '';
+      let myTnMatch = null;
       async function loadGames() {
         try {
-          const data = await global.ApiUtils.get('/api/lobby');
+          // 带身份拉取：识别「我当前可进行的赛事对局」（约战制，2026-10-11）
+          const data = await global.ApiUtils.get('/api/lobby', guest.id ? { accountToken: guest.id } : undefined);
           renderGames(data.games);
+          myTnMatch = data.myTournamentMatch || null;
+          renderTnMatch();
         } catch (e) { console.error(e); }
+      }
+      /** 渲染「开始赛事」按钮（有可进行的赛事对局时才显示） */
+      let tnBtnBound = false;
+      function renderTnMatch() {
+        const box = $('tnMatchBox');
+        if (!box) return;
+        if (!myTnMatch) { box.style.display = 'none'; return; }
+        const m = myTnMatch;
+        $('tnMatchHint').innerHTML = `🏆 赛事「${esc(m.tournamentName || '')}」有一场轮到你：<br>对阵 <b>${esc(m.opponentName || '对手')}</b>（约定时间内完赛即可）`;
+        box.style.display = 'block';
+        const btn = $('btnStartTnMatch');
+        // ⚠️ 只绑一次：loadGames 每 5 秒轮询都会调本函数，而按钮元素始终是同一个，
+        // 反复 addEventListener 会叠加监听 → 点一下发 N 次请求。
+        if (btn && !tnBtnBound) {
+          tnBtnBound = true;
+          on(btn, 'click', () => {
+            if (!myTnMatch) return;
+            api.send({
+              type: 'start_tournament_match',
+              data: {
+                tournamentId: myTnMatch.tournamentId,
+                nodeIndex: myTnMatch.nodeIndex,
+                round: myTnMatch.round,
+                pairIndex: myTnMatch.pairIndex,
+              },
+            });
+          });
+        }
       }
       function renderGames(games) {
         const el = $('activeGames');

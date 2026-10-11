@@ -349,6 +349,17 @@
     return 0.7 * bgmVolume;
   }
 
+  /**
+   * 对外暴露当前 BGM 音量（0–1），给「试听」这类旁路播放用。
+   *
+   * ⚠️ 2026-10-11 修：装扮页试听此前把音量写死成 0.7，而实际 BGM 是 0.7×用户百分比
+   * （默认 50% → 0.35）——试听听感**比正式播放响一倍**，用户误以为"正式播放会是这个音量"。
+   * 试听应与用户设置的音量完全一致，故统一从这里取。
+   */
+  function bgmVolumeValue() {
+    return bgmGain();
+  }
+
   /** 读全局音乐开关（内存态；由 setMusicOn / applyMusicOn 同步，初始从 Settings 读） */
   function musicOn() {
     return bgmMusicOn;
@@ -811,6 +822,7 @@
     setMusicOn, applyMusicOn, isMusicOn,
     setGameTrackOverride, gameTrackOverride, initFromServer,
     bgmStart, bgmStop, bgmSync, bgmState,
+    bgmVolumeValue,
     bgmPauseForPreview, bgmResumeFromPreview,
     setEnabled, applyEnabled, isEnabled, ensureCtx,
   };

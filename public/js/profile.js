@@ -105,14 +105,8 @@
           <div style="margin-top:12px;" id="editProfileRow">
             <button class="btn btn-ghost btn-sm" id="btnEditProfile">✏️ 修改资料</button>
           </div>
-          <!-- 头像（2026-09-20）：单独一行，游客/账号都能换 -->
-          <div style="margin-top:12px;">
-            <button class="btn btn-ghost btn-sm" id="btnPickAvatar">🎨 换头像</button>
-            <div id="avatarPicker" style="display:none;margin-top:10px;">
-              <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">选一个头像（点击即生效）</div>
-              <div id="avatarOptions" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
-            </div>
-          </div>
+          <!-- ⚠️ 2026-10-11（问题5）：个人页「换头像」入口已移除 ——
+               头像属于装扮，统一到「装扮」标签页里换（含限定头像）。游客不再支持换头像。 -->
         </div>
         <div style="text-align:center;">
           <div style="font-size:40px;font-weight:900;color:var(--gold-light);font-family:var(--font-serif);" id="pRating">1500</div>
@@ -519,7 +513,12 @@
       // ⚠️ `myAvatar` 必须**在 `renderAccountUI()` 之前**声明：后者会调 `renderAvatars()`，
       // 而 `let` 有 TDZ——先调用就会抛 "Cannot access before initialization"。
       // ==================================================================
-      let myAvatar = null;
+      // ⚠️ 2026-10-11（问题6）：初值取**当前身份已缓存的头像**（`NAV.getGuest().avatar`）。
+      // 不能只等 `hello` —— SPA 是单连接，`hello` 只在 boot 建立 WS 时发过一次；
+      // 用户之后切回个人页时 `sub('hello')` 永远不再触发，`myAvatar` 一直是 null，
+      // 于是"个人页不显示装扮头像"（连免费/道具头像都不显示，回落成名字首字/默认字形）。
+      // nav 的 guest 对象在连接/换装时都会更新 avatar，是切页场景下可靠的来源。
+      let myAvatar = (guest && guest.avatar) || null;
 
       /** 把头像写进两个头像位（账号卡 + 身份卡）；支持字形与图片 URL */
       function paintAvatar(avatarOrGlyph) {
@@ -545,68 +544,20 @@
         paintAvatar(myAvatar);
       }
 
-      function renderAvatarOptions() {
-        const box = $('avatarOptions');
-        if (!box) return;
-        const list = api.avatars || [];
-        if (!list.length) return; // 白名单还没到（hello 未回）：宁可为空，也别画一份猜的
-        box.innerHTML = list.map((a) => {
-          const pickOn = a === myAvatar ? ' avatar-pick-on' : '';
-          const isImg = typeof a === 'string' && a.charAt(0) === '/';
-          const face = isImg
-            ? `<img src="${esc(a)}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`
-            : esc(a);
-          return `<button type="button" class="avatar-pick${pickOn}" data-avatar="${esc(a)}">${face}</button>`;
-        }).join('');
-      }
-
-      function togglePicker() {
-        const p = $('avatarPicker');
-        if (!p) return;
-        p.style.display = p.style.display === 'none' ? '' : 'none';
-      }
-
-      on($('btnPickAvatar'), 'click', togglePicker);
-      // ⚠️ 身份卡上的大头像**也**带着换头像入口，只读视图必须拦住：
-      // `setupViewMode()` 藏的是按钮与选择器本身，而点这个头像能把选择器**重新打开** ——
-      // 这正是用户看到"我能改别人头像"的那个入口（2026-09-20 修）。
-      on($('avatar'), 'click', () => { if (isSelf) togglePicker(); });
-      // ⚠️ 2026-10-02 体验修复（头像选择器确认）：把选中态挪到刚点的那个，用户点完立刻看到反馈；
-      // 服务端确认（`avatar_updated`）后再用真实值重绘一次，避免乐观态与实际不符。
-      function markPickedAvatar(avatar) {
-        const box = $('avatarOptions');
-        if (!box) return;
-        box.querySelectorAll('.avatar-pick').forEach((btn) => {
-          btn.classList.toggle('avatar-pick-on', btn.getAttribute('data-avatar') === avatar);
-        });
-      }
-
-      on($('avatarOptions'), 'click', (e) => {
-        if (!isSelf) return; // 只读视图：双保险，连消息都不发（真正改的其实是我自己）
-        const b = e.target.closest('.avatar-pick');
-        if (!b) return;
-        const pick = b.getAttribute('data-avatar');
-        // ⚠️ 2026-10-02 体验修复（"点了没反应"的错觉）：三步都要有反馈——
-        // 1) 立刻把选中态挪到这一格（`avatar-pick-on`），先给视觉确认；
-        // 2) WS 还没连上时 `api.send` 只会进队列、永远等不到回执 → 明确告知，别静默丢弃；
-        // 3) 成功由 `avatar_updated` 收尾（重绘 + toast 提示），失败由 `error` 回滚选中态。
-        markPickedAvatar(pick);
-        if (!api.connected) return UI.alert('操作失败', '连接尚未就绪，请稍后再试');
-        api.send({ type: 'set_avatar', data: { avatar: pick } });
-      });
+      // ⚠️ 2026-10-11（问题5）：个人页的头像选择器（候选网格 + 换头像按钮 + 选中委托）
+      // 已整体移除 —— 头像改由「装扮」页统一管理（含限定头像）。游客不再支持换头像。
+      // 这里只保留「显示」相关的订阅：把服务端确认的头像刷到头像位。
       sub('hello', (d) => {
         if (!d) return;
         if (d.avatar) myAvatar = d.avatar;
         renderAvatars();
-        renderAvatarOptions();
       });
       sub('avatar_updated', (d) => {
         if (!d || !d.avatar) return;
         myAvatar = d.avatar;
         renderAvatars();
-        renderAvatarOptions(); // 用服务端确认过的值重绘，消除乐观选中态的偏差
         if (global.NAV && global.NAV.updateAvatar) global.NAV.updateAvatar(d.avatar);
-        toast('头像已更新'); // 明确成功提示（词典已有该词条）
+        toast('头像已更新');
       });
 
       // 放在头像块之后：`renderAccountUI()` 会经 `renderAvatars()` 读 `myAvatar`
@@ -665,10 +616,8 @@
       });
       sub('error', (data) => {
         if (!data || !data.message) return;
-        // ⚠️ 2026-10-02 体验修复（提示风格统一）：本页 WS 错误只来自改名 / 换头像这类
-        // **用户操作失败**，统一走 `UI.alert`（与注册 / 登录失败同一种提示方式）。
-        // 顺带重绘头像选项，回滚刚才可能留下的乐观选中态。
-        renderAvatarOptions();
+        // ⚠️ 2026-10-02 体验修复（提示风格统一）：本页 WS 错误只来自改名等**用户操作失败**，
+        // 统一走 `UI.alert`（与注册 / 登录失败同一种提示方式）。
         UI.alert('操作失败', data.message);
       });
 
@@ -840,7 +789,7 @@
        */
       function setupViewMode() {
         if (isSelf) return;
-        for (const id of ['accountCard', 'myProfileCard', 'btnPickAvatar', 'avatarPicker', 'renameRow', 'btnRename', 'renameInput', 'accountNameNote']) {
+        for (const id of ['accountCard', 'myProfileCard', 'renameRow', 'btnRename', 'renameInput', 'accountNameNote']) {
           const el = $(id);
           if (el) el.style.display = 'none';
         }
@@ -957,6 +906,9 @@
         function filteredCatalog() {
           const q = searchQ.trim().toLowerCase();
           return (snap.catalog || []).filter((it) => {
+            // ⚠️ 2026-10-11（问题3）：**限定装扮**不进商城陈列（无法购买）。
+            // 例外：已拥有的限定项仍显示，作为装备入口（否则拿到也无处装备）。
+            if (it.limited && !isOwned(it.id)) return false;
             if (catFilter !== 'all' && it.type !== catFilter) return false;
             if (q) {
               const hay = ((it.name || '') + (it.desc || '') + (it.id || '')).toLowerCase();
@@ -1099,7 +1051,9 @@
           try {
             const a = new Audio(encodeURI(src));
             a._pvSrc = src;
-            a.volume = 0.7;
+            // 试听音量 = 用户设置的 BGM 音量（2026-10-11 修：此前写死 0.7，比正式 BGM 响一倍）
+            a.volume = (window.Sound && window.Sound.bgmVolumeValue)
+              ? window.Sound.bgmVolumeValue() : 0.35;
             a.onended = stopPreview;
             a.onerror = () => { stopPreview(); note('试听失败：音频不可用', true); };
             const p = a.play();

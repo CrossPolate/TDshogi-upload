@@ -444,9 +444,15 @@
         if (!myPlayerId) return '';
         const rows = [];
 
+        // 已建房 → 可进入
         (T.bracket || []).forEach((n) => {
           if (!n.matchId || !n.players || n.players.indexOf(myPlayerId) < 0) return;
           rows.push(matchRow(n.matchId, (n.players || []).find((id) => id !== myPlayerId), null));
+        });
+        // 约战制（2026-10-11）：已配对、未建房 → 「开始赛事」
+        (T.bracket || []).forEach((n) => {
+          if (!n.ready || n.matchId || n.winnerId || !n.players || n.players.indexOf(myPlayerId) < 0) return;
+          rows.push(pendingMatchRow((n.players || []).find((id) => id !== myPlayerId), null, { nodeIndex: n.index }));
         });
         (T.rounds || []).forEach((r) => {
           (r.pairs || []).forEach((p, i) => {
@@ -455,12 +461,30 @@
             rows.push(matchRow(roomId, p[0] === myPlayerId ? p[1] : p[0], r.round));
           });
         });
+        // 瑞士制待打
+        (T.rounds || []).forEach((r) => {
+          (r.pairs || []).forEach((p, i) => {
+            if ((r.matchIds || [])[i]) return;
+            if (r.results && r.results[pairKey(p[0], p[1])]) return;
+            if (p.indexOf(myPlayerId) < 0) return;
+            rows.push(pendingMatchRow(p[0] === myPlayerId ? p[1] : p[0], r.round, { round: r.round, pairIndex: i }));
+          });
+        });
 
         if (!rows.length) return '';
         return `<div class="card" style="padding:16px 20px;">
-          <div style="font-size:13px;color:var(--gold-light);margin-bottom:8px;">⚔️ 你的对局已安排</div>
+          <div style="font-size:13px;color:var(--gold-light);margin-bottom:8px;">⚔️ 你的对局</div>
           ${rows.join('')}
-          <div style="font-size:12px;color:var(--text-dim);margin-top:6px;">对手未到场时可在房内等待；对局开始后离开页面可能被判负。</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:6px;">约定时间内完赛即可；赛事对局可随时离开后再回来继续，不会被判负。</div>
+        </div>`;
+      }
+
+      /** 待开始的赛事对局行（约战制）：点「开始赛事」即与指定对手建房开局 */
+      function pendingMatchRow(opponentId, round, loc) {
+        const attrs = `data-start-tn="${esc(T.id)}" data-node="${loc.nodeIndex != null ? loc.nodeIndex : ''}" data-round="${loc.round != null ? loc.round : ''}" data-pair="${loc.pairIndex != null ? loc.pairIndex : ''}"`;
+        return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:4px 0;font-size:13px;">
+          <span>${round ? `第 ${round} 轮 · ` : ''}对手：<span data-player-id="${esc(opponentId || '')}">${esc(nameOf(opponentId))}</span> <span style="color:var(--gold-light);">⏳ 待开始</span></span>
+          <button class="btn btn-primary btn-sm" ${attrs} type="button">⚔️ 开始赛事</button>
         </div>`;
       }
 
@@ -1114,6 +1138,28 @@
           global.Router.navigate(`play.html?room=${encodeURIComponent(d.roomId)}`);
         }
       }));
+      // 约战制（2026-10-11）：本页点「开始赛事」或对手发起 → 进同一对局房（带 &join=1 回位座位）
+      this._teardown.push(api.on('tournament_match_started', (d) => {
+        if (!d || !d.roomId) return;
+        toast(d.initiator ? '赛事对局已创建，祝好运！' : '对手发起了赛事对局，正在进入…');
+        global.Router.navigate(`play.html?room=${encodeURIComponent(d.roomId)}&join=1`);
+      }));
+      // 「开始赛事」按钮：容器级委托（tnMyArea 每次重绘但容器本身不变，委托只挂一次）
+      const myAreaEl = el('tnMyArea');
+      if (myAreaEl) {
+        myAreaEl.addEventListener('click', (e) => {
+          const btn = e.target.closest && e.target.closest('[data-start-tn]');
+          if (!btn) return;
+          const data = { tournamentId: btn.getAttribute('data-start-tn') };
+          const ni = btn.getAttribute('data-node');
+          const rd = btn.getAttribute('data-round');
+          const pi = btn.getAttribute('data-pair');
+          if (ni) data.nodeIndex = Number(ni);
+          if (rd) data.round = Number(rd);
+          if (pi) data.pairIndex = Number(pi);
+          api.send({ type: 'start_tournament_match', data });
+        });
+      }
 
       // 名单/待办队列里的操作按钮（2026-09-23，审查项 13f）：
       // 从"两处各自 querySelectorAll + 逐个绑定"改为**一处注册 + 整页委托**。
