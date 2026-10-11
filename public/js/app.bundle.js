@@ -4017,8 +4017,28 @@
   }
 
   // REST 工具
-  async function get(path) {
-    const res = await fetch(path);
+  /**
+   * GET 请求。
+   *
+   * ⚠️ 2026-10-10 修复（主办人「批准报名」入口消失）：`get` 必须能带身份。
+   * 服务端 `/api/tournaments/:id` 会按请求身份下发 `caps`（我能做什么），
+   * 早先这里裸 `fetch`，服务端 `actorOf()` 解析不到任何人 → `caps` 全 false →
+   * 前端 `renderManageArea()` 整块不渲染，主办人的「批准/拒绝报名、开始比赛」、
+   * 管理员的「设冠军」全部消失——看起来就像"找不到批准入口"。
+   * 身份头与 `postAuthed` 同口径（账号令牌 + 管理员令牌），保持一套来源。
+   *
+   * @param {string} path
+   * @param {{accountToken?: string, adminToken?: string}} [opts] 不传则保持匿名 GET
+   */
+  async function get(path, opts) {
+    const o = opts || {};
+    const h = {};
+    if (o.accountToken) h['x-account-token'] = o.accountToken;
+    try {
+      const at = o.adminToken || localStorage.getItem(window.NAV && window.NAV.ADMIN_KEY);
+      if (at) h['x-admin-token'] = at;
+    } catch (_) { /* 隐私模式读不到存储：当作没有管理员身份 */ }
+    const res = await fetch(path, { headers: h });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   }
@@ -7801,7 +7821,9 @@
       async function load() {
         if (!tid) return showError('链接里没有赛事 id，请从赛事列表进入。');
         try {
-          const d = await global.ApiUtils.get(`/api/tournaments/${encodeURIComponent(tid)}`);
+          // ⚠️ 必须带身份：服务端按请求者下发 `caps`（决定管理面板/批准按钮显隐）。
+          // 裸 GET 会被当成游客 → caps 全 false → 主办人的批准入口整块消失（2026-10-10 修复）。
+          const d = await global.ApiUtils.get(`/api/tournaments/${encodeURIComponent(tid)}`, { accountToken: guest.id });
           if (!alive) return; // 已切页：不再触碰 DOM
           T = d.tournament;
           caps = d.caps || {};
@@ -7825,6 +7847,12 @@
         if (res && res.tournament) T = res.tournament;
         if (okMsg) toast(okMsg);
         renderAll();
+        // ⚠️ caps 与**状态**相关（如"取消"只在未结束时、"编辑备注"只在已存档时）：
+        // 只换 T 不刷新 caps，会让按钮显隐滞后一拍（该消失的还在、点了才报状态错误）。
+        // 静默重拉一次详情即可对齐，失败不影响本次渲染（下次操作会再刷）。
+        global.ApiUtils.get(`/api/tournaments/${encodeURIComponent(tid)}`, { accountToken: guest.id })
+          .then((d) => { if (alive && d && d.caps) { caps = d.caps; isAdmin = !!d.viewerIsAdmin; renderAll(); } })
+          .catch(() => {});
       }
 
       async function post(path, body, okMsg) {
@@ -12617,7 +12645,11 @@ function renderMoveList(st) {
     const timeTxt = (spent || cum) ? ' <span style="color:var(--text-dim);font-size:11px;">(' + fmt(spent) + '/' + fmt(cum) + ')</span>' : '';
     // ⚠️ 2026-10-02 审查 P3：走子文本做防御性转义（同 play-demo.js 用 escHtml）——
     // 来源虽为服务端生成，仍应转义，避免将来引入用户可控内容时成为 XSS 面。
-    const safeLabel = (typeof esc === 'function') ? esc(label) : String(label);
+    // ⚠️ 2026-10-10 修复：原写法 `typeof esc === 'function' ? esc(label) : String(label)`
+    // 里的 `esc` **从未定义**——typeof 守卫让它静默走 fallback，等于"声称转义、实际没转义"
+    // （防御完全空转）。改为调用真实存在的 `UI.esc`。
+    const escFn = (global.UI && global.UI.esc) || ((x) => String(x));
+    const safeLabel = escFn(label);
     return `<div class="move-row"><span class="no">${i + 1}</span><span>${player} ${safeLabel}${timeTxt}</span></div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;

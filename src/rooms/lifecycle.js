@@ -570,9 +570,27 @@ module.exports = function applyLifecycle(X) {
       return { roomId };
     },
 
+    /**
+     * 取玩家的**对外显示名**。多级回退，任何一级拿到就返回：
+     *  1. 会话显示名（identify/markAccountSession 维护，改名即时同步）；
+     *  2. **账号昵称**（`accounts` 的 nickname，显示名的权威源）——
+     *     ⚠️ 2026-10-10 修复（"对局里对手显示的是 id 不是昵称"）：此前只有 1) + 直接
+     *     `playerId.slice(0, 6)`，一旦会话缺失就显示成 id 前 6 位。会话缺失并不罕见：
+     *     存量老账号（会话还在旧存储里没迁进 kv）、备份恢复后 accounts.json 在但 sessions 丢了、
+     *     游客升级账号的迁移半途失败——这些场景下账号明明有昵称，对局里却挂着一串 id。
+     *  3. 最后才是 id 截断（连账号都查不到时的兜底，保持原行为）。
+     */
     _playerName(playerId) {
+      if (!playerId) return '未知';
       const sess = require('../auth').load(playerId);
-      return sess && sess.name ? sess.name : playerId.slice(0, 6);
+      if (sess && sess.name) return sess.name;
+      try {
+        const accounts = require('../accounts');
+        const acct = accounts.getPublicCard(playerId) || accounts.getAccount(playerId);
+        const n = acct && (acct.nickname || acct.username);
+        if (n) return n;
+      } catch (_) { /* accounts 不可用时走最后兜底 */ }
+      return playerId.slice(0, 6);
     },
 
     /**

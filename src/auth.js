@@ -276,9 +276,16 @@ function publicInfo(session) {
 function upsertSession(id, name) {
   if (!id) return null;
   const existing = getSessionRaw(id);
+  // ⚠️ 2026-10-10 修复：`name` 未传时**保留原名**。原实现 `String(name || '无名棋士')` 会把
+  // 已有昵称抹成"无名棋士"——迁移补账号标记（`markAccountSession(accountId)` 不带 name）等
+  // 「只想补字段、不想改名」的调用会静默清掉用户的显示名。
+  const keepName = existing && typeof existing.name === 'string' && existing.name.trim();
+  const nextName = (name != null && String(name).trim())
+    ? String(name)
+    : (keepName || '无名棋士');
   const session = Object.assign({}, existing, {
     id,
-    name: String(name || '无名棋士').slice(0, 16) || '无名棋士',
+    name: nextName.slice(0, 16) || '无名棋士',
     createdAt: (existing && existing.createdAt) || Date.now(),
     lastSeen: Date.now(),
   });

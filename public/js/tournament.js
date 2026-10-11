@@ -244,7 +244,9 @@
       async function load() {
         if (!tid) return showError('链接里没有赛事 id，请从赛事列表进入。');
         try {
-          const d = await global.ApiUtils.get(`/api/tournaments/${encodeURIComponent(tid)}`);
+          // ⚠️ 必须带身份：服务端按请求者下发 `caps`（决定管理面板/批准按钮显隐）。
+          // 裸 GET 会被当成游客 → caps 全 false → 主办人的批准入口整块消失（2026-10-10 修复）。
+          const d = await global.ApiUtils.get(`/api/tournaments/${encodeURIComponent(tid)}`, { accountToken: guest.id });
           if (!alive) return; // 已切页：不再触碰 DOM
           T = d.tournament;
           caps = d.caps || {};
@@ -268,6 +270,12 @@
         if (res && res.tournament) T = res.tournament;
         if (okMsg) toast(okMsg);
         renderAll();
+        // ⚠️ caps 与**状态**相关（如"取消"只在未结束时、"编辑备注"只在已存档时）：
+        // 只换 T 不刷新 caps，会让按钮显隐滞后一拍（该消失的还在、点了才报状态错误）。
+        // 静默重拉一次详情即可对齐，失败不影响本次渲染（下次操作会再刷）。
+        global.ApiUtils.get(`/api/tournaments/${encodeURIComponent(tid)}`, { accountToken: guest.id })
+          .then((d) => { if (alive && d && d.caps) { caps = d.caps; isAdmin = !!d.viewerIsAdmin; renderAll(); } })
+          .catch(() => {});
       }
 
       async function post(path, body, okMsg) {

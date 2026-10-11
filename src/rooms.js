@@ -68,6 +68,11 @@ class RoomManager {
     //    已评估「仅快照有变更的房间 / 分批」的增量方案，因需覆盖 clock 每秒 tick 等全部写入点、
     //    漏标即静默丢状态（漏存风险高），暂保持全量。详见 `rooms/snapshot.js` 的 `_snapshotAll()` 说明。
     this._snapshotTimer = setInterval(() => this._snapshotAll(), SNAPSHOT_INTERVAL_MS);
+    // ⚠️ 后台清扫/快照定时器一律 `unref()`（2026-10-10）：它们是**后台任务**，
+    // 不该阻止进程退出。此前未 unref，任何拉起 `http/context`（new Protocol → new Rooms）
+    // 的测试进程都会被这两个 interval 钉住不退——`items-security.test.js` 因此挂死，
+    // `npm test` 整体卡住。生产无影响：http server 的监听句柄本来就撑着进程。
+    if (this._snapshotTimer.unref) this._snapshotTimer.unref();
     // FINISHED 房间定期清理（见 `_cleanupFinished`：完全无连接的房间按 NO_MEMBER_CLEANUP_MS
     // 回收；仍有人在的（感想战中）按 FINISHED_TTL_MS 自最后活动起回收）
     // ⚠️ 2026-10-02 体验修复（零散笔误）：原注释写"已结束 5 分钟以上即删除"——
@@ -77,6 +82,7 @@ class RoomManager {
     //    生产默认（2min/30min）仍每 60s 巡检一次，语义不变。
     const _sweepMs = Math.max(1000, Math.min(60 * 1000, NO_MEMBER_CLEANUP_MS, FINISHED_TTL_MS));
     this._finishedCleanupTimer = setInterval(() => this._cleanupFinished(), _sweepMs);
+    if (this._finishedCleanupTimer.unref) this._finishedCleanupTimer.unref(); // 同上：后台清扫，不阻止退出
     // 赛事建房工厂：供 tournaments 层推进对阵表时创建对局
     tournaments.setMatchFactory((tournamentId, playerIds) =>
       this.createTournamentMatch(tournamentId, playerIds));

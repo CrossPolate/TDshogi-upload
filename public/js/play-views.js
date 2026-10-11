@@ -262,7 +262,11 @@ function renderMoveList(st) {
     const timeTxt = (spent || cum) ? ' <span style="color:var(--text-dim);font-size:11px;">(' + fmt(spent) + '/' + fmt(cum) + ')</span>' : '';
     // ⚠️ 2026-10-02 审查 P3：走子文本做防御性转义（同 play-demo.js 用 escHtml）——
     // 来源虽为服务端生成，仍应转义，避免将来引入用户可控内容时成为 XSS 面。
-    const safeLabel = (typeof esc === 'function') ? esc(label) : String(label);
+    // ⚠️ 2026-10-10 修复：原写法 `typeof esc === 'function' ? esc(label) : String(label)`
+    // 里的 `esc` **从未定义**——typeof 守卫让它静默走 fallback，等于"声称转义、实际没转义"
+    // （防御完全空转）。改为调用真实存在的 `UI.esc`。
+    const escFn = (global.UI && global.UI.esc) || ((x) => String(x));
+    const safeLabel = escFn(label);
     return `<div class="move-row"><span class="no">${i + 1}</span><span>${player} ${safeLabel}${timeTxt}</span></div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;

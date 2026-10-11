@@ -150,8 +150,28 @@
   }
 
   // REST 工具
-  async function get(path) {
-    const res = await fetch(path);
+  /**
+   * GET 请求。
+   *
+   * ⚠️ 2026-10-10 修复（主办人「批准报名」入口消失）：`get` 必须能带身份。
+   * 服务端 `/api/tournaments/:id` 会按请求身份下发 `caps`（我能做什么），
+   * 早先这里裸 `fetch`，服务端 `actorOf()` 解析不到任何人 → `caps` 全 false →
+   * 前端 `renderManageArea()` 整块不渲染，主办人的「批准/拒绝报名、开始比赛」、
+   * 管理员的「设冠军」全部消失——看起来就像"找不到批准入口"。
+   * 身份头与 `postAuthed` 同口径（账号令牌 + 管理员令牌），保持一套来源。
+   *
+   * @param {string} path
+   * @param {{accountToken?: string, adminToken?: string}} [opts] 不传则保持匿名 GET
+   */
+  async function get(path, opts) {
+    const o = opts || {};
+    const h = {};
+    if (o.accountToken) h['x-account-token'] = o.accountToken;
+    try {
+      const at = o.adminToken || localStorage.getItem(window.NAV && window.NAV.ADMIN_KEY);
+      if (at) h['x-admin-token'] = at;
+    } catch (_) { /* 隐私模式读不到存储：当作没有管理员身份 */ }
+    const res = await fetch(path, { headers: h });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   }
