@@ -122,15 +122,10 @@ function startSwissRound(t, roundNo) {
   }
 
   paired.pairs.forEach(([a, b], i) => {
-    const pa = (t.players || []).find((x) => x.id === a) || { id: a, name: '?' };
-    const pb = (t.players || []).find((x) => x.id === b) || { id: b, name: '?' };
-    const res = store.matchFactory ? store.matchFactory(t.id, [pa, pb]) : null;
-    rec.matchIds[i] = (res && res.roomId) ? res.roomId : null;
-    if (rec.matchIds[i]) rec.matchPairs[rec.matchIds[i]] = [a, b];
-    else {
-      // 建房失败不能让整轮**静默卡住**：没有房就永远等不到结果，这里必须留下痕迹
-      log.error('tournament', `瑞士制第 ${roundNo} 轮建房失败`, { tournamentId: t.id, players: [a, b] });
-    }
+    // 约战制（2026-10-11）：**只记录配对，不自动建房**。
+    // `matchIds[i]` 留空，待选手在大厅快速匹配里点「开始赛事」时由
+    // `tournaments.startMatch` 建房并回填（matchPairs 也在那一刻写入）。
+    rec.matchIds[i] = null;
   });
 
   t.rounds = (t.rounds || []).concat([rec]);

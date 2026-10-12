@@ -44,6 +44,7 @@ const C2S = {
   CREATE_TOURNAMENT: 'create_tournament',
   JOIN_TOURNAMENT: 'join_tournament',
   JOIN_TOURNAMENT_MATCH: 'join_tournament_match',
+  START_TOURNAMENT_MATCH: 'start_tournament_match', // 2026-10-11 约战制：选手发起「开始赛事」
   DEMO_ENTER: 'demo_enter',
   DEMO_MOVE: 'demo_move',
   DEMO_UNDO: 'demo_undo',

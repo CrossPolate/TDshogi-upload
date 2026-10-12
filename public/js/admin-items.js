@@ -77,6 +77,7 @@
         fillItemSelect();
         loadAssets();
         loadBgmRoles();
+        loadItemsLogs();   // 2026-10-12：发放记录（流水）随 tab 一起拉
       } catch (e) {
         if (!alive()) return;
         if (box) box.innerHTML = empty('加载道具目录失败');
@@ -141,6 +142,9 @@
       if (price !== null && !Number.isFinite(price)) return toast('价格必须是数字或留空（免费）');
       const kind = type === 'bgm' ? 'audio' : (assetVal.charAt(0) === '/' ? 'image' : 'glyph');
       const roleVal = type === 'bgm' && $('itemEditBgmRole') ? (($('itemEditBgmRole').value) || '').trim() : '';
+      // ⚠️ 2026-10-12（P1-④）：BGM 商品**必须选场景**——缺 role 的 BGM 用户买了/收到也装不上
+      //（装备请求槽位退化成 'bgm' → BAD_SLOT）。服务端另有归一兜底，这里给到明确提示。
+      if (type === 'bgm' && !roleVal) return toast('BGM 商品请选择使用场景（菜单 / 开局 / 终盘）');
       try {
         const body = {
           id, type: type === 'bgm' ? 'bgm' : type, name: name || id, desc, rarity, price,
@@ -286,7 +290,8 @@
     async function lookupAccount() {
       const raw = (($('itemAccountId') && $('itemAccountId').value) || '').trim();
       const box = $('itemAccountResult');
-      if (!raw) { if (box) box.innerHTML = empty('请填写账号 id'); return null; }
+      // ⚠️ 2026-10-12：支持「账号 id / 令牌 / 用户名」三种输入（服务端 resolveItemTarget 终检存在性）
+      if (!raw) { if (box) box.innerHTML = empty('请填写账号 id / 令牌 / 用户名'); return null; }
       if (box) box.innerHTML = loading('正在查询…');
       try {
         const data = await apiGet(`/api/admin/items/account/${encodeURIComponent(raw)}`);
@@ -314,7 +319,7 @@
         }).join('、') || '（无）';
       box.innerHTML = `
         <div style="font-size:13px;line-height:1.9;">
-          <div>账号：<b>${esc(data.accountId)}</b></div>
+          <div>账号：<b>${esc(data.toName || data.accountId)}</b><span style="color:var(--text-dim);font-size:11px;margin-left:8px;">${esc(data.accountId)}</span></div>
           <div>💰 货币：<b style="color:var(--gold-light);">${esc(String(data.wallet && data.wallet.coin || 0))}</b></div>
           <div>拥有（${(data.owned || []).length} 件）：${owned}</div>
           <div style="color:var(--text-dim);font-size:12px;">已装备：${eq}</div>
@@ -331,7 +336,7 @@
       try {
         const r = await apiPost(`/api/admin/items/account/${encodeURIComponent(raw)}/grant`, { itemId });
         if (!alive()) return;
-        toast(`已发放（该账号现拥有 ${r.owned.length} 件）`);
+        toast(`已发放给「${r.toName || raw}」（现拥有 ${r.owned.length} 件）`);
         lookupAccount();
       } catch (e) { onErr(e); }
     }
@@ -344,7 +349,7 @@
       try {
         const r = await apiPost(`/api/admin/items/account/${encodeURIComponent(raw)}/coin`, { amount });
         if (!alive()) return;
-        toast(`已处理，该账号货币现为 ${r.wallet.coin}`);
+        toast(`已${amount > 0 ? '加币' : '扣币'}给「${r.toName || raw}」，货币现为 ${r.wallet.coin}`);
         lookupAccount();
       } catch (e) { onErr(e); }
     }
@@ -363,9 +368,46 @@
       } catch (e) { onErr(e); }
     }
 
+    // ---------------- 发放记录（流水）----------------
+
+    /**
+     * 拉取发放流水并渲染 —— 2026-10-12 补齐（此前只有 API 没有界面，等于看不到）。
+     * 每条含：时间 / 类型 / 内容 / 收件人 / **操作人**（操作人缺失时流水无法对账）。
+     */
+    async function loadItemsLogs() {
+      const box = $('itemsLogList');
+      if (!box) return;
+      box.innerHTML = loading('正在加载发放记录…');
+      try {
+        const d = await apiGet('/api/admin/items/logs?n=50');
+        if (!alive()) return;
+        const logs = d.logs || [];
+        if (!logs.length) { box.innerHTML = empty('暂无发放记录'); return; }
+        const KIND = { item: '发放道具', coin: '加减货币', buy: '玩家购买', redeem: '兑换码' };
+        box.innerHTML = logs.map((l) => {
+          const when = new Date(l.at).toLocaleString();
+          const what = l.kind === 'coin'
+            ? `💰 ${Number(l.coinDelta) > 0 ? '+' : ''}${l.coinDelta} 币`
+            : `🎁 ${esc(l.itemId || l.kind)}`;
+          return '<div class="record-item" style="font-size:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'
+            + `<span style="color:var(--text-dim);min-width:132px;">${esc(when)}</span>`
+            + `<span style="min-width:64px;">${esc(KIND[l.kind] || l.kind)}</span>`
+            + `<span style="flex:1;min-width:120px;">${what}</span>`
+            + `<span style="color:var(--text-dim);min-width:150px;">→ ${esc(l.accountId || '—')}</span>`
+            + `<span style="color:var(--gold-light);min-width:96px;">操作人 ${esc(l.adminId || '—')}</span>`
+            + '</div>';
+        }).join('');
+      } catch (e) {
+        if (!alive()) return;
+        box.innerHTML = empty('发放记录加载失败');
+        onErr(e);
+      }
+    }
+
     // ---------------- 事件绑定（本模块自己绑，句柄记 teardown 由 unmount 全清）----------------
     const bind = (id, fn) => { on($(id), 'click', fn); };
     bind('btnItemsRefresh', () => loadItemsAdmin());
+    bind('btnItemsLogs', () => loadItemsLogs());
     bind('btnItemLookup', () => lookupAccount());
     bind('btnItemGrant', () => doGrant());
     bind('btnItemCoin', () => doCoin());

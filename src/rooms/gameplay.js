@@ -350,15 +350,19 @@ module.exports = function applyGameplay(X) {
         this.clientToRoom.delete(clientId);
         return { ok: true };
       }
-      // 对局中离开 → 判「离开座位」负（而不是当前手番方）
-      // 修复：原 resultDetail 写「投了」误导对手；中途退出/断线超时应提示「接続切断」
-      if (room.status === 'PLAYING' && !room.game.isGameOver()) {
+      // ⚠️ 2026-10-11（问题1）：**赛事对局主动退出不判负**。
+      // 赛事是"双方在规定时间段内完赛"，选手可以先离开、稍后回大厅点「开始赛事」或从赛事页
+      // 重新进入继续；若像普通对局那样一退出就判负，就永远回不到自己的比赛了。
+      // 普通对局**维持原行为**（退出=认输），否则快速匹配会被挂机党滥用。
+      if (room.status === 'PLAYING' && !room.game.isGameOver() && !room.tournamentId) {
         // 聊天区留痕（2026-09-20）：与「掉线等待重连」区分——主动退出是**立即判负**，
         // 对手看到的消息必须说清是哪一种，否则会以为还有 60 秒宽限。
         this._sysChat(room, `🚪 ${(room.players[seat.seat] || {}).name || '对手'} 退出了对局（判负）`, 'player-exit');
         room.game.result = seat.seat === 'b' ? 'w' : 'b';
         room.game.resultDetail = '接続切断';
         this._checkGameOver(room);
+      } else if (room.tournamentId && room.status === 'PLAYING' && !room.game.isGameOver()) {
+        this._sysChat(room, `🚪 ${(room.players[seat.seat] || {}).name || '对手'} 暂时离开（赛事对局不判负，可随时回来继续）`, 'player-exit');
       }
       this._unbindClient(clientId);
       return { ok: true };

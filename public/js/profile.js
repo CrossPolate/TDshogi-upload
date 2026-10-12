@@ -923,7 +923,9 @@
           const free = it.price === null;
           // BGM 有唯一使用场景（role→bgm-menu/game/endgame）；其余按 type 匹配槽位
           const isBgm = it.type === 'bgm';
-          const equipSlot = isBgm && it.role ? 'bgm-' + it.role : it.type;
+          // ⚠️ 2026-10-12（P1-④）：槽位用服务端下发的 `it.equipSlot`（唯一真相源），不再自算——
+          // 自算遇到"缺 role 的 BGM"会退化成 'bgm'（非法槽 → 装备必报「槽位不合法」）。
+          const equipSlot = it.equipSlot || (isBgm && it.role ? 'bgm-' + it.role : it.type);
           const equippedSlot = snap.equipped && snap.equipped[equipSlot] === it.id ? equipSlot : null;
           const rarity = it.rarity || 'N';
           const unlocked = unlockHint(it);

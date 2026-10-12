@@ -64,7 +64,7 @@
       el.innerHTML = users.map((u) => `
     <div class="record-item">
       <div style="font-size:13px;display:flex;justify-content:space-between;gap:10px;">
-        <span>${u.isAccount ? '<span title="正式账号">🔐</span>' : '<span title="游客">👤</span>'} ${esc(u.name)}${u.title ? `（${esc(u.title)}）` : ''} <span style="color:var(--text-dim);font-size:11px;">(${u.id})</span></span>
+        <span>${u.isAccount ? '<span title="正式账号">🔐</span>' : '<span title="游客">👤</span>'} ${esc(u.name)}${u.title ? `（${esc(u.title)}）` : ''} <span style="color:var(--text-dim);font-size:11px;">(${u.id})</span><button class=\"btn btn-ghost btn-sm\" style=\"padding:0 5px;font-size:10px;margin-left:3px;line-height:1.4;\" data-act=\"user-copy-id\" data-id=\"${esc(u.id)}\" title=\"复制 id（发放道具时用）\">📋 复制</button></span>
         <span style="font-size:11px;">${u.banned ? '<span style="color:var(--red-light);">⛔ 封禁中</span>' : ''}</span>
       </div>
       <div class="r-result result-win">Lv.${u.level || 0} · ELO ${u.rating}</div>
@@ -167,6 +167,15 @@
           : `<button class="btn btn-ghost btn-sm" data-act="user-ban" data-id="${esc(id)}" data-name="${esc(data.name)}">⛔ 封禁</button>`}
         ${data.isAccount ? `<button class="btn btn-ghost btn-sm" data-act="user-delete" data-id="${esc(id)}" data-name="${esc(data.name)}" style="color:var(--red-light);">🗑 删除账号</button>` : ''}
       </div>
+      ${data.isAccount ? `<div style="font-size:14px;font-weight:700;margin:14px 0 6px;">🕘 🎁 发放道具 / 货币 <span style="font-size:11px;color:var(--text-dim);font-weight:400;">（直接发给该用户，不必再手抄 id）</span></div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:12px;">
+        <div><div style="font-size:11px;color:var(--text-dim);">道具</div>
+          <select class="input" id="userGrantItem" style="width:200px;"><option value="">（选择道具）</option></select></div>
+        <button class="btn btn-primary btn-sm" data-act="user-grant-item" data-id="${esc(id)}" data-name="${esc(data.name)}">🎁 发放道具</button>
+        <div><div style="font-size:11px;color:var(--text-dim);">货币（正数加 / 负数扣）</div>
+          <input class="input" id="userGrantCoin" type="number" step="1" style="width:120px;" placeholder="如 100"></div>
+        <button class="btn btn-primary btn-sm" data-act="user-grant-coin" data-id="${esc(id)}" data-name="${esc(data.name)}">💰 发放货币</button>
+      </div>` : `<div style="font-size:12px;color:var(--text-dim);margin:14px 0 12px;padding:8px 12px;border:1px dashed var(--border);border-radius:8px;">👤 该用户是游客，不能持有道具 / 装扮（注册为账号后才可发放）。</div>`}
       <div style="font-size:14px;font-weight:700;margin:14px 0 6px;">🕘 最近登录记录（${events.length}）</div>
       ${events.length ? `<div style="max-height:180px;overflow-y:auto;margin-bottom:10px;">${events.map((e) => `
         <div style="font-size:11px;padding:3px 0;border-bottom:1px solid rgba(128,128,128,0.12);color:var(--text-dim);">
@@ -179,6 +188,7 @@
         return `<div style="font-size:12px;padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.15);">${esc(names[0])} vs ${esc(names[1])} — ${esc(res)}（${r.moveCount || 0}手）</div>`;
       }).join('') : '<div style="color:var(--text-dim);font-size:12px;">暂无对局</div>'}
     `;
+        fillUserGrantSelect(); // 发放下拉（详情内直接发道具/货币，2026-10-12）
         const detailModal = $('userDetailModal');
         if (!detailModal) return;
         detailModal.style.display = 'flex';
@@ -288,6 +298,55 @@
           if (global.A11y) global.A11y.onDialogClose(dmClose);
         }
         loadUsers();
+      } catch (e) { if (alive()) toast(e.message); }
+    };
+
+    // ⚠️ 2026-10-12（道具发放 P0-③）：用户详情内**直接发放**，不再让管理员跨 tab 手抄 24 hex id。
+    async function fillUserGrantSelect() {
+      const sel = $('userGrantItem');
+      if (!sel) return;
+      try {
+        const d = await global.ApiUtils.get(`/api/admin/items/catalog?token=${encodeURIComponent(getToken())}`);
+        const cat = (d && d.catalog) || [];
+        const keep = sel.value;
+        sel.innerHTML = '<option value="">（选择道具）</option>'
+          + cat.map((it) => `<option value="${esc(it.id)}">${esc(it.name || it.id)}（${esc(it.type)}）</option>`).join('');
+        if (keep) sel.value = keep;
+      } catch (_) { /* 目录拉取失败不阻断详情展示 */ }
+    }
+
+    hub.adminCopyId = async (id) => {
+      try {
+        await navigator.clipboard.writeText(String(id));
+        toast('已复制 id（发放道具时可直接粘贴）');
+      } catch (_) {
+        // 无 Clipboard API（非安全上下文）时的退化路径
+        prompt('复制该 id（Ctrl/Cmd+C）：', String(id));
+      }
+    };
+
+    hub.adminGrantItem = async (id, name) => {
+      const sel = $('userGrantItem');
+      const itemId = sel && sel.value;
+      if (!itemId) return toast('请先选择要发放的道具');
+      const itName = (sel.selectedOptions && sel.selectedOptions[0] && sel.selectedOptions[0].textContent) || itemId;
+      if (!confirm(`确认给「${name}」发放「${itName}」？`)) return;
+      try {
+        const r = await adminPost(`/api/admin/items/account/${encodeURIComponent(id)}/grant`, { itemId });
+        toast(`已发放给「${r.toName || name}」（现拥有 ${(r.owned || []).length} 件）`);
+        loadUsers(); hub.viewUser(id);
+      } catch (e) { if (alive()) toast(e.message); }
+    };
+
+    hub.adminGrantCoin = async (id, name) => {
+      const rawVal = (($('userGrantCoin') && $('userGrantCoin').value) || '').trim();
+      const amount = Number(rawVal);
+      if (!rawVal || !Number.isFinite(amount) || amount === 0) return toast('货币需为非零整数');
+      if (!confirm(`确认给「${name}」${amount > 0 ? '增加' : '扣减'} ${Math.abs(amount)} 货币？`)) return;
+      try {
+        const r = await adminPost(`/api/admin/items/account/${encodeURIComponent(id)}/coin`, { amount });
+        toast(`已${amount > 0 ? '加币' : '扣币'}给「${r.toName || name}」，货币现为 ${(r.wallet || {}).coin}`);
+        loadUsers(); hub.viewUser(id);
       } catch (e) { if (alive()) toast(e.message); }
     };
 

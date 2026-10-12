@@ -90,6 +90,10 @@ module.exports = function applyClock(X) {
         curByoyomi: room.curByoyomi ? { ...room.curByoyomi } : null,
         inByoyomi: room.inByoyomi ? { ...room.inByoyomi } : null,
         turn: room.game.turn,
+        // ⚠️ 2026-10-12（读秒语音包）：报时口径随时间制下发（包干=主时钟报数含剩1分；
+        //    读秒局=进读秒才报数）。客户端照此播报，不再自己猜规则。
+        //    行内 require：避免在文件顶部再加一条依赖（同 admin.js 的做法）。
+        announce: require('./config').announceFor(room.timeControl),
       };
     },
   });

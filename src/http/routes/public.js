@@ -7,7 +7,7 @@
 'use strict';
 
 const records = require('../../records');
-const { protocol, VERSION, resolvePlayer } = require('../context');
+const { protocol, VERSION, resolvePlayer, resolveAccount } = require('../context');
 
 module.exports = function registerPublic(app) {
   // 首页数据（附版本号——排障时用 curl 即可确认进程跑的是哪份代码）
@@ -17,7 +17,10 @@ module.exports = function registerPublic(app) {
 
   // 大厅数据（进行中对局 / 公告 / 排行）
   app.get('/api/lobby', (req, res) => {
-    res.json(protocol.lobbyData());
+    // 带身份（账号令牌 / 游客 id）时附带「我可进行的赛事对局」，供快速匹配区渲染「开始赛事」按钮。
+    // ⚠️ 解析身份只走 context 的唯一点：`resolveAccount`（令牌）优先，回退 `resolvePlayer`（游客 id）。
+    const who = resolveAccount(req) || resolvePlayer(req.query.player);
+    res.json(protocol.lobbyData(who));
   });
 
   // 个人数据

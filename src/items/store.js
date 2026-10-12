@@ -27,7 +27,7 @@ let cache = null;
 /** 归一化：补齐四个顶层分区的对象（老数据/坏数据兜底） */
 function normalize(data) {
   const d = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
-  for (const k of ['wallets', 'inventory', 'equipped', 'codes']) {
+  for (const k of ['wallets', 'inventory', 'equipped', 'codes', 'logs']) {
     if (!d[k] || typeof d[k] !== 'object' || Array.isArray(d[k])) d[k] = {};
   }
   return d;
@@ -70,12 +70,16 @@ function wallet(accountId) {
   return { coin: (w && Number.isFinite(w.coin)) ? w.coin : 0 };
 }
 
-/** 增减余额（delta 可为负），返回 {ok:true, coin} 或 {ok:false, ...} */
-function addCoin(accountId, delta) {
+/**
+ * 增减余额（delta 可为负），返回 {ok:true, coin} 或 {ok:false, ...}
+ * @param {object} [actor] 操作者（如 `{adminId}`）——随流水落盘，供后台对账/追责
+ */
+function addCoin(accountId, delta, actor) {
   const id = String(accountId);
   return withRollback((c) => {
     const cur = (c.wallets[id] && Number.isFinite(c.wallets[id].coin)) ? c.wallets[id].coin : 0;
     c.wallets[id] = { coin: cur + delta };
+    writeLog(c, { kind: 'coin', accountId: id, coinDelta: delta, source: (actor && actor.source) || 'admin' }, actor);
     return { coin: c.wallets[id].coin };
   });
 }
@@ -94,12 +98,16 @@ function has(accountId, itemId) {
   return !!(inv && inv[itemId]);
 }
 
-/** 发放道具（已拥有则保留首次获得时间），返回 {ok:true, owned} 或 {ok:false, ...} */
-function addItem(accountId, itemId, source) {
+/**
+ * 发放道具（已拥有则保留首次获得时间），返回 {ok:true, owned} 或 {ok:false, ...}
+ * @param {object} [actor] 操作者（如 `{adminId}`）——随流水落盘，供后台对账/追责
+ */
+function addItem(accountId, itemId, source, actor) {
   const id = String(accountId);
   return withRollback((c) => {
     const inv = c.inventory[id] || (c.inventory[id] = {});
     if (!inv[itemId]) inv[itemId] = { at: Date.now(), source: source || 'grant' };
+    writeLog(c, { kind: 'item', accountId: id, itemId, source: source || 'grant' }, actor);
     return { owned: Object.keys(inv) };
   });
 }
@@ -200,6 +208,7 @@ function buyItem(accountId, itemId, price) {
     if (!inv[itemId]) inv[itemId] = { at: Date.now(), source: 'buy' };
     const cur = (c.wallets[id] && Number.isFinite(c.wallets[id].coin)) ? c.wallets[id].coin : 0;
     c.wallets[id] = { coin: cur - price };
+    writeLog(c, { kind: 'buy', accountId: id, itemId, coinDelta: -price, source: 'buy' });
     return { owned: Object.keys(inv), wallet: { coin: c.wallets[id].coin } };
   });
 }
@@ -226,11 +235,64 @@ function applyCode(accountId, itemId, coinDelta, code) {
       if (!Array.isArray(entry.redeemedBy)) entry.redeemedBy = [];
       if (!entry.redeemedBy.includes(id)) entry.redeemedBy.push(id);
     }
+    writeLog(c, {
+      kind: 'redeem', accountId: id, itemId: itemId || null,
+      coinDelta: coinDelta || 0, source: 'redeem', code,
+    });
     return {
       owned: c.inventory[id] ? Object.keys(c.inventory[id]) : [],
       wallet: { coin: (c.wallets[id] && c.wallets[id].coin) || 0 },
     };
   });
+}
+
+// ---------------- 发放 / 货币流水（append-only） ----------------
+// ⚠️ 2026-10-12（P2-⑥）：每笔发放 / 加币 / 购买 / 兑换**与变更同事务**写一条流水，
+// 供后台对账、排查滥发、错发纠正。此前只有 adminAction 审计，事后查不出"谁给谁发过
+// 什么、发了几件"。只增不改（append-only），随 items.json 落盘（后续关系化可平移到表）。
+//
+// ⚠️ 2026-10-12 二轮补齐三点：
+//  ① **记操作者**：`actor.adminId` —— 缺了它就无法真正对账（只能拿时间戳跟 adminAction 对齐，很脆）；
+//  ② **上限裁剪**：`LOG_MAX` 条封顶，超出删最旧的 —— 否则流水只增不减，而 items.json 每次
+//     变更都要整块重写（withRollback 全量深拷贝 + 落盘），会持续放大写入成本；
+//  ③ **key 唯一**：`logSeq` 重启后会归零，直接拼 `${at}-${seq}` 有撞键覆盖风险，这里用重试兜住。
+const LOG_MAX = 2000; // 流水保留上限（超出删最旧）
+let logSeq = 0;
+
+/**
+ * 写一条流水（与业务变更同一个 withRollback 事务里调用，落盘失败会一起回滚）。
+ * @param {object} c 缓存（withRollback 传入的可变引用）
+ * @param {object} entry 流水字段（kind/accountId/itemId/coinDelta/source/code…）
+ * @param {object} [actor] 操作者 `{ adminId }`（发放/加币必传；buy/redeem 无须）
+ */
+function writeLog(c, entry, actor) {
+  if (!c.logs || typeof c.logs !== 'object' || Array.isArray(c.logs)) c.logs = {};
+  const at = Date.now();
+  let key = `${at}-${String(++logSeq).padStart(4, '0')}`;
+  // 同毫秒 + 重启后 seq 归零 会撞 key → 重试直到唯一（绝不覆盖已有流水）
+  let guard = 0;
+  while (c.logs[key] && guard++ < 1000) {
+    key = `${at}-${String(++logSeq).padStart(4, '0')}`;
+  }
+  const rec = Object.assign({ at }, entry);
+  // 操作者：只留非敏感标识（绝不落 token 本身，见 adminWrite 的同款约定）
+  if (actor && actor.adminId) rec.adminId = String(actor.adminId);
+  c.logs[key] = rec;
+  // 上限裁剪：删最旧（key 前缀是毫秒时间戳，字典序即时间序）
+  const keys = Object.keys(c.logs);
+  if (keys.length > LOG_MAX) {
+    keys.sort();
+    for (let i = 0; i < keys.length - LOG_MAX; i++) delete c.logs[keys[i]];
+  }
+}
+
+/** 最近 n 条流水（按时间倒序），供后台「发放记录」 */
+function recentLogs(n) {
+  const logs = getCache().logs || {};
+  return Object.keys(logs)
+    .map((k) => Object.assign({ id: k }, logs[k]))
+    .sort((a, b) => (b.at - a.at) || String(b.id).localeCompare(String(a.id)))
+    .slice(0, Math.max(1, Number(n) || 50));
 }
 
 module.exports = {
@@ -240,4 +302,5 @@ module.exports = {
   equipped, setEquipped,
   getCode, defineCode, useCode,
   buyItem, applyCode,
+  writeLog, recentLogs,
 };

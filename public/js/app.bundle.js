@@ -591,17 +591,151 @@
   }
 
   /** 读秒滴答：高频短「嗒」（⚠️ 2026-10-08：读秒音从设置迁入装扮，可换文件方案） */
-  let byoyomiVariant = 'default'; // 'default'（合成）/ 文件 URL
+  let byoyomiVariant = 'default'; // 'default'（合成）/ 文件 URL / **语音包 manifest URL（.json）**
 
-  /** 设置读秒音方案（装扮装备后调用） */
+  // ==================================================================
+  // 读秒语音包（2026-10-12）：正规人声报时
+  //   节点播报 remain_60(剩1分) / remain_30(剩30秒) / remain_20(剩20秒)
+  //   十秒倒数 count_10 … count_01（十、九、…、一）
+  // 一个包 = 一个 manifest.json + 13 条音频（见《读秒语音包设计 v2》）。
+  // ⚠️ 铁律：**任何缺失都回退，绝不让计时提示静音**（缺条目→更小倒数→合成音）。
+  // ==================================================================
+
+  let voicePack = null;         // { url, dir, manifest, failed:{} }
+  let voicePackLoading = null;  // 并发加载去重（同一 URL 只发一次）
+
+  /** 是否为语音包 manifest（`kind:'audiopack'` 的 asset.value 以 .json 结尾） */
+  function isPackUrl(v) { return typeof v === 'string' && /\.json(\?|$)/i.test(v); }
+
+  /** 是否已装上语音包（play-clock 用它决定走人声报时还是旧的三层合成提醒） */
+  function hasVoicePack() { return !!(voicePack && voicePack.manifest); }
+
+  /**
+   * 设置读秒音方案（装扮装备后调用）。
+   * 取值：`default`（合成）/ 文件 URL / **语音包 manifest URL**（.json）
+   */
   function setByoyomiVariant(v) {
-    byoyomiVariant = (v && String(v)) || 'default';
+    const s = (v && String(v)) || 'default';
+    byoyomiVariant = s;
+    if (isPackUrl(s)) loadVoicePack(s);
+    else voicePack = null;
+  }
+
+  /**
+   * 异步加载语音包 manifest。失败/格式不对一律 `voicePack = null`（退回合成音），
+   * 不抛错、不反复重试 404。
+   */
+  function loadVoicePack(url) {
+    if (voicePack && voicePack.url === url) return;
+    if (voicePackLoading === url) return;
+    voicePackLoading = url;
+    const done = (pack) => {
+      voicePackLoading = null;
+      // 只认「最新一次」请求：换包后旧请求迟到的结果要丢弃
+      if (byoyomiVariant === url) voicePack = pack;
+    };
+    const g = typeof window !== 'undefined' ? window : null;
+    if (!g || typeof g.fetch !== 'function') { done(null); return; }
+    try {
+      g.fetch(url)
+        .then((r) => (r && r.ok ? r.json() : null))
+        .then((json) => done(json && json.files ? {
+          url,
+          dir: url.replace(/[^/]*$/, ''),
+          manifest: json,
+          failed: {},   // 播放过但失败的条目：记住，下次不再试
+        } : null))
+        .catch(() => done(null));
+    } catch (_) { done(null); }
+  }
+
+  /**
+   * 报时决策（**纯函数**，便于测试）：这一拍该播哪一条。
+   *
+   * 规则（见设计 v2 §5.1）：
+   *  - 倒数：剩余 `countFrom..1` 秒，**逐秒各播一次**（跨秒才播，防抖）；
+   *  - 节点：`milestones`（60/30/20）**首次跨越**才播，一次跨多个只播**最紧急**那条
+   *    （并把已跨越的都记上，避免下拍再补报）；
+   *  - 节点之间的静默期**有意不报**。
+   *
+   * @param {number} remainingMs 当前计时源的剩余毫秒
+   * @param {{source:string, milestones:number[], countFrom:number}} cfg 报时配置（服务端随 clock 下发）
+   * @param {{announced?:object, lastSec?:number}} book 每手的播报记账（换手时重置）
+   * @returns {{key:string, sec:number, milestone:boolean}|null} null = 本拍不播
+   */
+  function chooseCountdown(remainingMs, cfg, book) {
+    if (!cfg) return null;
+    const b = book || {};
+    if (!b.announced) b.announced = {};
+    const sec = Math.max(0, Math.ceil((Number(remainingMs) || 0) / 1000));
+    const countFrom = Math.max(1, Number(cfg.countFrom) || 10);
+    // 1) 逐秒倒数
+    if (sec >= 1 && sec <= countFrom) {
+      if (b.lastSec === sec) return null;   // 同一秒内不重复
+      b.lastSec = sec;
+      return { key: 'count_' + String(sec).padStart(2, '0'), sec, milestone: false };
+    }
+    b.lastSec = -1;
+    // 2) 节点播报：只报「首次跨越」，跨多个只播最紧急
+    const ms = Array.isArray(cfg.milestones) ? cfg.milestones : [];
+    const crossed = ms.filter((m) => sec <= m && !b.announced[m]);
+    if (crossed.length) {
+      for (const m of crossed) b.announced[m] = true; // 已跨越的都记上，不补报
+      return { key: 'remain_' + Math.min.apply(null, crossed), sec, milestone: true };
+    }
+    return null;
+  }
+
+  /** 在语音包里播一条（带回退链）；成功开播返回 true。
+   *  倒数缺条目 → 依次接「最近的更小倒数」；节点缺条目 → 不播（返回 false，由上层决定）。 */
+  function playPackEntry(pick) {
+    const pack = voicePack;
+    if (!pack || !pack.manifest || !pack.manifest.files) return false;
+    const files = pack.manifest.files;
+    const chain = [pick.key];
+    if (!pick.milestone) {
+      const m = /^count_(\d+)$/.exec(pick.key);
+      const n = m ? parseInt(m[1], 10) : 0;
+      for (let i = n - 1; i >= 1; i--) chain.push('count_' + String(i).padStart(2, '0'));
+    }
+    let idx = 0;
+    const tryNext = () => {
+      while (idx < chain.length) {
+        const k = chain[idx++];
+        const f = files[k];
+        if (!f || pack.failed[k]) continue;
+        const started = playFileSound(pack.dir + f, { volume: 1.0 }, () => {
+          pack.failed[k] = true;  // 记住这条坏了，下次不再试
+          tryNext();              // 本次立刻接下一条
+        });
+        if (started) return true;
+      }
+      return false;
+    };
+    return tryNext();
+  }
+
+  /**
+   * 报时播报入口（play-clock.js 每拍调用）。
+   * @returns {string|null} 实际播的条目 key（便于测试断言）
+   */
+  function announceCountdown(remainingMs, cfg, book) {
+    const pick = chooseCountdown(remainingMs, cfg, book);
+    if (!pick) return null;
+    if (!enabled) return pick.key;   // 总开关关掉：照常记账、只是不发声
+    if (playPackEntry(pick)) return pick.key;
+    // 无包 / 包不可用：倒数 → 合成「嗒」；节点 → 合成「叮-咚」（保持可听反馈）
+    if (pick.milestone) playByoyomiMark();
+    else synthByoyomi();
+    return pick.key;
   }
 
   function playByoyomi() {
     if (!enabled) return;
+    // ⚠️ 这是「每秒嗒」的旧入口：语音包里没有独立的嗒条目，
+    //    逐秒倒数一律走 announceCountdown（包里 count_NN），这里只保留文件/合成回退。
     // 文件方案：sound/<名字>.mp3 或完整站内路径
-    if (byoyomiVariant && byoyomiVariant !== 'default' && byoyomiVariant.indexOf('synth') !== 0) {
+    if (byoyomiVariant && byoyomiVariant !== 'default' && byoyomiVariant.indexOf('synth') !== 0 && !isPackUrl(byoyomiVariant)) {
       const path = byoyomiVariant.charAt(0) === '/' ? byoyomiVariant : 'sound/' + byoyomiVariant + '.mp3';
       if (playFileSound(path, { volume: 0.9 }, synthByoyomi)) return;
     }
@@ -1264,6 +1398,8 @@
     playMove, playCapture, playByoyomi, playStart, playEnd,
     playMinuteWarning, playByoyomiMark,
     variant, setByoyomiVariant,
+    // 读秒语音包（2026-10-12）：报时决策 + 播报 + manifest 加载
+    chooseCountdown, announceCountdown, loadVoicePack, hasVoicePack,
     // BGM 三轨（2026-10-07）+ 音量 / 对手 BGM 交替（2026-10-08）
     setTracks, setPhase, getPhase, getTracks,
     setOpponentTrack, applyMusicVolume, applyPlayOpponentBgm,
@@ -9931,7 +10067,9 @@
           const free = it.price === null;
           // BGM 有唯一使用场景（role→bgm-menu/game/endgame）；其余按 type 匹配槽位
           const isBgm = it.type === 'bgm';
-          const equipSlot = isBgm && it.role ? 'bgm-' + it.role : it.type;
+          // ⚠️ 2026-10-12（P1-④）：槽位用服务端下发的 `it.equipSlot`（唯一真相源），不再自算——
+          // 自算遇到"缺 role 的 BGM"会退化成 'bgm'（非法槽 → 装备必报「槽位不合法」）。
+          const equipSlot = it.equipSlot || (isBgm && it.role ? 'bgm-' + it.role : it.type);
           const equippedSlot = snap.equipped && snap.equipped[equipSlot] === it.id ? equipSlot : null;
           const rarity = it.rarity || 'N';
           const unlocked = unlockHint(it);
@@ -11799,6 +11937,46 @@
    *   - 读秒每跨过 10 秒（60/50/40/30/20）→ `playByoyomiMark()`（中频双音）
    *   - 读秒 ≤10 秒 → `playByoyomi()`（高频短「嗒」，原有）
    */
+  // ==================================================================
+  // 读秒语音包报时（2026-10-12）：**装了语音包时接管全部报时**，
+  // 旧的三层合成提醒（整分钟 / 每 10 秒 / 逐秒嗒）静音，避免双声。
+  //
+  // ⚠️ 报时口径由服务端 `clock.announce` 按**时间制**下发（src/rooms/config.js）：
+  //   - byoyomi > 0（如 10+30）：source='byoyomi' ⇒ **进入读秒才开始报数**
+  //   - byoyomi = 0（如 10 分包干）：source='main'  ⇒ **主时钟就报数**（含「剩 1 分」）
+  //
+  // 未装语音包 ⇒ 走旧逻辑，行为一字不变（零回归）。
+  // ==================================================================
+  let announceCfg = null;
+  let announceBook = { b: {}, w: {} };   // 逐手的播报记账（跨多阈值只报最紧急一条）
+  let lastAnnounceTurn = null;
+
+  /** 是否装了语音包（决定用人声报时还是旧的三层合成提醒） */
+  function hasVoicePack() {
+    return !!(window.Sound && window.Sound.hasVoicePack && window.Sound.hasVoicePack());
+  }
+
+  /**
+   * 报一条时（含逐手记账）。计时源由 `announceCfg.source` 决定：
+   *   'byoyomi' → 读秒剩余，且**进读秒才报**；'main' → 本时剩余（包干局整段都报）。
+   *
+   * @returns {boolean} 人声是否**接管了这一拍**。false = 本阶段不归人声管，
+   *   调用方要落回旧提醒（读秒局的**本时阶段**仍是旧的「整分钟提醒」，
+   *   不能因为装了语音包就把它连带静音 —— 那是给买包用户的隐性回归）。
+   */
+  function announceFor(turn) {
+    if (!announceCfg || !window.Sound || typeof window.Sound.announceCountdown !== 'function') return false;
+    const useByo = announceCfg.source === 'byoyomi';
+    if (useByo && !(inByoyomi[turn] && byoyomiDuration > 0)) return false; // 读秒局：进读秒才开始报
+    const remainingMs = useByo ? localByoyomi[turn] : localClocks[turn];
+    if (turn !== lastAnnounceTurn) {
+      announceBook[turn] = {};          // 新一手：清账，不补报上一手的节点
+      lastAnnounceTurn = turn;
+    }
+    window.Sound.announceCountdown(remainingMs, announceCfg, announceBook[turn]);
+    return true;
+  }
+
   function advance(dtMs) {
     const state = getState();
     if (!state || state.status !== 'PLAYING') return;
@@ -11806,6 +11984,8 @@
     if (inByoyomi[turn] && byoyomiDuration > 0) {
       maybeEndgamePhase(); // 进读秒 ⇒ 终盘曲（幂等）
       localByoyomi[turn] = Math.max(0, localByoyomi[turn] - dtMs);
+      // 语音包接管报时（读秒局：source=byoyomi，正落在这一支）
+      if (hasVoicePack() && announceFor(turn)) return;
 
       // §U1：读秒每跨过 10 秒报时一次。
       // **刻意不含 10 秒**——那一拍交给下面的逐秒「嗒」，否则两个音会叠在一起。
@@ -11828,6 +12008,8 @@
       localClocks[turn] = Math.max(0, localClocks[turn] - dtMs);
       // ⚠️ 2026-10-11（问题4）：包干局每秒检查一次「是否进入最后一分钟」⇒ 切终盘曲（幂等）。
       maybeEndgamePhase();
+      // 语音包接管报时（包干局：source=main，主时钟就报数、含「剩1分」）
+      if (hasVoicePack() && announceFor(turn)) return;
 
       // §U1：本时每跨过一个整分钟提醒一次（mm = 剩余整分钟数）
       // ⚠️ 条件用 `mm >= 0` 而不是 `>= 1`：`Math.ceil` 使 mm=1 覆盖 (0, 60000]，
@@ -11941,6 +12123,8 @@
    */
   function syncFromServer(data) {
     if (!data) return;
+    // 报时口径随 clock 消息下发（服务端按时间制算好，见 src/rooms/config.js）
+    if (data.announce) announceCfg = data.announce;
     // 本时：优先服务端真实形状 `data.clock`；兼容历史/测试用的扁平 `data.b/w`
     const c = data.clock || (typeof data.b === 'number' ? { b: data.b, w: data.w } : null);
     if (c && typeof c.b === 'number' && typeof c.w === 'number') {
@@ -12003,6 +12187,9 @@
     byoyomiDuration = 0;
     lastTickTs = Date.now();
     lastAnchorTurn = null;
+    announceCfg = null;
+    announceBook = { b: {}, w: {} };
+    lastAnnounceTurn = null;
     resetMarks();
   }
 
@@ -13955,6 +14142,10 @@ function showResult(st) {
       act('user-save-profile', (el) => hub.adminSaveProfile && hub.adminSaveProfile(at(el, 'data-id')));
       act('user-save-elo', (el) => hub.adminSaveElo && hub.adminSaveElo(at(el, 'data-id')));
       act('user-rename', (el) => hub.adminRename && hub.adminRename(at(el, 'data-id'), at(el, 'data-name')));
+      // ⚠️ 2026-10-12（道具发放 P0-③）：用户侧发放入口——复制 id / 详情内直接发放道具与货币
+      act('user-copy-id', (el) => hub.adminCopyId && hub.adminCopyId(at(el, 'data-id')));
+      act('user-grant-item', (el) => hub.adminGrantItem && hub.adminGrantItem(at(el, 'data-id'), at(el, 'data-name')));
+      act('user-grant-coin', (el) => hub.adminGrantCoin && hub.adminGrantCoin(at(el, 'data-id'), at(el, 'data-name')));
       act('user-reset-rating', (el) => hub.adminResetRating && hub.adminResetRating(at(el, 'data-id'), at(el, 'data-name')));
       act('user-reset-pwd', (el) => hub.adminResetPassword && hub.adminResetPassword(at(el, 'data-id'), at(el, 'data-name')));
       act('user-delete', (el) => hub.adminDeleteAccount && hub.adminDeleteAccount(at(el, 'data-id'), at(el, 'data-name')));
@@ -14352,7 +14543,7 @@ function showResult(st) {
       el.innerHTML = users.map((u) => `
     <div class="record-item">
       <div style="font-size:13px;display:flex;justify-content:space-between;gap:10px;">
-        <span>${u.isAccount ? '<span title="正式账号">🔐</span>' : '<span title="游客">👤</span>'} ${esc(u.name)}${u.title ? `（${esc(u.title)}）` : ''} <span style="color:var(--text-dim);font-size:11px;">(${u.id})</span></span>
+        <span>${u.isAccount ? '<span title="正式账号">🔐</span>' : '<span title="游客">👤</span>'} ${esc(u.name)}${u.title ? `（${esc(u.title)}）` : ''} <span style="color:var(--text-dim);font-size:11px;">(${u.id})</span><button class=\"btn btn-ghost btn-sm\" style=\"padding:0 5px;font-size:10px;margin-left:3px;line-height:1.4;\" data-act=\"user-copy-id\" data-id=\"${esc(u.id)}\" title=\"复制 id（发放道具时用）\">📋 复制</button></span>
         <span style="font-size:11px;">${u.banned ? '<span style="color:var(--red-light);">⛔ 封禁中</span>' : ''}</span>
       </div>
       <div class="r-result result-win">Lv.${u.level || 0} · ELO ${u.rating}</div>
@@ -14455,6 +14646,15 @@ function showResult(st) {
           : `<button class="btn btn-ghost btn-sm" data-act="user-ban" data-id="${esc(id)}" data-name="${esc(data.name)}">⛔ 封禁</button>`}
         ${data.isAccount ? `<button class="btn btn-ghost btn-sm" data-act="user-delete" data-id="${esc(id)}" data-name="${esc(data.name)}" style="color:var(--red-light);">🗑 删除账号</button>` : ''}
       </div>
+      ${data.isAccount ? `<div style="font-size:14px;font-weight:700;margin:14px 0 6px;">🕘 🎁 发放道具 / 货币 <span style="font-size:11px;color:var(--text-dim);font-weight:400;">（直接发给该用户，不必再手抄 id）</span></div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:12px;">
+        <div><div style="font-size:11px;color:var(--text-dim);">道具</div>
+          <select class="input" id="userGrantItem" style="width:200px;"><option value="">（选择道具）</option></select></div>
+        <button class="btn btn-primary btn-sm" data-act="user-grant-item" data-id="${esc(id)}" data-name="${esc(data.name)}">🎁 发放道具</button>
+        <div><div style="font-size:11px;color:var(--text-dim);">货币（正数加 / 负数扣）</div>
+          <input class="input" id="userGrantCoin" type="number" step="1" style="width:120px;" placeholder="如 100"></div>
+        <button class="btn btn-primary btn-sm" data-act="user-grant-coin" data-id="${esc(id)}" data-name="${esc(data.name)}">💰 发放货币</button>
+      </div>` : `<div style="font-size:12px;color:var(--text-dim);margin:14px 0 12px;padding:8px 12px;border:1px dashed var(--border);border-radius:8px;">👤 该用户是游客，不能持有道具 / 装扮（注册为账号后才可发放）。</div>`}
       <div style="font-size:14px;font-weight:700;margin:14px 0 6px;">🕘 最近登录记录（${events.length}）</div>
       ${events.length ? `<div style="max-height:180px;overflow-y:auto;margin-bottom:10px;">${events.map((e) => `
         <div style="font-size:11px;padding:3px 0;border-bottom:1px solid rgba(128,128,128,0.12);color:var(--text-dim);">
@@ -14467,6 +14667,7 @@ function showResult(st) {
         return `<div style="font-size:12px;padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.15);">${esc(names[0])} vs ${esc(names[1])} — ${esc(res)}（${r.moveCount || 0}手）</div>`;
       }).join('') : '<div style="color:var(--text-dim);font-size:12px;">暂无对局</div>'}
     `;
+        fillUserGrantSelect(); // 发放下拉（详情内直接发道具/货币，2026-10-12）
         const detailModal = $('userDetailModal');
         if (!detailModal) return;
         detailModal.style.display = 'flex';
@@ -14576,6 +14777,55 @@ function showResult(st) {
           if (global.A11y) global.A11y.onDialogClose(dmClose);
         }
         loadUsers();
+      } catch (e) { if (alive()) toast(e.message); }
+    };
+
+    // ⚠️ 2026-10-12（道具发放 P0-③）：用户详情内**直接发放**，不再让管理员跨 tab 手抄 24 hex id。
+    async function fillUserGrantSelect() {
+      const sel = $('userGrantItem');
+      if (!sel) return;
+      try {
+        const d = await global.ApiUtils.get(`/api/admin/items/catalog?token=${encodeURIComponent(getToken())}`);
+        const cat = (d && d.catalog) || [];
+        const keep = sel.value;
+        sel.innerHTML = '<option value="">（选择道具）</option>'
+          + cat.map((it) => `<option value="${esc(it.id)}">${esc(it.name || it.id)}（${esc(it.type)}）</option>`).join('');
+        if (keep) sel.value = keep;
+      } catch (_) { /* 目录拉取失败不阻断详情展示 */ }
+    }
+
+    hub.adminCopyId = async (id) => {
+      try {
+        await navigator.clipboard.writeText(String(id));
+        toast('已复制 id（发放道具时可直接粘贴）');
+      } catch (_) {
+        // 无 Clipboard API（非安全上下文）时的退化路径
+        prompt('复制该 id（Ctrl/Cmd+C）：', String(id));
+      }
+    };
+
+    hub.adminGrantItem = async (id, name) => {
+      const sel = $('userGrantItem');
+      const itemId = sel && sel.value;
+      if (!itemId) return toast('请先选择要发放的道具');
+      const itName = (sel.selectedOptions && sel.selectedOptions[0] && sel.selectedOptions[0].textContent) || itemId;
+      if (!confirm(`确认给「${name}」发放「${itName}」？`)) return;
+      try {
+        const r = await adminPost(`/api/admin/items/account/${encodeURIComponent(id)}/grant`, { itemId });
+        toast(`已发放给「${r.toName || name}」（现拥有 ${(r.owned || []).length} 件）`);
+        loadUsers(); hub.viewUser(id);
+      } catch (e) { if (alive()) toast(e.message); }
+    };
+
+    hub.adminGrantCoin = async (id, name) => {
+      const rawVal = (($('userGrantCoin') && $('userGrantCoin').value) || '').trim();
+      const amount = Number(rawVal);
+      if (!rawVal || !Number.isFinite(amount) || amount === 0) return toast('货币需为非零整数');
+      if (!confirm(`确认给「${name}」${amount > 0 ? '增加' : '扣减'} ${Math.abs(amount)} 货币？`)) return;
+      try {
+        const r = await adminPost(`/api/admin/items/account/${encodeURIComponent(id)}/coin`, { amount });
+        toast(`已${amount > 0 ? '加币' : '扣币'}给「${r.toName || name}」，货币现为 ${(r.wallet || {}).coin}`);
+        loadUsers(); hub.viewUser(id);
       } catch (e) { if (alive()) toast(e.message); }
     };
 
@@ -15741,6 +15991,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         fillItemSelect();
         loadAssets();
         loadBgmRoles();
+        loadItemsLogs();   // 2026-10-12：发放记录（流水）随 tab 一起拉
       } catch (e) {
         if (!alive()) return;
         if (box) box.innerHTML = empty('加载道具目录失败');
@@ -15805,6 +16056,9 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
       if (price !== null && !Number.isFinite(price)) return toast('价格必须是数字或留空（免费）');
       const kind = type === 'bgm' ? 'audio' : (assetVal.charAt(0) === '/' ? 'image' : 'glyph');
       const roleVal = type === 'bgm' && $('itemEditBgmRole') ? (($('itemEditBgmRole').value) || '').trim() : '';
+      // ⚠️ 2026-10-12（P1-④）：BGM 商品**必须选场景**——缺 role 的 BGM 用户买了/收到也装不上
+      //（装备请求槽位退化成 'bgm' → BAD_SLOT）。服务端另有归一兜底，这里给到明确提示。
+      if (type === 'bgm' && !roleVal) return toast('BGM 商品请选择使用场景（菜单 / 开局 / 终盘）');
       try {
         const body = {
           id, type: type === 'bgm' ? 'bgm' : type, name: name || id, desc, rarity, price,
@@ -15950,7 +16204,8 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
     async function lookupAccount() {
       const raw = (($('itemAccountId') && $('itemAccountId').value) || '').trim();
       const box = $('itemAccountResult');
-      if (!raw) { if (box) box.innerHTML = empty('请填写账号 id'); return null; }
+      // ⚠️ 2026-10-12：支持「账号 id / 令牌 / 用户名」三种输入（服务端 resolveItemTarget 终检存在性）
+      if (!raw) { if (box) box.innerHTML = empty('请填写账号 id / 令牌 / 用户名'); return null; }
       if (box) box.innerHTML = loading('正在查询…');
       try {
         const data = await apiGet(`/api/admin/items/account/${encodeURIComponent(raw)}`);
@@ -15978,7 +16233,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         }).join('、') || '（无）';
       box.innerHTML = `
         <div style="font-size:13px;line-height:1.9;">
-          <div>账号：<b>${esc(data.accountId)}</b></div>
+          <div>账号：<b>${esc(data.toName || data.accountId)}</b><span style="color:var(--text-dim);font-size:11px;margin-left:8px;">${esc(data.accountId)}</span></div>
           <div>💰 货币：<b style="color:var(--gold-light);">${esc(String(data.wallet && data.wallet.coin || 0))}</b></div>
           <div>拥有（${(data.owned || []).length} 件）：${owned}</div>
           <div style="color:var(--text-dim);font-size:12px;">已装备：${eq}</div>
@@ -15995,7 +16250,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
       try {
         const r = await apiPost(`/api/admin/items/account/${encodeURIComponent(raw)}/grant`, { itemId });
         if (!alive()) return;
-        toast(`已发放（该账号现拥有 ${r.owned.length} 件）`);
+        toast(`已发放给「${r.toName || raw}」（现拥有 ${r.owned.length} 件）`);
         lookupAccount();
       } catch (e) { onErr(e); }
     }
@@ -16008,7 +16263,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
       try {
         const r = await apiPost(`/api/admin/items/account/${encodeURIComponent(raw)}/coin`, { amount });
         if (!alive()) return;
-        toast(`已处理，该账号货币现为 ${r.wallet.coin}`);
+        toast(`已${amount > 0 ? '加币' : '扣币'}给「${r.toName || raw}」，货币现为 ${r.wallet.coin}`);
         lookupAccount();
       } catch (e) { onErr(e); }
     }
@@ -16027,9 +16282,46 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
       } catch (e) { onErr(e); }
     }
 
+    // ---------------- 发放记录（流水）----------------
+
+    /**
+     * 拉取发放流水并渲染 —— 2026-10-12 补齐（此前只有 API 没有界面，等于看不到）。
+     * 每条含：时间 / 类型 / 内容 / 收件人 / **操作人**（操作人缺失时流水无法对账）。
+     */
+    async function loadItemsLogs() {
+      const box = $('itemsLogList');
+      if (!box) return;
+      box.innerHTML = loading('正在加载发放记录…');
+      try {
+        const d = await apiGet('/api/admin/items/logs?n=50');
+        if (!alive()) return;
+        const logs = d.logs || [];
+        if (!logs.length) { box.innerHTML = empty('暂无发放记录'); return; }
+        const KIND = { item: '发放道具', coin: '加减货币', buy: '玩家购买', redeem: '兑换码' };
+        box.innerHTML = logs.map((l) => {
+          const when = new Date(l.at).toLocaleString();
+          const what = l.kind === 'coin'
+            ? `💰 ${Number(l.coinDelta) > 0 ? '+' : ''}${l.coinDelta} 币`
+            : `🎁 ${esc(l.itemId || l.kind)}`;
+          return '<div class="record-item" style="font-size:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'
+            + `<span style="color:var(--text-dim);min-width:132px;">${esc(when)}</span>`
+            + `<span style="min-width:64px;">${esc(KIND[l.kind] || l.kind)}</span>`
+            + `<span style="flex:1;min-width:120px;">${what}</span>`
+            + `<span style="color:var(--text-dim);min-width:150px;">→ ${esc(l.accountId || '—')}</span>`
+            + `<span style="color:var(--gold-light);min-width:96px;">操作人 ${esc(l.adminId || '—')}</span>`
+            + '</div>';
+        }).join('');
+      } catch (e) {
+        if (!alive()) return;
+        box.innerHTML = empty('发放记录加载失败');
+        onErr(e);
+      }
+    }
+
     // ---------------- 事件绑定（本模块自己绑，句柄记 teardown 由 unmount 全清）----------------
     const bind = (id, fn) => { on($(id), 'click', fn); };
     bind('btnItemsRefresh', () => loadItemsAdmin());
+    bind('btnItemsLogs', () => loadItemsLogs());
     bind('btnItemLookup', () => lookupAccount());
     bind('btnItemGrant', () => doGrant());
     bind('btnItemCoin', () => doCoin());
@@ -16324,7 +16616,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
 
         <!-- ① 查账号 -->
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
-          <input class="input" id="itemAccountId" placeholder="账号 id" style="min-width:260px;">
+          <input class="input" id="itemAccountId" placeholder="账号 id / 令牌 / 登录用户名（游客不可发放）" style="min-width:260px;">
           <button class="btn btn-ghost btn-sm" id="btnItemLookup">查询该账号</button>
         </div>
         <div id="itemAccountResult" style="margin-bottom:14px;"></div>
@@ -16357,6 +16649,17 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         <!-- ⑤ 目录 -->
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">道具目录（点「编辑」回填上方表单；内置项只能覆盖不能删）</div>
         <div id="itemsCatalogList" style="max-height:42vh;overflow-y:auto;"></div>
+
+        <!-- ⑥ 发放记录（流水）——2026-10-12 补齐：对账 / 排查滥发 / 错发纠正 -->
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin:14px 0 6px;">
+          <div style="font-size:12px;font-weight:700;">🕘 发放记录（流水）</div>
+          <button class="btn btn-ghost btn-sm" id="btnItemsLogs">刷新发放记录</button>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;line-height:1.7;">
+          每笔发放 / 加减货币 / 购买 / 兑换都与变更<b>同事务</b>落一条流水（含<b>操作人</b>），最多保留 2000 条。
+          用于对账、排查滥发、错发纠正。
+        </div>
+        <div id="itemsLogList" style="max-height:32vh;overflow-y:auto;"></div>
       </div>
 
       <!-- 操作审计（PLAN §K4） -->

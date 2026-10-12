@@ -43,9 +43,9 @@ const { setMatchFactory, addLog, SIZE_OPTIONS, FORMATS, FORMAT_LABELS, MIN_SWISS
 const { canManage, canTransition, normalizeStatus, transition, STATUS_FLOW, ACTION_ROLES } = require('./tournaments/rules');
 const { publicInfo, swissStandings, matchParticipants, placeOf, PLACE_LABEL } = require('./tournaments/swiss-flow');
 const { onMatchFinished, assignNextMatches } = require('./tournaments/bracket');
-const { createTournament, joinTournament, decideEntrant, kickPlayer, voidPlayer, setChampion, startTournament, approvedCount, approveTournament, rejectTournament, cancelTournament } = require('./tournaments/lifecycle');
+const { createTournament, joinTournament, decideEntrant, kickPlayer, voidPlayer, setChampion, startTournament, startMatch, approvedCount, approveTournament, rejectTournament, cancelTournament } = require('./tournaments/lifecycle');
 const { requestRematch, decideRematch, archiveTournament, autoArchiveDue, editArchived, ARCHIVE_AFTER_HOURS } = require('./tournaments/archive');
-const { listTournaments, listAllTournaments, getTournament, honorsOf } = require('./tournaments/view');
+const { listTournaments, listAllTournaments, getTournament, honorsOf, pendingMatchFor } = require('./tournaments/view');
 
 module.exports = {
   createTournament,
@@ -62,6 +62,8 @@ module.exports = {
   editArchived,      // 编辑已存档赛事（仅管理员）
   ARCHIVE_AFTER_HOURS,
   startTournament, // T3：手动开赛（报名阶段，主办人/管理员）
+  startMatch,      // 约战制：选手发起「开始赛事」为指定场次建房（2026-10-11）
+  pendingMatchFor, // 约战制：查询某选手当前可进行的赛事对局（2026-10-11）
   approvedCount,   // T3：已批准人数（= 参赛人数）
   approveTournament,
   rejectTournament,

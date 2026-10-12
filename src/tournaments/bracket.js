@@ -135,7 +135,7 @@ function assignNextMatches(t) {
     changed = false;
     for (const n of t.bracket) {
       if (n.winnerId || !n.pair) continue; // 已出结果 / 叶子
-      if (n.matchId) continue;             // 已建房，等它打完
+      if (n.matchId || n.ready) continue;   // 已建房 / 已配对（待选手约战），等它打完
 
       const [c1, c2] = n.pair;
       const s1 = childState(t.bracket, c1);
@@ -169,14 +169,16 @@ function assignNextMatches(t) {
         continue;
       }
 
-      // ---- 双方都有人 → 建房 ----
+      // ---- 双方都有人 → **只配对，不建房**（约战制，2026-10-11）----
+      // ⚠️ 需求：赛事开始后不再自动开打，双方选手在规定时间段内自行完赛。
+      // 这里只把「谁对谁」定下来并标记 `ready`；真正建房由选手在快速匹配里点
+      // 「开始赛事」触发（见 `tournaments.startMatch` → `store.matchFactory`）。
+      // 因此 `matchFactory` 在本函数中**不再被调用**——自动建房会让「退出后回不去」
+      // 变成必然（房一旦建了就按对局生命周期走，与赛事的"随时可下"冲突）。
       n.players = [s1.winner, s2.winner];
-      const res = store.matchFactory(t.id, n.players);
-      if (res && res.roomId) {
-        n.matchId = res.roomId;
-        created++;
-        changed = true;
-      }
+      n.ready = true;
+      n.matchId = null;
+      changed = true;
     }
   }
   if (created || changed) persist();

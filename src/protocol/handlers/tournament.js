@@ -53,4 +53,25 @@ module.exports = {
       this._error(clientId, res.error);
     }
   },
+
+  /**
+   * 约战制（2026-10-11）：选手点「开始赛事」→ 为指定场次建房。
+   * 发起方收到 `tournament_match_started`（initiator=true），对手（若在线）也收到一条，
+   * 前端据此提示并跳转到对局页（双方都进同一房间，各自按 playerId 回位到座位）。
+   */
+  _hStartTournamentMatch(clientId, player, data) {
+    const res = tournaments.startMatch(player.playerId, data || {});
+    if (!res.ok) {
+      this._error(clientId, res.error);
+      return;
+    }
+    const payload = { roomId: res.roomId, tournamentId: res.tournamentId };
+    if (res.opponentId) {
+      this.notifyPlayer(res.opponentId, {
+        type: 'tournament_match_started',
+        data: Object.assign({}, payload, { byId: player.playerId, byName: player.name }),
+      });
+    }
+    this._send(clientId, { type: 'tournament_match_started', data: Object.assign({}, payload, { initiator: true }) });
+  },
 };

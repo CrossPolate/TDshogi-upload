@@ -45,14 +45,16 @@ function getItem(itemId) {
   return (typeof itemId === 'string' && BY_ID.get(itemId)) || null;
 }
 
-/** 目录数组（浅拷贝，防外部改写内置定义） */
+/** 目录数组（浅拷贝，防外部改写内置定义）
+ * ⚠️ 2026-10-12：附带 `equipSlot`（来自 slotForItem，槽位的**唯一真相源**）——
+ * 前端展示"装备到 XX"与发请求都读它，不再自己推导（双真相源是 BAD_SLOT 类缺陷的温床）。 */
 function catalog() {
-  return getCatalog().map((it) => ({ ...it }));
+  return getCatalog().map((it) => ({ ...it, equipSlot: slotForItem(it) }));
 }
 
 /** 公开目录：含元信息与素材（供商店预览图/试听；静态文件本就公开可访问） */
 function publicCatalog() {
-  return getCatalog().map((it) => ({ ...it }));
+  return getCatalog().map((it) => ({ ...it, equipSlot: slotForItem(it) }));
 }
 
 /** 重载目录（外置 `data/items-catalog.json` 改完后调用；CLI/后台可用），返回条目数 */
@@ -86,6 +88,30 @@ function checkUnlock(accountId, item) {
   return { ok: false, error, code: 'LOCKED' };
 }
 
+/**
+ * ⚠️ 2026-10-12（P1-④）：道具 → 装备槽位的**唯一真相源**。
+ *
+ * 此前槽位推导有两份：服务端 `equip` 一份、前端 `itemCard` 又自己算一遍（`it.type` 或
+ * `bgm-<role>`）。两份一不同步就出「BGM 缺 role → 槽位退化成 'bgm' → 永远 BAD_SLOT」
+ * 这种"发了也用不了"的缺陷。现在统一在这里推导：
+ *  - BGM：有 role ⇒ 装到唯一场景槽（`bgm-<role>`）；无 role ⇒ 尊重调用方指定的三槽之一，
+ *    都没有就兜底 `bgm-game`（**绝不返回 'bgm' 这类非法槽**）；
+ *  - 其余：类型即槽位。
+ * 目录响应（`catalog()`）给每条带 `equipSlot`，前端直接读，不再自算。
+ *
+ * @param {object} item 目录条目
+ * @param {string} [hint] 调用方指定的槽位（仅在 BGM 无 role 且 hint 合法时采用）
+ * @returns {string|null} SLOTS 中的槽位名
+ */
+function slotForItem(item, hint) {
+  if (!item) return null;
+  if (isBgmType(item.type)) {
+    if (item.role && BGM_SLOTS.includes('bgm-' + item.role)) return 'bgm-' + item.role;
+    return (hint && BGM_SLOTS.includes(hint)) ? hint : 'bgm-game';
+  }
+  return SLOTS.includes(item.type) ? item.type : null;
+}
+
 // ---------------- 快照 ----------------
 
 /**
@@ -96,6 +122,19 @@ function checkUnlock(accountId, item) {
 function effectiveEquipped(accountId) {
   const id = accountId ? String(accountId) : '';
   const eq = { ...store.equipped(id) };
+  const owned = new Set(store.owned(id));
+  // ⚠️ 2026-10-12（P1-⑤）背包自愈：装备项可能因目录变更失效——已下架、已不再拥有、
+  // 或槽位与类型对不上（历史脏数据）。一律视为"没装"并回落默认，避免"显示已装备、实际
+  // 已失效"的死装备；`snapshot()` 就近呈现真实生效状态，无需用户手动清理。
+  for (const slot of SLOTS) {
+    const cur = eq[slot];
+    if (cur === undefined || cur === null) continue;
+    const it = getItem(cur);
+    const valid = !!it
+      && (it.price === null || owned.has(it.id))
+      && slotForItem(it, slot) === slot;
+    if (!valid) delete eq[slot];
+  }
   for (const [slot, defId] of Object.entries(DEFAULT_EQUIP)) {
     const cur = eq[slot];
     if (cur === undefined || cur === null) {
@@ -111,7 +150,8 @@ function snapshot(accountId) {
   const own = new Set(store.owned(id));
   const list = getCatalog().map((it) => {
     const unlocked = it.price === null || own.has(it.id);
-    return unlocked ? { ...it } : { ...it, locked: true };
+    const withSlot = { ...it, equipSlot: slotForItem(it) };
+    return unlocked ? withSlot : { ...withSlot, locked: true };
   });
   return {
     wallet: store.wallet(id),
@@ -150,16 +190,19 @@ function pushAvatar(accountId, glyph) {
  */
 function equip(accountId, slot, itemId) {
   const id = accountId ? String(accountId) : '';
-  if (!SLOTS.includes(slot)) return { ok: false, error: '槽位不合法', code: 'BAD_SLOT' };
+  // ⚠️ 2026-10-12（P1-④）：槽位**归一**必须发生在校验之前。旧实现先按裸 slot 拒绝、
+  // 后才做 BGM 映射，于是"槽位退化成 'bgm'"的请求连兜底都来不及生效 → 永远 BAD_SLOT。
+  const rawSlot = SLOTS.includes(slot) ? slot : (slot === 'bgm' ? 'bgm-game' : slot);
 
   // 卸下
   if (itemId === null || itemId === undefined) {
+    if (!SLOTS.includes(rawSlot)) return { ok: false, error: '槽位不合法', code: 'BAD_SLOT' };
     // ⚠️ 2026-10-04 架构优化：写失败可感知 —— 落盘失败绝不能回 ok:true，直接冒泡
-    const r = store.setEquipped(id, slot, null);
+    const r = store.setEquipped(id, rawSlot, null);
     if (!r.ok) return { ok: false, error: r.error, code: r.code };
     // ⚠️ 2026-10-04 修复（小洞）：卸下**头像**槽位时，会话里的头像要**回落到免费字形**——
     // 否则道具已卸下、头像却还留着道具字形（名不副实）。
-    if (slot === 'avatar') {
+    if (rawSlot === 'avatar') {
       const free = getCatalog().find((it) => it.type === 'avatar' && it.price === null);
       const glyph = free ? free.asset.value : null;
       if (glyph) {
@@ -172,13 +215,15 @@ function equip(accountId, slot, itemId) {
 
   const item = getItem(itemId);
   if (!item) return { ok: false, error: '道具不存在', code: 'NO_ITEM' };
-  // 槽位确定：BGM 用 item.role 自动映射到 bgm-menu/game/endgame；其余 type 与 slot 一致
-  const effectiveSlot = isBgmType(item.type)
-    ? (item.role ? 'bgm-' + item.role : slot)
-    : slot;
-  if (!SLOTS.includes(effectiveSlot)) return { ok: false, error: '槽位不合法', code: 'BAD_SLOT' };
+  // 槽位确定：统一走 slotForItem（唯一真相源）——BGM 按 role 落到 bgm-menu/game/endgame，
+  // 缺 role 时按调用方 hint / 兜底 bgm-game，**绝不产生 'bgm' 这类非法槽**
+  const effectiveSlot = slotForItem(item, rawSlot);
+  if (!effectiveSlot || !SLOTS.includes(effectiveSlot)) {
+    return { ok: false, error: '槽位不合法', code: 'BAD_SLOT' };
+  }
+  // 类型必须与槽位一致（BGM 恒与 bgm-* 一致；这里主要拦"拿头像装到棋子槽"）
   const slotOk = isBgmType(item.type)
-    ? BGM_SLOTS.includes(effectiveSlot) && (!item.role || effectiveSlot === 'bgm-' + item.role)
+    ? BGM_SLOTS.includes(effectiveSlot)
     : item.type === effectiveSlot;
   if (!slotOk) return { ok: false, error: '道具类型与槽位不匹配', code: 'TYPE_MISMATCH' };
 
@@ -224,6 +269,8 @@ function buy(accountId, itemId) {
   const id = accountId ? String(accountId) : '';
   const item = getItem(itemId);
   if (!item) return { ok: false, error: '道具不存在', code: 'NO_ITEM' };
+  // ⚠️ 2026-10-11（问题3）：限定装扮不可购买（只能发放/兑换获得）
+  if (item.limited) return { ok: false, error: '限定装扮无法购买', code: 'NOT_FOR_SALE' };
   // ⚠️ 2026-10-05 修复：先校验解锁门槛（等级/对局数），不满足直接拒绝
   const locked = checkUnlock(id, item);
   if (locked) return locked;
@@ -276,20 +323,57 @@ function redeem(accountId, code) {
 
 // ---------------- 发放（管理员/活动用） ----------------
 
-/** 直接发放道具（不校验价格）；⚠️ 2026-10-04：落盘失败冒泡 PERSIST_FAILED */
-function grant(accountId, itemId, source) {
+/**
+ * ⚠️ 2026-10-12 内联护栏：发放类写操作的**收件人必须是注册账号**。
+ *
+ * 此前收件人校验只在 HTTP/CLI 入口（`items/targets.js`）做一层，`items.grant` 自身不设防 ——
+ * 于是任何新调用者（脚本、二期功能）都可能再造出「孤儿键 / 游客键」，即"发放不出去"的根因。
+ * 现在把护栏下沉到业务层，**结构上**杜绝：
+ *   - 孤儿键：id 对不上任何账号 → 拒绝（绝不写进无人认领的键）；
+ *   - 游客键：游客没有装扮背包入口，且升级为账号时不迁 items（`accounts.migrateGuestData`
+ *     只迁 评级/棋谱/会话）→ 发给游客等于发了就丢，故一律拒绝。
+ *
+ * @returns {null|{ok:false, error:string, code:string}} 合法返回 null
+ */
+function assertRecipient(accountId) {
   const id = accountId ? String(accountId) : '';
+  if (!id) return { ok: false, error: '收件人不能为空', code: 'NO_TARGET' };
+  let acct = null;
+  try { acct = require('../accounts').getAccount(id); } catch (_) { acct = null; }
+  if (acct) return null;
+  let isGuest = false;
+  try { isGuest = !!(require('../auth').getSessionRaw(id)); } catch (_) { isGuest = false; }
+  return isGuest
+    ? { ok: false, error: '对方是游客，道具只发给注册账号（游客升级为账号后才能持有装扮）', code: 'GUEST' }
+    : { ok: false, error: '账号不存在，拒绝发放（避免写进无人认领的键）', code: 'NOT_FOUND' };
+}
+
+/**
+ * 直接发放道具（不校验价格）
+ * ⚠️ 2026-10-04：落盘失败冒泡 PERSIST_FAILED
+ * ⚠️ 2026-10-12：内联校验收件人（见 assertRecipient）；`actor` 随流水落盘供对账
+ */
+function grant(accountId, itemId, source, actor) {
+  const id = accountId ? String(accountId) : '';
+  const bad = assertRecipient(id);
+  if (bad) return bad;
   if (!getItem(itemId)) return { ok: false, error: '道具不存在', code: 'NO_ITEM' };
-  const r = store.addItem(id, itemId, source || 'grant');
+  const r = store.addItem(id, itemId, source || 'grant', actor);
   if (!r.ok) return { ok: false, error: r.error, code: r.code };
   return { ok: true, owned: r.owned };
 }
 
-/** 直接加/减币（管理员/活动用），n 必须为整数；⚠️ 2026-10-04：落盘失败冒泡 PERSIST_FAILED */
-function addCoin(accountId, n) {
+/**
+ * 直接加/减币（管理员/活动用），n 必须为整数
+ * ⚠️ 2026-10-04：落盘失败冒泡 PERSIST_FAILED
+ * ⚠️ 2026-10-12：内联校验收件人；`actor` 随流水落盘供对账
+ */
+function addCoin(accountId, n, actor) {
   const id = accountId ? String(accountId) : '';
+  const bad = assertRecipient(id);
+  if (bad) return bad;
   if (!Number.isInteger(n) || n === 0) return { ok: false, error: '数量必须为非零整数', code: 'BAD_AMOUNT' };
-  const r = store.addCoin(id, n);
+  const r = store.addCoin(id, n, actor);
   if (!r.ok) return { ok: false, error: r.error, code: r.code };
   return { ok: true, wallet: { coin: r.coin } };
 }
@@ -375,14 +459,21 @@ module.exports = {
   SLOTS, BGM_SLOTS, DEFAULT_BGM_EQUIP, DEFAULT_EQUIP,
   catalog, publicCatalog, snapshot, equip, buy, redeem, grant, addCoin,
   avatarOptionsFor, skinFor, bgmTracksFor, effectiveEquipped, appearanceFor, refreshCatalog,
+  // ⚠️ 2026-10-12（P1-④）：槽位推导的唯一真相源（导出供测试/后台复用，前端经 catalog.equipSlot 用）
+  slotForItem,
+  // ⚠️ 2026-10-12（P2-⑥）：发放/货币流水（append-only），后台对账与排查滥发用
+  recentLogs: (n) => store.recentLogs(n),
   // ⚠️ 2026-10-03 新功能：道具系统骨架 —— 定义兑换码（管理员/活动用；CLI 与后台都走这里）。
   // 直通 store.defineCode，避免 CLI 绕过业务层直接 require store。
   // ⚠️ 2026-10-04 架构优化：写失败可感知 —— store 已返回 {ok:true, ...定义字段}/{ok:false, error, code}，
   // 落盘失败（PERSIST_FAILED）原样冒泡；成功时定义字段仍在顶层，兼容 admin/CLI 读 def.itemId/coin/maxUses。
   defineCode: (code, def) => store.defineCode(code, def),
   // ⚠️ 2026-10-07 商品管理：目录 CRUD / 素材上传 / BGM 三轨
-  upsertItem: (raw) => catalogMod.upsertItem(raw),
-  deleteItem: (id) => catalogMod.deleteItem(id),
+  // ⚠️ 2026-10-11 修复：CRUD 后必须**重建 BY_ID 索引**（reindex）。catalogMod 只刷了自己的
+  // 目录缓存，若不重建本模块的 id 索引，新建的商品会「写进去了但查不到」（getItem 返回 null
+  // → 购买/装备报「道具不存在」）。删同理。
+  upsertItem: (raw) => { const r = catalogMod.upsertItem(raw); if (r && r.ok) reindex(); return r; },
+  deleteItem: (id) => { const r = catalogMod.deleteItem(id); if (r && r.ok) reindex(); return r; },
   assets,
   bgmRoles,
   getBgmRoles: () => bgmRoles.getRoles(),

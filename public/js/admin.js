@@ -263,7 +263,7 @@
 
         <!-- ① 查账号 -->
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
-          <input class="input" id="itemAccountId" placeholder="账号 id" style="min-width:260px;">
+          <input class="input" id="itemAccountId" placeholder="账号 id / 令牌 / 登录用户名（游客不可发放）" style="min-width:260px;">
           <button class="btn btn-ghost btn-sm" id="btnItemLookup">查询该账号</button>
         </div>
         <div id="itemAccountResult" style="margin-bottom:14px;"></div>
@@ -296,6 +296,17 @@
         <!-- ⑤ 目录 -->
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">道具目录（点「编辑」回填上方表单；内置项只能覆盖不能删）</div>
         <div id="itemsCatalogList" style="max-height:42vh;overflow-y:auto;"></div>
+
+        <!-- ⑥ 发放记录（流水）——2026-10-12 补齐：对账 / 排查滥发 / 错发纠正 -->
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin:14px 0 6px;">
+          <div style="font-size:12px;font-weight:700;">🕘 发放记录（流水）</div>
+          <button class="btn btn-ghost btn-sm" id="btnItemsLogs">刷新发放记录</button>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;line-height:1.7;">
+          每笔发放 / 加减货币 / 购买 / 兑换都与变更<b>同事务</b>落一条流水（含<b>操作人</b>），最多保留 2000 条。
+          用于对账、排查滥发、错发纠正。
+        </div>
+        <div id="itemsLogList" style="max-height:32vh;overflow-y:auto;"></div>
       </div>
 
       <!-- 操作审计（PLAN §K4） -->

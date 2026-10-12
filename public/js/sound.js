@@ -143,17 +143,151 @@
   }
 
   /** 读秒滴答：高频短「嗒」（⚠️ 2026-10-08：读秒音从设置迁入装扮，可换文件方案） */
-  let byoyomiVariant = 'default'; // 'default'（合成）/ 文件 URL
+  let byoyomiVariant = 'default'; // 'default'（合成）/ 文件 URL / **语音包 manifest URL（.json）**
 
-  /** 设置读秒音方案（装扮装备后调用） */
+  // ==================================================================
+  // 读秒语音包（2026-10-12）：正规人声报时
+  //   节点播报 remain_60(剩1分) / remain_30(剩30秒) / remain_20(剩20秒)
+  //   十秒倒数 count_10 … count_01（十、九、…、一）
+  // 一个包 = 一个 manifest.json + 13 条音频（见《读秒语音包设计 v2》）。
+  // ⚠️ 铁律：**任何缺失都回退，绝不让计时提示静音**（缺条目→更小倒数→合成音）。
+  // ==================================================================
+
+  let voicePack = null;         // { url, dir, manifest, failed:{} }
+  let voicePackLoading = null;  // 并发加载去重（同一 URL 只发一次）
+
+  /** 是否为语音包 manifest（`kind:'audiopack'` 的 asset.value 以 .json 结尾） */
+  function isPackUrl(v) { return typeof v === 'string' && /\.json(\?|$)/i.test(v); }
+
+  /** 是否已装上语音包（play-clock 用它决定走人声报时还是旧的三层合成提醒） */
+  function hasVoicePack() { return !!(voicePack && voicePack.manifest); }
+
+  /**
+   * 设置读秒音方案（装扮装备后调用）。
+   * 取值：`default`（合成）/ 文件 URL / **语音包 manifest URL**（.json）
+   */
   function setByoyomiVariant(v) {
-    byoyomiVariant = (v && String(v)) || 'default';
+    const s = (v && String(v)) || 'default';
+    byoyomiVariant = s;
+    if (isPackUrl(s)) loadVoicePack(s);
+    else voicePack = null;
+  }
+
+  /**
+   * 异步加载语音包 manifest。失败/格式不对一律 `voicePack = null`（退回合成音），
+   * 不抛错、不反复重试 404。
+   */
+  function loadVoicePack(url) {
+    if (voicePack && voicePack.url === url) return;
+    if (voicePackLoading === url) return;
+    voicePackLoading = url;
+    const done = (pack) => {
+      voicePackLoading = null;
+      // 只认「最新一次」请求：换包后旧请求迟到的结果要丢弃
+      if (byoyomiVariant === url) voicePack = pack;
+    };
+    const g = typeof window !== 'undefined' ? window : null;
+    if (!g || typeof g.fetch !== 'function') { done(null); return; }
+    try {
+      g.fetch(url)
+        .then((r) => (r && r.ok ? r.json() : null))
+        .then((json) => done(json && json.files ? {
+          url,
+          dir: url.replace(/[^/]*$/, ''),
+          manifest: json,
+          failed: {},   // 播放过但失败的条目：记住，下次不再试
+        } : null))
+        .catch(() => done(null));
+    } catch (_) { done(null); }
+  }
+
+  /**
+   * 报时决策（**纯函数**，便于测试）：这一拍该播哪一条。
+   *
+   * 规则（见设计 v2 §5.1）：
+   *  - 倒数：剩余 `countFrom..1` 秒，**逐秒各播一次**（跨秒才播，防抖）；
+   *  - 节点：`milestones`（60/30/20）**首次跨越**才播，一次跨多个只播**最紧急**那条
+   *    （并把已跨越的都记上，避免下拍再补报）；
+   *  - 节点之间的静默期**有意不报**。
+   *
+   * @param {number} remainingMs 当前计时源的剩余毫秒
+   * @param {{source:string, milestones:number[], countFrom:number}} cfg 报时配置（服务端随 clock 下发）
+   * @param {{announced?:object, lastSec?:number}} book 每手的播报记账（换手时重置）
+   * @returns {{key:string, sec:number, milestone:boolean}|null} null = 本拍不播
+   */
+  function chooseCountdown(remainingMs, cfg, book) {
+    if (!cfg) return null;
+    const b = book || {};
+    if (!b.announced) b.announced = {};
+    const sec = Math.max(0, Math.ceil((Number(remainingMs) || 0) / 1000));
+    const countFrom = Math.max(1, Number(cfg.countFrom) || 10);
+    // 1) 逐秒倒数
+    if (sec >= 1 && sec <= countFrom) {
+      if (b.lastSec === sec) return null;   // 同一秒内不重复
+      b.lastSec = sec;
+      return { key: 'count_' + String(sec).padStart(2, '0'), sec, milestone: false };
+    }
+    b.lastSec = -1;
+    // 2) 节点播报：只报「首次跨越」，跨多个只播最紧急
+    const ms = Array.isArray(cfg.milestones) ? cfg.milestones : [];
+    const crossed = ms.filter((m) => sec <= m && !b.announced[m]);
+    if (crossed.length) {
+      for (const m of crossed) b.announced[m] = true; // 已跨越的都记上，不补报
+      return { key: 'remain_' + Math.min.apply(null, crossed), sec, milestone: true };
+    }
+    return null;
+  }
+
+  /** 在语音包里播一条（带回退链）；成功开播返回 true。
+   *  倒数缺条目 → 依次接「最近的更小倒数」；节点缺条目 → 不播（返回 false，由上层决定）。 */
+  function playPackEntry(pick) {
+    const pack = voicePack;
+    if (!pack || !pack.manifest || !pack.manifest.files) return false;
+    const files = pack.manifest.files;
+    const chain = [pick.key];
+    if (!pick.milestone) {
+      const m = /^count_(\d+)$/.exec(pick.key);
+      const n = m ? parseInt(m[1], 10) : 0;
+      for (let i = n - 1; i >= 1; i--) chain.push('count_' + String(i).padStart(2, '0'));
+    }
+    let idx = 0;
+    const tryNext = () => {
+      while (idx < chain.length) {
+        const k = chain[idx++];
+        const f = files[k];
+        if (!f || pack.failed[k]) continue;
+        const started = playFileSound(pack.dir + f, { volume: 1.0 }, () => {
+          pack.failed[k] = true;  // 记住这条坏了，下次不再试
+          tryNext();              // 本次立刻接下一条
+        });
+        if (started) return true;
+      }
+      return false;
+    };
+    return tryNext();
+  }
+
+  /**
+   * 报时播报入口（play-clock.js 每拍调用）。
+   * @returns {string|null} 实际播的条目 key（便于测试断言）
+   */
+  function announceCountdown(remainingMs, cfg, book) {
+    const pick = chooseCountdown(remainingMs, cfg, book);
+    if (!pick) return null;
+    if (!enabled) return pick.key;   // 总开关关掉：照常记账、只是不发声
+    if (playPackEntry(pick)) return pick.key;
+    // 无包 / 包不可用：倒数 → 合成「嗒」；节点 → 合成「叮-咚」（保持可听反馈）
+    if (pick.milestone) playByoyomiMark();
+    else synthByoyomi();
+    return pick.key;
   }
 
   function playByoyomi() {
     if (!enabled) return;
+    // ⚠️ 这是「每秒嗒」的旧入口：语音包里没有独立的嗒条目，
+    //    逐秒倒数一律走 announceCountdown（包里 count_NN），这里只保留文件/合成回退。
     // 文件方案：sound/<名字>.mp3 或完整站内路径
-    if (byoyomiVariant && byoyomiVariant !== 'default' && byoyomiVariant.indexOf('synth') !== 0) {
+    if (byoyomiVariant && byoyomiVariant !== 'default' && byoyomiVariant.indexOf('synth') !== 0 && !isPackUrl(byoyomiVariant)) {
       const path = byoyomiVariant.charAt(0) === '/' ? byoyomiVariant : 'sound/' + byoyomiVariant + '.mp3';
       if (playFileSound(path, { volume: 0.9 }, synthByoyomi)) return;
     }
@@ -816,6 +950,8 @@
     playMove, playCapture, playByoyomi, playStart, playEnd,
     playMinuteWarning, playByoyomiMark,
     variant, setByoyomiVariant,
+    // 读秒语音包（2026-10-12）：报时决策 + 播报 + manifest 加载
+    chooseCountdown, announceCountdown, loadVoicePack, hasVoicePack,
     // BGM 三轨（2026-10-07）+ 音量 / 对手 BGM 交替（2026-10-08）
     setTracks, setPhase, getPhase, getTracks,
     setOpponentTrack, applyMusicVolume, applyPlayOpponentBgm,

@@ -12,6 +12,7 @@ const ratings = require('../ratings');
 const { genId } = require('../auth');
 const log = require('../logger');
 const { getCache, persist, SIZE_OPTIONS, FORMATS, MIN_SWISS_ROUNDS, MAX_SWISS_ROUNDS, numOrNull, validateSchedule, addLog } = require('./store');
+const store = require('./store'); // 取 `store.matchFactory`（可变量，必须属性访问，见 store.js 说明）
 const { roleOf, normalizeStatus, transition, canManage } = require('./rules');
 const { startSwissRound, voidPlayerSwiss, publicInfo } = require('./swiss-flow');
 const { liveMatchIds, makeBracket, childState, assignNextMatches } = require('./bracket');
@@ -494,6 +495,61 @@ function startTournament(tournamentId, logEntry) {
   return { ok: true, tournament: publicInfo(t) };
 }
 
+/**
+ * 选手发起「开始赛事」——为指定场次建房（约战制，2026-10-11）。
+ *
+ * 背景：赛事开赛后**不再自动建房**（见 `bracket.assignNextMatches` / `swiss-flow.startSwissRound`），
+ * 双方选手在规定时间段内自行约战。本函数即选手点「开始赛事」时的入口：
+ * 校验身份 → 定位该选手那场待打对局 → 建房 → 回填 matchId。
+ *
+ * ⚠️ 权限：**只认连接身份**（playerId 由 transport 层按令牌解析），且必须是本场选手之一；
+ * 不接受客户端指定任意玩家建房（否则等于给「替别人开局」开了口子）。
+ *
+ * @param {string} playerId 发起者（连接身份解析而来）
+ * @param {{tournamentId:string, nodeIndex?:number, round?:number, pairIndex?:number}} spec 场次定位
+ * @returns {{ok:true, roomId:string, tournamentId:string, opponentId:string|null} | {ok:false, error:string}}
+ */
+function startMatch(playerId, spec) {
+  const pid = playerId ? String(playerId) : '';
+  if (!pid) return { ok: false, error: '需要登录' };
+  const s = spec || {};
+  const t = getCache()[s.tournamentId];
+  if (!t) return { ok: false, error: '赛事不存在' };
+  if (normalizeStatus(t.status) !== 'playing') return { ok: false, error: '赛事不在进行中' };
+
+  let players = null;
+  let commit = null;
+
+  if ((t.format || 'single-elimination') === 'swiss') {
+    const rec = (t.rounds || []).find((r) => r.round === s.round);
+    if (!rec) return { ok: false, error: '轮次不存在' };
+    const pair = (rec.pairs || [])[s.pairIndex];
+    if (!Array.isArray(pair) || pair.indexOf(pid) < 0) return { ok: false, error: '你不是这场对局的选手' };
+    if (rec.matchIds && rec.matchIds[s.pairIndex]) return { ok: false, error: '该对局已开始' };
+    if (rec.results && rec.results[swiss.pairKey(pair[0], pair[1])]) return { ok: false, error: '该对局已结束' };
+    players = [pair[0], pair[1]];
+    commit = (roomId) => { rec.matchIds[s.pairIndex] = roomId; rec.matchPairs[roomId] = pair.slice(); };
+  } else {
+    const n = (t.bracket || []).find((x) => x.index === s.nodeIndex);
+    if (!n) return { ok: false, error: '对阵不存在' };
+    if (n.winnerId) return { ok: false, error: '该对局已结束' };
+    if (n.matchId) return { ok: false, error: '该对局已开始' };
+    if (!n.ready) return { ok: false, error: '该对局尚未就绪（对手未产生）' };
+    if ((n.players || []).indexOf(pid) < 0) return { ok: false, error: '你不是这场对局的选手' };
+    players = (n.players || []).slice();
+    commit = (roomId) => { n.matchId = roomId; };
+  }
+
+  const res = store.matchFactory ? store.matchFactory(t.id, players) : null;
+  if (!res || !res.roomId) return { ok: false, error: '创建对局失败，请稍后重试' };
+  commit(res.roomId);
+  addLog(t, { byRole: 'player', action: 'match-start', detail: { roomId: res.roomId, players } });
+  persist();
+
+  const opponentId = players.find((p) => p !== pid) || null;
+  return { ok: true, roomId: res.roomId, tournamentId: t.id, opponentId };
+}
+
 module.exports = {
   createTournament,
   approveTournament,
@@ -508,4 +564,5 @@ module.exports = {
   voidPlayer,
   setChampion,
   startTournament,
+  startMatch, // 约战制：选手发起「开始赛事」（2026-10-11）
 };

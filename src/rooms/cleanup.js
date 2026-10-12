@@ -111,6 +111,10 @@ module.exports = function applyCleanup(X) {
     _scheduleDisconnectLoss(roomId, seat, graceMs = RECONNECT_GRACE_MS) {
       const room = this._room(roomId);
       if (!room) return;
+      // ⚠️ 2026-10-11（问题1）：**赛事对局不做断线判负**。
+      // 约战制下选手随时可离开/回来，"掉线 60s 就判负"会让网络波动直接决定赛果、
+      // 且判负后再也回不到这一局。赛事局的结果由选手实际打完（或主办人 void/取消）决定。
+      if (room.tournamentId) return;
       const timers = this._disconnectTimers.get(roomId) || new Map();
       // 幂等：同座位已有计时器则跳过
       if (timers.has(seat)) return;
@@ -177,6 +181,11 @@ module.exports = function applyCleanup(X) {
       for (const room of [...this.rooms.values()]) {
         const members = this._connectedMemberCount(room);
         if (members === 0) {
+          // ⚠️ 2026-10-11（问题1）：赛事对局房**不参与"无连接清理"**。
+          // 约战制下选手随时可离开/回来，双方都暂时不在线是常态；若 2 分钟就判和+销毁，
+          // 选手就"回不到自己的比赛"、赛程也会被这一刀打断。
+          // 赛事房的回收改由赛事生命周期负责（取消/结束 → `dissolveTournamentMatches`）。
+          if (room.tournamentId) continue;
           if (!room.emptySince) {
             room.emptySince = now;
           } else if (now - room.emptySince >= NO_MEMBER_CLEANUP_MS) {

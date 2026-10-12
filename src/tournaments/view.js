@@ -10,6 +10,63 @@
 const { getCache, FORMAT_LABELS } = require('./store');
 const { normalizeStatus } = require('./rules');
 const { publicInfo, PLACE_LABEL, placeOf } = require('./swiss-flow');
+const swiss = require('../swiss');
+
+/** 选手在本赛事里的显示名（players 快照优先，回退 entrants） */
+function nameOfId(t, id) {
+  const p = (t.players || []).find((x) => x.id === id)
+    || (t.entrants || []).find((x) => x.id === id);
+  return (p && p.name) || null;
+}
+
+/**
+ * 查询某选手「当前可进行的赛事对局」（约战制，2026-10-11）。
+ *
+ * 背景：赛事开赛后不再自动建房，改为选手自行约战。前端在大厅快速匹配区显示
+ * 「开始赛事」按钮时，需要知道：**有没有一场轮到我、且还没开打的对局**，对手是谁。
+ *
+ * @param {string} playerId
+ * @returns {null|{tournamentId:string, tournamentName:string, format:string,
+ *   opponentId:string, opponentName:string|null, nodeIndex?:number, round?:number, pairIndex?:number}}
+ *   null = 当前没有可进行的赛事对局
+ */
+function pendingMatchFor(playerId) {
+  if (!playerId) return null;
+  const pid = String(playerId);
+  for (const t of Object.values(getCache())) {
+    if (normalizeStatus(t.status) !== 'playing') continue;
+    if ((t.format || 'single-elimination') === 'swiss') {
+      for (const rec of (t.rounds || [])) {
+        const pairs = rec.pairs || [];
+        for (let i = 0; i < pairs.length; i++) {
+          const pair = pairs[i];
+          if (!Array.isArray(pair) || pair.indexOf(pid) < 0) continue;
+          if (rec.matchIds && rec.matchIds[i]) continue;           // 已建房（正在打/已打完）
+          if (rec.results && rec.results[swiss.pairKey(pair[0], pair[1])]) continue; // 已出结果
+          const oppId = pair[0] === pid ? pair[1] : pair[0];
+          return {
+            tournamentId: t.id, tournamentName: t.name, format: 'swiss',
+            round: rec.round, pairIndex: i,
+            opponentId: oppId, opponentName: nameOfId(t, oppId),
+          };
+        }
+      }
+    } else {
+      for (const n of (t.bracket || [])) {
+        if (!n.ready || n.matchId || n.winnerId) continue;          // 未配对 / 已打 / 已定
+        const players = n.players || [];
+        if (players.indexOf(pid) < 0) continue;
+        const oppId = players.find((p) => p !== pid) || null;
+        return {
+          tournamentId: t.id, tournamentName: t.name, format: 'single-elimination',
+          nodeIndex: n.index,
+          opponentId: oppId, opponentName: nameOfId(t, oppId),
+        };
+      }
+    }
+  }
+  return null;
+}
 
 
 /**
@@ -107,4 +164,5 @@ module.exports = {
   listAllTournaments,
   getTournament,
   honorsOf,
+  pendingMatchFor,
 };

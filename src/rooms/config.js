@@ -28,6 +28,45 @@ const TIME_CONTROLS = {
 
 const DEFAULT_TIME_CONTROL = '10:00'; // 快速匹配 / 默认标准对局：10 分钟包干
 
+/**
+ * ⚠️ 2026-10-12（读秒语音包）：**报时口径按时间制区分**，配置驱动、客户端照做。
+ *
+ * 用户要求的两条真实规则：
+ *   ① `10+30`（本时 + 秒读）——**进入读秒才会开始报数**，本时阶段不报；
+ *   ② `10分包干`——**不用进入读秒就有报数**，且要有「剩1分」提醒。
+ *
+ * 于是报时的**作用域**由「有没有秒读」决定：
+ *   - `byoyomi > 0`（读秒局）⇒ `source: 'byoyomi'`：报数跟**每手的读秒计数器**走，
+ *     本时阶段保留原有的合成「整分钟提醒」（语音不覆盖）；
+ *   - `byoyomi === 0`（包干局）⇒ `source: 'main'`：报数直接跟**主时钟**走（含剩1分）。
+ *
+ * `milestones` 只取**不超过该计时源长度**的节点（否则秒读 30 秒不会去报「剩1分」）；
+ * `countFrom` 同理取 `min(10, 秒数)`。
+ *
+ * 返回值随 `clock` 消息下发给客户端（见 `rooms/clock.js` 的 `_clockData`）。
+ *
+ * @param {string} timeControl 时间制 id
+ * @returns {{source:'main'|'byoyomi', milestones:number[], countFrom:number}}
+ */
+function announceFor(timeControl) {
+  const tc = TIME_CONTROLS[timeControl] || TIME_CONTROLS[DEFAULT_TIME_CONTROL];
+  const byoSec = Math.floor((tc.byoyomi || 0) / 1000);
+  const MILESTONES = [60, 30, 20]; // 正规报时：剩1分 / 剩30秒 / 剩20秒
+  if (byoSec > 0) {
+    return {
+      source: 'byoyomi',
+      milestones: MILESTONES.filter((m) => m <= byoSec),
+      countFrom: Math.min(10, byoSec),
+    };
+  }
+  const mainSec = Math.floor((tc.main || 0) / 1000);
+  return {
+    source: 'main',
+    milestones: MILESTONES.filter((m) => m <= mainSec),
+    countFrom: Math.min(10, mainSec),
+  };
+}
+
 // 持驹中文名 -> 打子符号（与 game.js legalTargets 的 drop 符号一致）
 const DROP_SYMBOL_BY_NAME = { '歩': 'P', '香': 'L', '桂': 'N', '銀': 'S', '金': 'G', '角': 'B', '飛': 'R' };
 
@@ -56,4 +95,5 @@ module.exports = {
   DEFAULT_TIME_CONTROL,
   DROP_SYMBOL_BY_NAME,
   initClockState,
+  announceFor,
 };

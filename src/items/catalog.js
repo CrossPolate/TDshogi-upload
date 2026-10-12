@@ -30,7 +30,9 @@ const ITEM_TYPES = ['avatar', 'bgm', 'sprite', 'pieces', 'board', 'byoyomi'];
 const BGM_SLOTS = ['bgm-menu', 'bgm-game', 'bgm-endgame'];
 const RARITIES = ['N', 'R', 'SR'];
 /** synth = 程序合成音（无素材文件，如默认读秒「嗒」） */
-const KINDS = ['glyph', 'image', 'audio', 'synth'];
+const KINDS = ['glyph', 'image', 'audio', 'synth', 'audiopack']; // audiopack=读秒语音包 manifest（2026-10-12）
+/** BGM 使用场景（role）：每首 BGM 有唯一场景，装备时自动落到对应槽位（2026-10-08） */
+const BGM_ROLES = ['menu', 'game', 'endgame'];
 const CATALOG_FILE = 'items-catalog.json';
 
 /**
@@ -131,10 +133,13 @@ function normalizeItem(raw) {
   if (!kind) {
     kind = asset.value.startsWith('/') ? 'image' : 'glyph';
   }
+  // 语音包（2026-10-12）：`byoyomi` 槽 + manifest（.json）⇒ audiopack；显式写 kind 也算。
+  if (type === 'byoyomi' && /\.json(\?|$)/i.test(asset.value)) kind = 'audiopack';
   if (!KINDS.includes(kind)) return null;
-  if ((kind === 'audio' || kind === 'synth') && type !== 'bgm' && type !== 'byoyomi') return null;
+  const isVoice = kind === 'audio' || kind === 'synth' || kind === 'audiopack';
+  if (isVoice && type !== 'bgm' && type !== 'byoyomi') return null;
   if (kind !== 'audio' && kind !== 'synth' && type === 'bgm') return null;
-  if (type === 'byoyomi' && kind !== 'audio' && kind !== 'synth') return null;
+  if (type === 'byoyomi' && !isVoice) return null;
   const price = it.price === null || it.price === undefined ? null : Number(it.price);
   if (price !== null && (!Number.isFinite(price) || price < 0)) return null;
   const out = {
@@ -149,10 +154,15 @@ function normalizeItem(raw) {
   if (it.unlock && typeof it.unlock === 'object' && typeof it.unlock.value === 'number') {
     out.unlock = { type: String(it.unlock.type || 'level'), value: it.unlock.value };
   }
+  // ⚠️ 2026-10-11（问题3）：**限定装扮** —— 不进商城、不可购买，只能通过兑换码/活动发放获得。
+  // 拥有后与普通装扮一样可装备、可在「我的装扮」里看到（前端按 `limited` 从商城网格里过滤掉）。
+  if (it.limited === true) out.limited = true;
   // ⚠️ 2026-10-08：BGM 角色（menu/game/endgame）——每首 BGM 有唯一使用场景
-  const BGM_ROLES = ['menu', 'game', 'endgame'];
-  if (type === 'bgm' && typeof it.role === 'string' && BGM_ROLES.includes(it.role)) {
-    out.role = it.role;
+  // ⚠️ 2026-10-12（P1-④）：**BGM 必有 role**。历史/外置数据可能缺 role，这里归一到 'game'
+  //    （开局曲，最常用场景）而不是丢弃条目——缺 role 的 BGM 会让装备请求的槽位退化成
+  //    'bgm'（不在 SLOTS 里 → BAD_SLOT），结果是「发了也永远装不上」。归一后从源头杜绝。
+  if (type === 'bgm') {
+    out.role = BGM_ROLES.includes(it.role) ? it.role : 'game';
   }
   return out;
 }

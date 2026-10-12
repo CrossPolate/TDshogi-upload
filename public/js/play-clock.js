@@ -83,6 +83,46 @@
    *   - 读秒每跨过 10 秒（60/50/40/30/20）→ `playByoyomiMark()`（中频双音）
    *   - 读秒 ≤10 秒 → `playByoyomi()`（高频短「嗒」，原有）
    */
+  // ==================================================================
+  // 读秒语音包报时（2026-10-12）：**装了语音包时接管全部报时**，
+  // 旧的三层合成提醒（整分钟 / 每 10 秒 / 逐秒嗒）静音，避免双声。
+  //
+  // ⚠️ 报时口径由服务端 `clock.announce` 按**时间制**下发（src/rooms/config.js）：
+  //   - byoyomi > 0（如 10+30）：source='byoyomi' ⇒ **进入读秒才开始报数**
+  //   - byoyomi = 0（如 10 分包干）：source='main'  ⇒ **主时钟就报数**（含「剩 1 分」）
+  //
+  // 未装语音包 ⇒ 走旧逻辑，行为一字不变（零回归）。
+  // ==================================================================
+  let announceCfg = null;
+  let announceBook = { b: {}, w: {} };   // 逐手的播报记账（跨多阈值只报最紧急一条）
+  let lastAnnounceTurn = null;
+
+  /** 是否装了语音包（决定用人声报时还是旧的三层合成提醒） */
+  function hasVoicePack() {
+    return !!(window.Sound && window.Sound.hasVoicePack && window.Sound.hasVoicePack());
+  }
+
+  /**
+   * 报一条时（含逐手记账）。计时源由 `announceCfg.source` 决定：
+   *   'byoyomi' → 读秒剩余，且**进读秒才报**；'main' → 本时剩余（包干局整段都报）。
+   *
+   * @returns {boolean} 人声是否**接管了这一拍**。false = 本阶段不归人声管，
+   *   调用方要落回旧提醒（读秒局的**本时阶段**仍是旧的「整分钟提醒」，
+   *   不能因为装了语音包就把它连带静音 —— 那是给买包用户的隐性回归）。
+   */
+  function announceFor(turn) {
+    if (!announceCfg || !window.Sound || typeof window.Sound.announceCountdown !== 'function') return false;
+    const useByo = announceCfg.source === 'byoyomi';
+    if (useByo && !(inByoyomi[turn] && byoyomiDuration > 0)) return false; // 读秒局：进读秒才开始报
+    const remainingMs = useByo ? localByoyomi[turn] : localClocks[turn];
+    if (turn !== lastAnnounceTurn) {
+      announceBook[turn] = {};          // 新一手：清账，不补报上一手的节点
+      lastAnnounceTurn = turn;
+    }
+    window.Sound.announceCountdown(remainingMs, announceCfg, announceBook[turn]);
+    return true;
+  }
+
   function advance(dtMs) {
     const state = getState();
     if (!state || state.status !== 'PLAYING') return;
@@ -90,6 +130,8 @@
     if (inByoyomi[turn] && byoyomiDuration > 0) {
       maybeEndgamePhase(); // 进读秒 ⇒ 终盘曲（幂等）
       localByoyomi[turn] = Math.max(0, localByoyomi[turn] - dtMs);
+      // 语音包接管报时（读秒局：source=byoyomi，正落在这一支）
+      if (hasVoicePack() && announceFor(turn)) return;
 
       // §U1：读秒每跨过 10 秒报时一次。
       // **刻意不含 10 秒**——那一拍交给下面的逐秒「嗒」，否则两个音会叠在一起。
@@ -112,6 +154,8 @@
       localClocks[turn] = Math.max(0, localClocks[turn] - dtMs);
       // ⚠️ 2026-10-11（问题4）：包干局每秒检查一次「是否进入最后一分钟」⇒ 切终盘曲（幂等）。
       maybeEndgamePhase();
+      // 语音包接管报时（包干局：source=main，主时钟就报数、含「剩1分」）
+      if (hasVoicePack() && announceFor(turn)) return;
 
       // §U1：本时每跨过一个整分钟提醒一次（mm = 剩余整分钟数）
       // ⚠️ 条件用 `mm >= 0` 而不是 `>= 1`：`Math.ceil` 使 mm=1 覆盖 (0, 60000]，
@@ -225,6 +269,8 @@
    */
   function syncFromServer(data) {
     if (!data) return;
+    // 报时口径随 clock 消息下发（服务端按时间制算好，见 src/rooms/config.js）
+    if (data.announce) announceCfg = data.announce;
     // 本时：优先服务端真实形状 `data.clock`；兼容历史/测试用的扁平 `data.b/w`
     const c = data.clock || (typeof data.b === 'number' ? { b: data.b, w: data.w } : null);
     if (c && typeof c.b === 'number' && typeof c.w === 'number') {
@@ -287,6 +333,9 @@
     byoyomiDuration = 0;
     lastTickTs = Date.now();
     lastAnchorTurn = null;
+    announceCfg = null;
+    announceBook = { b: {}, w: {} };
+    lastAnnounceTurn = null;
     resetMarks();
   }
 

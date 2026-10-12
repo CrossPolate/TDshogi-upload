@@ -287,6 +287,8 @@ class Protocol {
       case 'create_tournament': return this._hCreateTournament(clientId, player, data);
       case 'join_tournament': return this._hJoinTournament(clientId, player, data);
       case 'join_tournament_match': return this._hJoinTournamentMatch(clientId, player, data);
+      // 约战制（2026-10-11）：选手发起「开始赛事」为指定场次建房
+      case 'start_tournament_match': return this._hStartTournamentMatch(clientId, player, data);
       // 感想战演示行棋（PLAN §G）：move / undo / transfer / claim / reset 共用一条
       case 'demo_move':
       case 'demo_undo':
@@ -307,15 +309,19 @@ class Protocol {
   // ==================================================================
   // REST 辅助（供 server.js 调用）
   // ==================================================================
-  lobbyData() {
+  lobbyData(playerId = null) {
     // 非管理员公开出口：统一过隐私白名单（PLAN §M3/§K——结构性保证，不靠人肉记忆）
-    return privacy.stripPrivate({
+    const out = {
       // 在线人数一律走统一统计出口（§T1），口径见 `_stats()` 注释
       stats: this._stats(),
       games: this.rooms.activeGames(),
       announcements: listAnnouncements(),
       leaderboard: ratings.leaderboard(null, 10),
-    });
+    };
+    // 约战制（2026-10-11）：带身份时下发「我当前可进行的赛事对局」，
+    // 供大厅快速匹配区渲染「开始赛事」按钮。未登录/无待打对局 → null。
+    if (playerId) out.myTournamentMatch = tournaments.pendingMatchFor(playerId);
+    return privacy.stripPrivate(out);
   }
 
   homeData() {

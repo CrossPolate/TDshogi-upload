@@ -127,6 +127,10 @@
       act('user-save-profile', (el) => hub.adminSaveProfile && hub.adminSaveProfile(at(el, 'data-id')));
       act('user-save-elo', (el) => hub.adminSaveElo && hub.adminSaveElo(at(el, 'data-id')));
       act('user-rename', (el) => hub.adminRename && hub.adminRename(at(el, 'data-id'), at(el, 'data-name')));
+      // ⚠️ 2026-10-12（道具发放 P0-③）：用户侧发放入口——复制 id / 详情内直接发放道具与货币
+      act('user-copy-id', (el) => hub.adminCopyId && hub.adminCopyId(at(el, 'data-id')));
+      act('user-grant-item', (el) => hub.adminGrantItem && hub.adminGrantItem(at(el, 'data-id'), at(el, 'data-name')));
+      act('user-grant-coin', (el) => hub.adminGrantCoin && hub.adminGrantCoin(at(el, 'data-id'), at(el, 'data-name')));
       act('user-reset-rating', (el) => hub.adminResetRating && hub.adminResetRating(at(el, 'data-id'), at(el, 'data-name')));
       act('user-reset-pwd', (el) => hub.adminResetPassword && hub.adminResetPassword(at(el, 'data-id'), at(el, 'data-name')));
       act('user-delete', (el) => hub.adminDeleteAccount && hub.adminDeleteAccount(at(el, 'data-id'), at(el, 'data-name')));

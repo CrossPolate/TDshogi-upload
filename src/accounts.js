@@ -277,6 +277,19 @@ function getAccount(accountId) {
   return a ? publicInfo(a) : null;
 }
 
+/**
+ * ⚠️ 2026-10-12（道具发放 P0）：按**用户名**精确查账号。
+ *
+ * 后台「发放道具」只能手输 24 hex 账号 id（用户表里只是一行 11px 灰字、还不能复制），
+ * 而输错在旧实现里会被静默写成"孤儿键"道具 —— 于是"发放不出去"成了日常事故。
+ * 给发放一条按名字的通道（精确匹配用户名，返回 publicInfo，含 `id` 作为道具存储键）。
+ */
+function getAccountByName(username) {
+  const n = String(username == null ? '' : username).trim();
+  if (!n) return null;
+  return Object.values(getCache()).find((a) => a && a.username === n) || null;
+}
+
 function listAccounts() {
   return Object.values(getCache()).map(publicInfo);
 }
@@ -566,6 +579,7 @@ module.exports = {
   verifyToken,
   issueToken,
   getAccount,
+  getAccountByName, // ⚠️ 2026-10-12 道具发放：按用户名查（后台不必再手抄 24 hex id）
   listAccounts,
   listAccountsRaw, // §U5 游客清理用：含 guestId 等非公开字段，仅服务端内部
   publicInfo,
