@@ -1,0 +1,538 @@
+/**
+ * lobby.js — 对战大厅 View：快速匹配、创建/加入房间、观战列表
+ *
+ * SPA 迁移（2026-10-09）：从「IIFE 加载即自启」改为**有生命周期的 View**——
+ *   render(params)          → 返回 `<main class="container">…`（原 lobby.html 的主体，逐字保留）
+ *   mount(container, params)→ 绑定事件 / 订阅 WS / 起轮询，句柄记进 this._teardown
+ *   unmount()               → 统一清理，切页零泄漏
+ *
+ * 范式（照 home.js）：
+ *   - 不再调用 `NAV.renderNav`（外壳已渲染一次，router 更新 active）→ 改 `NAV.getGuest()`。
+ *   - 不再调用 `api.connect`（外壳持有唯一 WS）。
+ *   - `location.href = 'xxx.html?…'` → `Router.navigate('…')`。
+ *   - 所有 setInterval / setTimeout / api.on / MutationObserver / 元素监听，统一在 unmount 清理。
+ */
+(function (global) {
+  'use strict';
+
+  const UI = global.UI;
+
+  const View = {
+    title: '对战 · TDShogi',
+
+    render() {
+      // —— 原 lobby.html 的 <main class="container"> … </main> 主体，逐字保留 ——
+      return `
+  <main class="container">
+    <header class="page-head">
+      <h1 class="page-title">对战大厅</h1>
+      <p class="page-sub">快速匹配在线对手，或创建房间邀请好友 —— 免注册即刻开局</p>
+    </header>
+
+    <div class="lobby-grid">
+      <!-- 快速匹配 -->
+      <div class="card lobby-card">
+        <h3>⚔️ 快速匹配</h3>
+        <p>一键匹配在线对手，两人即开，实时对局。</p>
+        <div style="font-size:12px;color:var(--text-dim);margin:10px 0 14px;">⏱ 10 分钟包干（标准比赛）</div>
+        <div id="matchControls">
+          <button class="btn btn-primary btn-lg" id="btnQuickMatch" style="width:100%;">开始匹配</button>
+        </div>
+        <!-- 赛事约战（2026-10-11）：有可进行的赛事对局时显示，点击即与指定对手开局 -->
+        <div id="tnMatchBox" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+          <div id="tnMatchHint" style="font-size:12px;color:var(--gold-light);margin-bottom:8px;line-height:1.7;"></div>
+          <button class="btn btn-primary btn-lg" id="btnStartTnMatch" style="width:100%;">⚔️ 开始赛事</button>
+        </div>
+        <div class="match-wait" id="matchWait">
+          <div class="spinner"></div>
+          <div>正在寻找对手…<br><span style="font-size:12px;color:var(--text-dim);">点击下方按钮取消</span></div>
+          <button class="btn btn-ghost" id="btnCancelMatch" style="margin-top:12px;">取消匹配</button>
+        </div>
+      </div>
+
+      <!-- 创建房间 -->
+      <div class="card lobby-card">
+        <h3>🏠 创建房间</h3>
+        <p>生成 6 位房间码，邀请好友加入对局。</p>
+        <div style="margin:14px 0;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">比赛时间</div>
+          <select class="select" id="roomTimeControl" style="width:100%;">
+            <option value="10:00">10 分钟包干（标准比赛）</option>
+            <option value="15+60">15 分钟 + 60 秒读秒</option>
+            <option value="10+30">10 分钟 + 30 秒读秒</option>
+            <option value="10sec">10 秒快棋</option>
+          </select>
+        </div>
+        <!-- 手合割（駒落ち让子）：选项由服务端 \`hello.handicaps\` 下发，前端不抄那张表 -->
+        <div style="margin:0 0 14px;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">手合割（让子）</div>
+          <select class="select" id="roomHandicap" style="width:100%;">
+            <option value="even">平手（标准开局）</option>
+          </select>
+          <div id="handicapHint" style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.7;">平手：双方对等开局；选择让子则由上手（先手）少若干枚棋子。</div>
+        </div>
+        <!-- 私人房间（PLAN §T2）：休闲模式——不计 ELO，经验值照常加。
+             ⚠️ 2026-10-02 文案修正：留空密码时房间仍可凭码加入/观战，原「不开放观战」承诺不成立。 -->
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:8px;">
+          <input type="checkbox" id="roomPrivate" style="width:16px;height:16px;cursor:pointer;">
+          <span>🔒 私人房间 <span style="color:var(--text-dim);font-size:12px;">（不计 ELO · 设了密码才需密码加入）</span></span>
+        </label>
+        <div id="roomPasswordWrap" style="display:none;margin:0 0 14px;">
+          <input class="input" id="roomPassword" type="password" placeholder="房间密码（4-8 位，可留空表示不设密码）" maxlength="8" style="width:100%;">
+        </div>
+
+        <button class="btn btn-ghost btn-lg" id="btnCreateRoom" style="width:100%;">创建房间</button>
+        <div id="roomCreated" style="display:none;margin-top:16px;text-align:center;">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">房间码</div>
+          <div id="roomCode" style="font-size:34px;font-weight:900;letter-spacing:6px;color:var(--gold-light);font-family:var(--font-serif);"></div>
+          <button class="btn btn-sm btn-ghost" id="btnCopyCode" style="margin-top:10px;">复制房间码</button>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:10px;">等待对手加入后自动开局…</div>
+        </div>
+      </div>
+
+      <!-- 加入房间 -->
+      <div class="card lobby-card">
+        <h3>🔑 加入房间</h3>
+        <p>输入好友提供的 6 位房间码加入对局。</p>
+        <input class="input" id="joinCode" placeholder="输入房间码，如 AB3X7Q" maxlength="6" style="width:100%;text-transform:uppercase;letter-spacing:4px;margin-bottom:12px;">
+        <!-- 私人房间密码：仅在服务端回「需要密码」后出现（PLAN §T2），平时不占版面 -->
+        <div id="joinPasswordWrap" style="display:none;margin-bottom:12px;">
+          <input class="input" id="joinPassword" type="password" placeholder="该房间需要密码" maxlength="8" style="width:100%;">
+        </div>
+        <button class="btn btn-primary btn-lg" id="btnJoinRoom" style="width:100%;">加入房间</button>
+        <!-- 凭房间码观战（PLAN §T2）：私人房观战需密码；赛事房/普通房直接进 -->
+        <button class="btn btn-ghost" id="btnSpectateRoom" style="width:100%;margin-top:8px;">👁 观战（用房间码）</button>
+      </div>
+    </div>
+
+    <!-- 进行中对局（观战） -->
+    <section class="card pad-card">
+      <div class="section-title">进行中的对局（观战）</div>
+      <div id="activeGames"></div>
+    </section>
+  </main>`;
+    },
+
+    mount(container) {
+      this._teardown = [];
+      const guest = global.NAV.getGuest();   // 铁律1：替代原 NAV.renderNav('lobby')（导航由外壳渲染）
+      const api = global.API;                // 铁律2：不再 api.connect（外壳持有唯一 WS）
+      const $ = (id) => UI.$(id);
+      const esc = (s) => UI.esc(s);
+      const toast = (m) => UI.toast(m);
+
+      // 元素事件统一登记（元素虽随 DOM 销毁，仍一并记录，双保险）
+      const on = (el, ev, fn) => {
+        if (!el) return;
+        el.addEventListener(ev, fn);
+        this._teardown.push(() => el.removeEventListener(ev, fn));
+      };
+
+      // ------------------------------------------------------------------
+      // 服务端状态镜像（SPA 切页清理用）
+      //   _matchActive  : 已发 quick_match，仍在队列里
+      //   _waitingRoom  : 自己创建、尚未开局的房间（{ roomId, code }）
+      //   _enteringGame : 服务端事件正在把用户送进 play 页（不是“用户离开”）
+      // 没有这些镜像，unmount 无从判断该发 cancel_match 还是 leave。
+      // ------------------------------------------------------------------
+      this._matchActive = false;
+      this._waitingRoom = null;
+      this._enteringGame = false;
+
+      /** 主动结束匹配并复位 UI（取消按钮 / 转去观战 / 转去赛事共用） */
+      const stopMatching = () => {
+        if (!this._matchActive) return;
+        this._matchActive = false;
+        api.send({ type: 'cancel_match' });
+        const wait = $('matchWait');
+        const controls = $('matchControls');
+        if (wait) wait.classList.remove('show');
+        if (controls) controls.style.display = 'block';
+      };
+
+      // ---- 快速匹配 ----
+      on($('btnQuickMatch'), 'click', () => {
+        this._matchActive = true;
+        api.send({ type: 'quick_match' });
+        $('matchControls').style.display = 'none';
+        const wait = $('matchWait');
+        wait.classList.add('show');
+        // ⚠️ 2026-10-02 体验修复：显示已等待时长（此前只有 spinner，用户无法判断是否卡死）
+        let tip = $('matchWaitTimer');
+        if (!tip) {
+          tip = document.createElement('div');
+          tip.id = 'matchWaitTimer';
+          tip.style.cssText = 'margin-top:8px;font-size:13px;color:var(--text-dim);';
+          wait.appendChild(tip);
+        }
+        let sec = 0;
+        tip.textContent = '已等待 0 秒…';
+        const iv = setInterval(() => {
+          sec += 1;
+          tip.textContent = `已等待 ${sec} 秒…（超过 30 秒仍未匹配可点取消后重试）`;
+        }, 1000);
+        // 等待 UI 一旦被隐藏（匹配成功 / 失败 / 取消），自动停表
+        const obs = new MutationObserver(() => {
+          if (!wait.classList.contains('show')) { clearInterval(iv); obs.disconnect(); }
+        });
+        obs.observe(wait, { attributes: true, attributeFilter: ['class'] });
+        // SPA：切页时也要停表/断观察（否则计时器泄漏到别的页面）
+        this._teardown.push(() => {
+          clearInterval(iv);
+          try { obs.disconnect(); } catch (_) {}
+        });
+      });
+      on($('btnCancelMatch'), 'click', stopMatching);
+
+      // ---- 手合割（駒落ち让子）----
+      // 选项来自服务端 `hello.handicaps`（本项目的既有分工：表只在服务端维护一份）。
+      // ⚠️ 两头都取：立即读一次缓存（`hello` 可能早于本页注册监听器就到了），
+      //    再注册监听器兜住"还没到"的情况——只做一头就会出现"下拉框偶尔是空的"。
+      let handicaps = [];
+      function fillHandicaps(list) {
+        if (list && list.length) handicaps = list;
+        const sel = $('roomHandicap');
+        if (!sel || !handicaps.length) return;
+        const keep = sel.value;
+        sel.innerHTML = handicaps.map((h) => `<option value="${esc(h.id)}">${esc(h.label)}</option>`).join('');
+        if (keep && handicaps.some((h) => h.id === keep)) sel.value = keep;
+        syncHandicapHint();
+      }
+      function syncHandicapHint() {
+        const sel = $('roomHandicap');
+        const box = $('handicapHint');
+        if (!sel || !box) return;
+        const cur = handicaps.find((h) => h.id === sel.value);
+        const isEven = !sel.value || sel.value === 'even';
+        box.innerHTML = (cur && !isEven)
+          ? `${esc(cur.hint || '')}<br>⚠️ 让子局：<b>房主执上手（少子的那一方）并先走</b>，不计 ELO。`
+          : '不让子：双方各 20 枚，房主随机执先手，计入 ELO。';
+      }
+      fillHandicaps(api.handicaps);
+      this._teardown.push(api.on('hello', (d) => fillHandicaps(d && d.handicaps)));
+      on($('roomHandicap'), 'change', syncHandicapHint);
+
+      // ---- 创建房间 ----
+      // 私人房间（PLAN §T2）：休闲模式（不计 ELO，经验照常加）+ 可选密码；
+      // 勾选后才显示密码框，密码留空 = 不设门禁（只是休闲局）
+      let lastCreatedPrivate = false;
+      on($('roomPrivate'), 'change', (e) => {
+        $('roomPasswordWrap').style.display = e.target.checked ? 'block' : 'none';
+      });
+      on($('btnCreateRoom'), 'click', () => {
+        const timeControl = $('roomTimeControl').value || '10:00';
+        const isPrivate = $('roomPrivate').checked;
+        const password = $('roomPassword').value.trim();
+        if (isPrivate && password && (password.length < 4 || password.length > 8)) {
+          return toast('房间密码需 4-8 位');
+        }
+        lastCreatedPrivate = isPrivate;
+        api.send({
+          type: 'create_room',
+          data: {
+            timeControl, isPrivate, password,
+            // 手合割（駒落ち让子）：空 = 平手。服务端会拒绝未知 id
+            handicap: $('roomHandicap').value || null,
+          },
+        });
+      });
+
+      // ---- 加入房间 ----
+      on($('btnJoinRoom'), 'click', () => {
+        const code = $('joinCode').value.trim().toUpperCase();
+        if (!/^[A-Z0-9]{6}$/.test(code)) return toast('请输入 6 位有效房间码');
+        const password = $('joinPassword').value.trim();
+        api.send({ type: 'join_room', data: { code, password } });
+      });
+
+      // ---- 凭房间码观战（PLAN §T2）----
+      // 私人房：房间码 + 密码 = 房主的邀请；赛事房/普通房：直接进
+      on($('btnSpectateRoom'), 'click', () => {
+        const code = $('joinCode').value.trim().toUpperCase();
+        if (!/^[A-Z0-9]{6}$/.test(code)) return toast('请输入 6 位有效房间码');
+        const password = $('joinPassword').value.trim();
+        // 密码必须随「跳到 play 页的那个新连接」一起过去（授权不跨连接）。
+        // 放 sessionStorage 而非 URL：避免密码留在浏览器历史与服务端访问日志里。
+        if (password) window.sessionStorage.setItem('tdshogi_spectate_pw', password);
+        else window.sessionStorage.removeItem('tdshogi_spectate_pw');
+        // 若自己还在匹配队列：先取消。spectate 不会顺手移除队列成员，
+        // 不取消的话可能“一边观战、一边被匹配进一局看不见的对局”。
+        stopMatching();
+        // 若自己还有一个等待房：先退出它。服务端 spectate 不会顺手解绑 WAITING 座位，
+        // 不先 leave 的话房主会一边观战别人、一边留下一个可被加入的幽灵房。
+        if (this._waitingRoom) {
+          this._waitingRoom = null;
+          api.send({ type: 'leave' });
+        }
+        api.send({ type: 'spectate', data: { code, password } });
+      });
+      // 回车直接加入（房间码 / 密码框内均可）
+      ['joinCode', 'joinPassword'].forEach((id) => {
+        on($(id), 'keydown', (e) => {
+          if (e.key === 'Enter') $('btnJoinRoom').click();
+        });
+      });
+
+      // ---- WS 事件（api.on 返回退订函数 → 直接记进 teardown）----
+      this._teardown.push(api.on('room_created', (data) => {
+        // 建房会离开匹配队列（服务端 _unbindClient 已移除）；等待中的 spinner 也要一起收起
+        this._matchActive = false;
+        const wait = $('matchWait');
+        const controls = $('matchControls');
+        if (wait) wait.classList.remove('show');
+        if (controls) controls.style.display = 'block';
+        this._waitingRoom = { roomId: data.roomId, code: data.code };
+        $('roomCode').textContent = data.code;
+        $('roomCreated').style.display = 'block';
+        toast(lastCreatedPrivate
+          ? '私人房间已创建，把房间码与密码发给好友'
+          : '房间已创建，等待对手加入');
+      }));
+      this._teardown.push(api.on('matching', (d) => {
+        // 服务端对 quick_match / cancel_match 的权威回执，也可能是「同身份另一窗口
+        // 已进入房间/观战」导致的被动退出（reason=identity_left_queue）。
+        const wasActive = this._matchActive;
+        this._matchActive = !!(d && d.ok);
+        const wait = $('matchWait');
+        const controls = $('matchControls');
+        if (wait) wait.classList.toggle('show', this._matchActive);
+        if (controls) controls.style.display = this._matchActive ? 'none' : 'block';
+        if (this._matchActive) {
+          // quick_match 成功时服务端会销毁原来的等待房 → 房间码 UI 必须一起收起，
+          // 否则用户会对着一个已经失效的码发给好友。
+          this._waitingRoom = null;
+          const rc = $('roomCreated');
+          if (rc) rc.style.display = 'none';
+        } else if (wasActive && d && d.reason === 'identity_left_queue') {
+          toast('你的身份已在另一处进入对局，已退出匹配');
+        }
+      }));
+      this._teardown.push(api.on('room_closed', (data) => {
+        // 房间被服务端关闭（房主换房 / 管理员 / 另一窗口操作）→ 清掉可加入的房间码
+        if (!this._waitingRoom || !data || data.roomId !== this._waitingRoom.roomId) return;
+        this._waitingRoom = null;
+        $('roomCreated').style.display = 'none';
+        toast('房间已关闭');
+      }));
+      this._teardown.push(api.on('room_joined', (data) => {
+        this._enteringGame = true;
+        this._matchActive = false;
+        this._waitingRoom = null;
+        toast('加入成功，对局开始！');
+        const t = setTimeout(() => global.Router.navigate(`play.html?room=${data.roomId}`), 400);
+        this._teardown.push(() => clearTimeout(t));
+      }));
+      this._teardown.push(api.on('matched', (data) => {
+        this._enteringGame = true;
+        this._matchActive = false;
+        this._waitingRoom = null;
+        toast('匹配成功！对局开始');
+        const t = setTimeout(() => global.Router.navigate(`play.html?room=${data.roomId}`), 400);
+        this._teardown.push(() => clearTimeout(t));
+      }));
+      this._teardown.push(api.on('game_start', (data) => {
+        if (location.search.includes('room')) return;
+        this._enteringGame = true;
+        this._matchActive = false;
+        this._waitingRoom = null;
+        global.Router.navigate(`play.html?room=${data.roomId}`);
+      }));
+      this._teardown.push(api.on('spectating', (data) => {
+        // ⚠️ 2026-10-02 体验修复：观战跳转必须带 &spectate=1（与首页随机观战同口径）。
+        // 否则 play 页会走 request_state → 非选手/未绑定 → 服务端回 no_room
+        // → 被弹回大厅并谎报「该对局已结束或不存在」。
+        this._enteringGame = true;
+        global.Router.navigate(`play.html?room=${data.roomId}&spectate=1`);
+      }));
+      // 赛事约战（2026-10-11）：我方发起 或 对手发起 → 都进同一对局房。
+      // 带 &join=1：play 页收到后会发 join_tournament_match 回位到座位（赛事房由系统建、需显式进座）。
+      this._teardown.push(api.on('tournament_match_started', (data) => {
+        if (!data || !data.roomId) return;
+        this._enteringGame = true;
+        toast(data.initiator ? '赛事对局已创建，祝好运！' : '对手发起了赛事对局，正在进入…');
+        global.Router.navigate(`play.html?room=${encodeURIComponent(data.roomId)}&join=1`);
+      }));
+      this._teardown.push(api.on('error', (data) => {
+        if (!data || !data.message) return;
+        toast(data.message);
+        // 匹配失败一律复位等待 UI（此前靠 message 含「匹配」才复位，
+        // 而「你正在对局中」/「同一身份不能自己和自己对弈」等文案不含「匹配」→ spinner 永远转）。
+        this._matchActive = false;
+        $('matchWait').classList.remove('show');
+        $('matchControls').style.display = 'block';
+        // 私人房间需要密码（PLAN §T2）：服务端回的是**结构化标志** → 亮出密码框并聚焦。
+        if (data.needPassword) {
+          $('joinPasswordWrap').style.display = 'block';
+          $('joinPassword').focus();
+        }
+        // 在局中被禁止观战：服务端回了 backRoomId → 引导回自己的对局（此前前端从不使用）
+        if (data.backRoomId) {
+          this._enteringGame = true;
+          global.Router.navigate(`play.html?room=${encodeURIComponent(data.backRoomId)}`);
+        }
+      }));
+
+      // ---- 观战列表 + 赛事约战 ----
+      let lastGamesSig = '';
+      let myTnMatch = null;
+      async function loadGames() {
+        try {
+          // 带身份拉取：识别「我当前可进行的赛事对局」（约战制，2026-10-11）
+          const data = await global.ApiUtils.get('/api/lobby', guest.id ? { accountToken: guest.id } : undefined);
+          renderGames(data.games);
+          myTnMatch = data.myTournamentMatch || null;
+          renderTnMatch();
+        } catch (e) {
+          console.error(e);
+          // 此前只打日志：断网/500 时用户看到“没有进行中的对局”，无法判断是真空还是加载失败
+          showGamesError();
+        }
+      }
+      function showGamesError() {
+        const el = $('activeGames');
+        if (!el || lastGamesSig === 'error') return;
+        lastGamesSig = 'error';
+        el.innerHTML = '<div style="color:var(--red-light);font-size:13px;">对局列表加载失败，'
+          + '<button class="btn btn-ghost btn-sm" data-games-retry="1" style="margin-left:6px;">重试</button></div>';
+      }
+      // 列表点击统一走事件委托：列表每 5 秒重绘，此前每个卡片单独 addEventListener
+      // 并 push 进 teardown，旧闭包会一直持有被替换的 DOM（长时间停留大厅会持续增长）。
+      on($('activeGames'), 'click', (e) => {
+        const retry = e.target.closest && e.target.closest('[data-games-retry]');
+        if (retry) {
+          lastGamesSig = '';
+          loadGames();
+          return;
+        }
+        const card = e.target.closest && e.target.closest('.game-card');
+        if (!card) return;
+        const roomId = card.getAttribute('data-room');
+        if (!roomId) return;
+        // 点击时再按当前 playerId 判定：首次列表可能早于 hello 返回，
+        // 若把结果冻结在 data-mine 上，会把自己的对局误当成观战。
+        const myId = api.playerId;
+        const mine = !!(myId && (card.getAttribute('data-pb') === myId || card.getAttribute('data-pw') === myId));
+        global.Router.navigate(`play.html?room=${encodeURIComponent(roomId)}${mine ? '' : '&spectate=1'}`);
+      });
+      /** 渲染「开始赛事」按钮（有可进行的赛事对局时才显示） */
+      let tnBtnBound = false;
+      function renderTnMatch() {
+        const box = $('tnMatchBox');
+        if (!box) return;
+        if (!myTnMatch) { box.style.display = 'none'; return; }
+        const m = myTnMatch;
+        $('tnMatchHint').innerHTML = `🏆 赛事「${esc(m.tournamentName || '')}」有一场轮到你：<br>对阵 <b>${esc(m.opponentName || '对手')}</b>（约定时间内完赛即可）`;
+        box.style.display = 'block';
+        const btn = $('btnStartTnMatch');
+        // ⚠️ 只绑一次：loadGames 每 5 秒轮询都会调本函数，而按钮元素始终是同一个，
+        // 反复 addEventListener 会叠加监听 → 点一下发 N 次请求。
+        if (btn && !tnBtnBound) {
+          tnBtnBound = true;
+          on(btn, 'click', () => {
+            if (!myTnMatch) return;
+            // 赛事对局优先：还在快速匹配队列里就先退出，避免同时被匹配进另一局
+            stopMatching();
+            api.send({
+              type: 'start_tournament_match',
+              data: {
+                tournamentId: myTnMatch.tournamentId,
+                nodeIndex: myTnMatch.nodeIndex,
+                round: myTnMatch.round,
+                pairIndex: myTnMatch.pairIndex,
+              },
+            });
+          });
+        }
+      }
+      function renderGames(games) {
+        const el = $('activeGames');
+        if (!el) return;
+        if (!games || !games.length) {
+          if (lastGamesSig === 'empty') return;
+          lastGamesSig = 'empty';
+          el.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">当前没有进行中的对局</div>';
+          return;
+        }
+        // ⚠️ 2026-10-02 体验修复：列表每 5s 全量重排，光标下的卡片会突然换位置导致误点；
+        // 内容无变化时直接跳过重绘（用房间码+走子数+观战数+玩家名做指纹）。
+        const sig = games.map((g) => `${g.roomId}:${g.moveCount}:${g.spectatorCount || 0}`
+          + `:${(g.players && g.players.b) || ''}:${(g.players && g.players.w) || ''}`
+          + `:${(g.playerIds && g.playerIds.b) || ''}:${(g.playerIds && g.playerIds.w) || ''}`).join('|');
+        if (sig === lastGamesSig) return;
+        lastGamesSig = sig;
+        // §R4 热门优先：观众多的排前面（Array.sort 稳定，同人数保持服务端原序）。
+        const list = [...games].sort((a, b) => (b.spectatorCount || 0) - (a.spectatorCount || 0));
+        // 显示房间码 + 对局类型 + 走子数 + 观战人数，便于区分重名玩家；名字带悬停信息卡
+        el.innerHTML = list.map((g) => {
+          const typeName = g.type === 'reviewing' ? '🎤 复盘中' : g.type === 'quick' ? '快速匹配' : g.type === 'tournament' ? '赛事' : '房间对局';
+          const pid = g.playerIds || {};
+          const sc = g.spectatorCount || 0;
+          const spec = sc > 0 ? ` · 👁 <b style="color:var(--gold-light);">${sc}</b> 人观战` : ' · 观战';
+          // 让子局必须标出来：不标的话，点进去观战的人看到"棋盘少了几枚棋子"会以为是坏了
+          const hd = g.handicapLabel ? ` · ♟ ${esc(g.handicapLabel)}` : '';
+          // ⚠️ 2026-10-02 体验修复：卡片显示时制（服务端已下发 timeControl，此前前端丢弃 → 要进房才知道节奏）
+          const tc = g.timeControl ? ` · ⏱ ${esc(g.timeControl)}` : '';
+          // 自己的 playerId 不在渲染时冻结，只把双方 id 放进 data 属性；
+          // 点击时（委托）再比较当前 api.playerId——见上面的 click 处理。
+          return `
+      <div class="game-card" data-room="${esc(g.roomId)}" data-pb="${esc(pid.b || '')}" data-pw="${esc(pid.w || '')}">
+        <div class="players">
+          <span data-player-id="${esc(pid.b || '')}">${esc(g.players.b || '先手')}</span>
+          <span class="vs">vs</span>
+          <span data-player-id="${esc(pid.w || '')}">${esc(g.players.w || '後手')}</span>
+        </div>
+        <div class="meta">房间 ${esc(g.code)} · ${typeName}${tc} · ${g.moveCount} 手${hd}${spec}</div>
+      </div>
+    `;
+        }).join('');
+      }
+
+      loadGames();
+      const pollTimer = setInterval(loadGames, 5000);
+      this._teardown.push(() => clearInterval(pollTimer));
+    },
+
+    /**
+     * 离开守卫（Router 契约）：等待房还在时提醒“离开会关房”。
+     * 服务端开局 / 观战跳转（target=play）不是用户离开，直接放行。
+     */
+    confirmLeave(target) {
+      if (this._enteringGame) return true;
+      if (target && target.viewName === 'play') return true;
+      if (this._waitingRoom) {
+        return global.confirm('房间还在等待对手，离开将关闭房间。确定离开吗？') === true;
+      }
+      return true;
+    },
+
+    /**
+     * 真正离开大厅时同步服务端状态。
+     *
+     * ⚠️ SPA 不会因切页断开 WebSocket：不主动 cancel/leave 的话，
+     * 匹配队列会残留（别人匹配到一个“看不见的对手”），等待房也会永远挂着。
+     */
+    onLeave(target) {
+      if (this._enteringGame) return;
+      // 去 play 页只可能来自开局/观战事件，不是“放弃大厅里的等待状态”
+      if (target && target.viewName === 'play') return;
+      if (this._matchActive) {
+        this._matchActive = false;
+        global.API.send({ type: 'cancel_match' });
+      }
+      if (this._waitingRoom) {
+        this._waitingRoom = null;
+        global.API.send({ type: 'leave' });
+      }
+    },
+
+    unmount() {
+      (this._teardown || []).forEach((fn) => { try { fn(); } catch (_) {} });
+      this._teardown = [];
+      this._matchActive = false;
+      this._waitingRoom = null;
+      this._enteringGame = false;
+    },
+  };
+
+  global.Views.lobby = View;
+})(window);

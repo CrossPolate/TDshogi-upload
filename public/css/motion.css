@@ -1,0 +1,203 @@
+/* ============================================================
+   TDShogi 动效与交互地基 — motion.css
+
+   定位：给「以后加动画」提供**统一接口 + 一键降级**，而非换皮。
+     ① 动效令牌：时长 / 缓动 / 位移 / 阴影层级 / 聚焦环
+     ② 关键帧 + 可组合工具类（--anim-dur / --anim-delay / .stagger）
+     ③ 全局交互态的过渡：按钮 / 卡片 / 导航 / 输入焦点
+     ④ prefers-reduced-motion 一键全部关闭（可访问性底线）
+
+   ⚠️ 加载顺序：**必须在 style.css 之后**（同优先级下靠后生效，
+      用于「追加覆盖」基础态）。不要放进 style.css 顶部 @import。
+   ⚠️ 加新动画请优先复用下方令牌与关键帧，别在页面里散写 magic number。
+   ============================================================ */
+
+:root {
+  /* ---- 时长 ---- */
+  --dur-instant: 80ms;
+  --dur-fast: 140ms;
+  --dur-base: 220ms;
+  --dur-slow: 360ms;
+  --dur-slower: 520ms;
+
+  /* ---- 缓动 ---- */
+  --ease-standard: cubic-bezier(0.2, 0, 0.2, 1);   /* 通用进出 */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);       /* 入场（快出） */
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);   /* 平滑往返 */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);/* 轻微回弹 */
+
+  /* ---- 位移 / 缩放 ---- */
+  --slide-y: 14px;
+  --pop-scale: 0.96;
+
+  /* ---- 阴影层级（统一叠加，别各写各的） ---- */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-2: 0 6px 24px rgba(0, 0, 0, 0.35);
+  --shadow-3: 0 14px 44px rgba(0, 0, 0, 0.5);
+
+  /* ---- 聚焦环（键盘可访问性） ---- */
+  --ring: 0 0 0 3px rgba(201, 162, 39, 0.5);
+}
+
+.theme-light {
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-2: 0 6px 24px rgba(0, 0, 0, 0.10);
+  --shadow-3: 0 14px 44px rgba(0, 0, 0, 0.16);
+}
+
+/* ============================================================
+   ① 关键帧
+   ============================================================ */
+@keyframes anim-fade { from { opacity: 0; } to { opacity: 1; } }
+
+@keyframes anim-rise {
+  from { opacity: 0; transform: translateY(var(--slide-y)); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes anim-pop {
+  from { opacity: 0; transform: scale(var(--pop-scale)); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes anim-slide-in-left {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes anim-shimmer { to { background-position: 200% 0; } }
+
+@keyframes anim-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+
+/* ============================================================
+   ② 工具类（可组合）
+   用法：class="anim-rise"；可用 style="--anim-dur: .6s; --anim-delay: 120ms" 覆盖
+   ============================================================ */
+.anim-fade,
+.anim-rise,
+.anim-pop,
+.anim-slide-in-left {
+  animation-fill-mode: both;
+  animation-duration: var(--anim-dur, var(--dur-base));
+  animation-delay: var(--anim-delay, 0ms);
+  animation-timing-function: var(--ease-out);
+  will-change: transform, opacity;
+}
+.anim-fade { animation-name: anim-fade; }
+.anim-rise { animation-name: anim-rise; animation-duration: var(--anim-dur, var(--dur-slow)); }
+.anim-pop  { animation-name: anim-pop; animation-timing-function: var(--ease-spring); }
+.anim-slide-in-left { animation-name: anim-slide-in-left; animation-duration: var(--anim-dur, var(--dur-slow)); }
+
+/* 错峰入场：给一组同级子项用，自动 40ms 递增 */
+.stagger > * {
+  animation-name: anim-rise;
+  animation-duration: var(--dur-slow);
+  animation-timing-function: var(--ease-out);
+  animation-fill-mode: both;
+}
+.stagger > *:nth-child(1) { animation-delay: 40ms; }
+.stagger > *:nth-child(2) { animation-delay: 80ms; }
+.stagger > *:nth-child(3) { animation-delay: 120ms; }
+.stagger > *:nth-child(4) { animation-delay: 160ms; }
+.stagger > *:nth-child(5) { animation-delay: 200ms; }
+.stagger > *:nth-child(6) { animation-delay: 240ms; }
+.stagger > *:nth-child(7) { animation-delay: 280ms; }
+.stagger > *:nth-child(8) { animation-delay: 320ms; }
+
+/* 骨架屏/加载微光（opt-in） */
+.skeleton {
+  background: linear-gradient(90deg,
+    var(--bg-2) 25%, var(--bg-3) 37%, var(--bg-2) 63%);
+  background-size: 200% 100%;
+  animation: anim-shimmer 1.4s linear infinite;
+  border-radius: var(--radius-sm);
+}
+
+/* ============================================================
+   ③ 全局交互态的过渡（对基础态的「追加」，不改原有取值）
+   ============================================================ */
+.btn,
+.btn-primary,
+.btn-ghost,
+.btn-lg {
+  transition:
+    transform var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+.btn:hover { box-shadow: var(--shadow-2); }
+.btn:active { transform: translateY(1px) scale(0.99); }
+.btn[disabled],
+.btn.is-disabled { transform: none; box-shadow: none; }
+
+/* 卡片：悬停轻微抬升 */
+.card {
+  transition:
+    transform var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out);
+}
+.card:hover { transform: translateY(-2px); box-shadow: var(--shadow-3); }
+
+/* 导航链接：颜色过渡顺滑 */
+.nav a,
+.nav button {
+  transition: color var(--dur-fast) var(--ease-standard),
+              opacity var(--dur-fast) var(--ease-standard),
+              background-color var(--dur-fast) var(--ease-standard);
+}
+
+/* 表单控件：聚焦过渡 */
+input,
+select,
+textarea {
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard);
+}
+
+/* ============================================================
+   ④ 键盘可访问性：统一聚焦环（鼠标点击不显示，键盘才显示）
+   ============================================================ */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: var(--ring);
+  border-radius: var(--radius-sm);
+}
+
+/* ============================================================
+   ⑤ 首页 Hero 入场（无需改 HTML，最小可见效果）
+   ============================================================ */
+.hero-title { animation: anim-rise var(--dur-slower) var(--ease-out) both; }
+.hero-sub   { animation: anim-rise var(--dur-slower) var(--ease-out) 90ms both; }
+
+/* 平滑滚动（页面内锚点） */
+html { scroll-behavior: smooth; }
+
+/* ============================================================
+   ⑥ 一键降级：尊重系统「减少动态效果」——所有动效统一关闭
+   这是「以后加动画」时不必逐个照顾的底线保障。
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

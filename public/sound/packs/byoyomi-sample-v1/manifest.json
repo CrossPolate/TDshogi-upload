@@ -1,0 +1,38 @@
+{
+  "kind": "audiopack",
+  "id": "byoyomi-sample-v1",
+  "name": "读秒语音包·样例（合成占位）",
+  "version": "1.0.0",
+  "locale": "ja",
+  "note": "⚠️ 本包是**合成音占位，不是人声**（生成环境无 TTS、无法录音）。用途：把播放链路 / QC 口径 / 回归测试跑通。正式人声包按《读秒语音包设计 v2》§7 录制后，直接替换本目录同名文件即可，无需改码。",
+  "entryMap": {
+    "remain_60": "剩1分",
+    "remain_30": "剩30秒",
+    "remain_20": "剩20秒",
+    "count_10": "十",
+    "count_09": "九",
+    "count_08": "八",
+    "count_07": "七",
+    "count_06": "六",
+    "count_05": "五",
+    "count_04": "四",
+    "count_03": "三",
+    "count_02": "二",
+    "count_01": "一"
+  },
+  "files": {
+    "remain_60": "remain-60.ogg",
+    "remain_30": "remain-30.ogg",
+    "remain_20": "remain-20.ogg",
+    "count_10": "count-10.ogg",
+    "count_09": "count-09.ogg",
+    "count_08": "count-08.ogg",
+    "count_07": "count-07.ogg",
+    "count_06": "count-06.ogg",
+    "count_05": "count-05.ogg",
+    "count_04": "count-04.ogg",
+    "count_03": "count-03.ogg",
+    "count_02": "count-02.ogg",
+    "count_01": "count-01.ogg"
+  }
+}
