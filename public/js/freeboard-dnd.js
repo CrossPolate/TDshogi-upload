@@ -106,8 +106,8 @@
   // ---------- 点击流 ----------
   function _handleClick(e) {
     if (!this.model) return;
-    // review 模式：只读浏览，不依赖 interactive——只把点击的格子回执给页面
-    // （如复盘页点击上一步的落点跳到该手）
+    // review 模式：只读浏览，不依赖 interactive——只把点击的格子回执给页面；
+    // 复盘页刻意不接，避免点击棋盘误触跳手
     if (this.mode === 'review') {
       const rc = e.target.closest('.cell');
       if (rc && rc.dataset.sq && this.onSqClick) this.onSqClick(rc.dataset.sq);

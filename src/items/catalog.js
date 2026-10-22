@@ -12,6 +12,12 @@
  *   - 外置项一律过 `normalizeItem` 校验，坏数据**跳过**而不是让整表崩掉。
  *   - 代码不再内置免费头像/BGM/皮肤 —— 素材与商品都由管理员上传、上架。
  *
+ * ⚠️ 2026-10-22 扩展包：商品多了三个管理字段：
+ *   - `status`: 'draft' | 'published'（缺省视为 published，兼容旧数据）
+ *   - `packId` / `packVersion`: 由 `.tdpack` 安装器写入，删除/改价时用于归属判断
+ *   - `meta`: 展示用元信息（封面 / 作者 / 授权 / 包名），不含任何凭证
+ *   草稿只在管理端可见，玩家目录/装备/购买一律过滤。
+ *
  * - price===null ⇒ 免费，可直接装备，无需先获得（管理员可用它做免费头像/试用品）。
  * - 默认不装备任何装扮；玩家装备后才生效。
  */
@@ -32,6 +38,20 @@ const KINDS = ['glyph', 'image', 'audio', 'synth', 'audiopack']; // audiopack=�
 /** BGM 使用场景（role）：每首 BGM 有唯一场景，装备时自动落到对应槽位（2026-10-08） */
 const BGM_ROLES = ['menu', 'game', 'endgame'];
 const CATALOG_FILE = 'items-catalog.json';
+/** 商品上架状态：草稿（仅管理端可见）/ 已发布（玩家可见） */
+const STATUSES = ['draft', 'published'];
+
+/** 是否对玩家可见（缺省=已发布，兼容扩展包之前的外置数据） */
+function isPublished(item) {
+  return !!item && item.status !== 'draft';
+}
+
+/** 安全 id：扩展包/手工录入共用同一口径 */
+function safeId(v, max) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(s)) return '';
+  return s.slice(0, max || 64);
+}
 
 /**
  * ⚠️ 2026-10-21 商城化：**默认不装备任何装扮**。
@@ -93,7 +113,7 @@ function isBgmType(type) {
 function normalizeItem(raw) {
   const it = raw && typeof raw === 'object' ? raw : null;
   if (!it) return null;
-  const id = typeof it.id === 'string' ? it.id.trim() : '';
+  const id = safeId(it.id, 64);
   if (!id) return null;
   // type 允许 ITEM_TYPES；兼容旧写法 bgm-menu 等（归一成 'bgm'）
   let type = typeof it.type === 'string' ? it.type.trim() : '';
@@ -135,6 +155,23 @@ function normalizeItem(raw) {
   //    'bgm'（不在 SLOTS 里 → BAD_SLOT），结果是「发了也永远装不上」。归一后从源头杜绝。
   if (type === 'bgm') {
     out.role = BGM_ROLES.includes(it.role) ? it.role : 'game';
+  }
+  // ---- 2026-10-22 扩展包管理字段（玩家侧由 publicCatalog/snapshot 过滤草稿） ----
+  if (it.status === 'draft' || it.status === 'published') out.status = it.status;
+  const packId = safeId(it.packId, 40);
+  if (packId) out.packId = packId;
+  if (out.packId && typeof it.packVersion === 'string' && it.packVersion.trim()) {
+    out.packVersion = it.packVersion.trim().slice(0, 40);
+  }
+  if (it.meta && typeof it.meta === 'object' && !Array.isArray(it.meta)) {
+    const meta = {};
+    const copy = (k, max) => {
+      const v = it.meta[k];
+      if (typeof v === 'string' && v.trim()) meta[k] = v.trim().slice(0, max);
+    };
+    copy('source', 16); copy('packName', 60); copy('author', 60); copy('license', 80);
+    copy('cover', 300); copy('copyright', 200);
+    if (Object.keys(meta).length) out.meta = meta;
   }
   return out;
 }
@@ -195,11 +232,32 @@ function persistExternal(list) {
  * @returns {{ok:true, item:object}|{ok:false, error:string, code:string}}
  */
 function upsertItem(raw) {
-  const item = normalizeItem(raw);
-  if (!item) return { ok: false, error: '商品字段不合法（id/type/asset 必填且合法）', code: 'BAD_ITEM' };
-  // 内置 id 允许覆盖；这里不做额外限制，外置同 id 优先（buildCatalog 已保证）
+  const input = raw && typeof raw === 'object' ? { ...raw } : raw;
   const list = loadRawExternal().slice();
-  const idx = list.findIndex((x) => x && typeof x === 'object' && String(x.id) === item.id);
+  const idx = input && input.id
+    ? list.findIndex((x) => x && typeof x === 'object' && String(x.id) === String(input.id))
+    : -1;
+  // 扩展包商品可直接改价/改名，但不允许把归属改到别的包（会造成包删除时漏删/误删）
+  if (idx >= 0) {
+    const existing = normalizeItem(list[idx]);
+    if (existing && existing.packId) {
+      if (input.packId && safeId(input.packId, 40) !== existing.packId) {
+        return { ok: false, error: '该商品属于扩展包，不能改归属；请通过扩展包管理操作', code: 'PACK_MANAGED' };
+      }
+      if (!input.packId) input.packId = existing.packId;
+      if (input.packVersion === undefined) input.packVersion = existing.packVersion;
+      if (input.meta === undefined) input.meta = existing.meta;
+      // 包内商品的上下架只能走扩展包整体发布/下架，单条改写 status 会让包登记与目录脱节
+      input.status = existing.status || 'published';
+    } else if (input.packId) {
+      // 手工商品不得自封为“包内商品”（否则包删除时找不到它，变成无主素材引用）
+      return { ok: false, error: '扩展包商品只能通过安装扩展包创建', code: 'PACK_MANAGED' };
+    }
+  } else if (input && input.packId) {
+    return { ok: false, error: '扩展包商品只能通过安装扩展包创建', code: 'PACK_MANAGED' };
+  }
+  const item = normalizeItem(input);
+  if (!item) return { ok: false, error: '商品字段不合法（id/type/asset 必填且合法）', code: 'BAD_ITEM' };
   if (idx >= 0) list[idx] = item;
   else list.push(item);
   if (!persistExternal(list)) return { ok: false, error: '目录写入失败', code: 'PERSIST_FAILED' };
@@ -225,14 +283,100 @@ function deleteItem(id) {
       ? { ok: false, error: '内置商品不可删除（可覆盖修改）', code: 'BUILTIN' }
       : { ok: false, error: '商品不存在', code: 'NO_ITEM' };
   }
+  const existing = normalizeItem(list[idx]);
+  if (existing && existing.packId) {
+    return {
+      ok: false,
+      error: '该商品由扩展包管理，请到「扩展包」列表停用/删除整个包（避免包内商品残留）',
+      code: 'PACK_MANAGED',
+      packId: existing.packId,
+    };
+  }
   list.splice(idx, 1);
   if (!persistExternal(list)) return { ok: false, error: '目录写入失败', code: 'PERSIST_FAILED' };
   reloadCatalog();
   return { ok: true, restoredBuiltin: builtin };
 }
 
+// ==================================================================
+// 扩展包批量写入（2026-10-22）：一次落盘，避免逐条 upsert 的中间态
+// ==================================================================
+
+/** 包内商品（含草稿），管理端展示与发布状态切换用 */
+function packItems(packId) {
+  const id = safeId(packId, 40);
+  if (!id) return [];
+  return getCatalog().filter((it) => it.packId === id);
+}
+
+/**
+ * 用新清单整体替换某个包的商品（安装/升级）。
+ * 调用方负责先校验 id 冲突；这里只做形状归一与原子落盘。
+ * @param {string} packId
+ * @param {object[]} items normalizeItem 可接受的条目
+ * @param {{status?:string, version?:string, meta?:object}} [opts]
+ * @returns {{ok:true, items:object[]}|{ok:false,error:string,code:string}}
+ */
+function replacePackItems(packId, items, opts) {
+  const id = safeId(packId, 40);
+  if (!id) return { ok: false, error: '扩展包 id 不合法', code: 'BAD_PACK_ID' };
+  const status = opts && opts.status === 'published' ? 'published' : 'draft';
+  const list = loadRawExternal().filter((x) => !(x && typeof x === 'object'
+    && safeId(x.packId, 40) === id));
+  const added = [];
+  for (const raw of items || []) {
+    const it = normalizeItem({
+      ...raw,
+      packId: id,
+      status,
+      packVersion: opts && opts.version,
+      meta: { ...(opts && opts.meta ? opts.meta : {}), ...(raw && raw.meta ? raw.meta : {}) },
+    });
+    if (!it) return { ok: false, error: `扩展包内商品不合法：${raw && raw.id ? raw.id : '(无 id)'}`, code: 'BAD_ITEM' };
+    list.push(it);
+    added.push(it);
+  }
+  if (!persistExternal(list)) return { ok: false, error: '目录写入失败', code: 'PERSIST_FAILED' };
+  reloadCatalog();
+  return { ok: true, items: added };
+}
+
+/** 切换某个包全部商品的上架状态（草稿 ⇄ 已发布） */
+function setPackStatus(packId, status) {
+  const id = safeId(packId, 40);
+  if (!id) return { ok: false, error: '扩展包 id 不合法', code: 'BAD_PACK_ID' };
+  if (!STATUSES.includes(status)) return { ok: false, error: '状态不合法', code: 'BAD_STATUS' };
+  const list = loadRawExternal();
+  let n = 0;
+  for (const raw of list) {
+    if (raw && typeof raw === 'object' && safeId(raw.packId, 40) === id) {
+      raw.status = status;
+      n += 1;
+    }
+  }
+  if (!n) return { ok: false, error: '扩展包内没有商品', code: 'NO_ITEMS' };
+  if (!persistExternal(list)) return { ok: false, error: '目录写入失败', code: 'PERSIST_FAILED' };
+  reloadCatalog();
+  return { ok: true, count: n };
+}
+
+/** 删除某个包的全部商品（删除扩展包时调用） */
+function removePackItems(packId) {
+  const id = safeId(packId, 40);
+  if (!id) return { ok: false, error: '扩展包 id 不合法', code: 'BAD_PACK_ID' };
+  const list = loadRawExternal();
+  const kept = list.filter((x) => !(x && typeof x === 'object' && safeId(x.packId, 40) === id));
+  const removed = list.length - kept.length;
+  if (!removed) return { ok: true, removed: 0 };
+  if (!persistExternal(kept)) return { ok: false, error: '目录写入失败', code: 'PERSIST_FAILED' };
+  reloadCatalog();
+  return { ok: true, removed };
+}
+
 module.exports = {
-  SLOTS, RARITIES, KINDS, ITEM_TYPES, BGM_SLOTS, DEFAULT_BGM_EQUIP, DEFAULT_EQUIP, isBgmType,
+  SLOTS, RARITIES, KINDS, ITEM_TYPES, BGM_SLOTS, BGM_ROLES, DEFAULT_BGM_EQUIP, DEFAULT_EQUIP, isBgmType,
   getCatalog, reloadCatalog, CATALOG_FILE, normalizeItem,
   upsertItem, deleteItem, kindForType,
+  STATUSES, isPublished, safeId,
+  packItems, replacePackItems, setPackStatus, removePackItems,
 };

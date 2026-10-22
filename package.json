@@ -1,6 +1,6 @@
 {
   "name": "tdshogi",
-  "version": "1.4.10",
+  "version": "1.5.0",
   "description": "TDShogi 在线将棋对战平台 - 轻量级 Node.js 实时对局",
   "main": "server.js",
   "type": "commonjs",
@@ -23,8 +23,11 @@
   "dependencies": {
     "better-sqlite3": "^13.0.3",
     "express": "^4.19.0",
+    "music-metadata": "^7.14.0",
     "shogi.js": "^5.4.0",
-    "ws": "^8.17.0"
+    "ws": "^8.17.0",
+    "yauzl": "^3.4.0",
+    "yazl": "^3.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

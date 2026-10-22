@@ -45,7 +45,7 @@
       this.onChange = onChange || null;
       this.onMove = onMove || null;          // (usi) => void
       this.onPromoteChoice = onPromoteChoice || null; // ({ usiMove, usiPromote }) => void
-      this.onSqClick = onSqClick || null;    // (sq) => void，仅 review 模式：点击格子回执（如跳转到该手）
+      this.onSqClick = onSqClick || null;    // (sq) => void，仅 review 模式：点击格子回执；复盘页刻意不接，避免误触跳手
       this.model = null;             // { board, hands }
       this.lastMove = null;
       this.checkSquares = [];        // 王手格（J2：此前 setModel 的第三参被丢弃，高亮丢失）

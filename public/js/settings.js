@@ -26,12 +26,12 @@
     highlightLastMove: true,    // 上一步落点高亮
     animateMoves: true,         // 走子动画（落子/打子/吃子/升变，2026-10-11）
     spectatorNotices: true,     // §R3：聊天区显示「XX 进入/离开观战」
-    // §U4 音效细分。取值：'off'（关闭，**2026-10-21 起默认**）/ 'default'（合成音，可选）/
+    // §U4 音效细分。取值：'off'（关闭）/ 'default'（合成音，可选）/
     // 'file:<名字>'（真实音频文件，落子音在 public/sound/）。
     // ⚠️ 2026-10-08：棋子图集 atlas、读秒音 soundByoyomi **迁入装扮**，不再进设置面板。
-    // ⚠️ 2026-10-21：代码不再默认发合成音；想要提示音需用户显式选择。
+    // ⚠️ 2026-10-22：落子音默认使用真实棋子敲击；其余提示音默认关闭。
     soundMinute: 'off',         // 本时整分钟提醒音（§U1）
-    soundMove: 'off',           // 棋驹落子/吃子音
+    soundMove: 'file:pieces/pieces_wood', // 棋驹落子/吃子音：默认真实木棋子敲击声
     // ⚠️ 2026-10-07：BGM 曲目选择移出设置面板 —— 曲目只在「装扮」里装备；
     // 这里只留全局音乐开关（右上角 🔊 按钮的持久化键）。
     music: true,                // 全局 BGM 开关（菜单/开局/终盘三轨）
@@ -55,12 +55,13 @@
       hint: '在聊天区显示「XX 进入/离开观战」；人多时可关掉避免刷屏' },
     // ⚠️ 2026-10-08：「棋子图集」「读秒音」迁入装扮页装备，此处不再提供。
     // §U4 音效与 BGM。'file:<名字>' 选项对应真实音频：落子音在 public/sound/。
-    // 2026-10-21：默认关闭合成音；需要时由用户显式选择。
+    // 2026-10-22：落子音默认改为**真实棋子敲击声**（pieces_wood.mp3，随仓库自带）；
+    //   分钟提醒仍默认关闭，BGM / 读秒音仍由商城素材决定。
     { group: '音效', key: 'soundMinute', type: 'select', label: '分钟提醒音',
       options: [['off', '关闭'], ['default', '合成音']], hint: '本时剩余每跨过一个整分钟响一声；默认关闭' },
     { group: '音效', key: 'soundMove', type: 'select', label: '落子音',
-      options: [['off', '关闭'], ['default', '合成音'], ['file:pieces/pieces_wood', '棋子敲击']],
-      hint: '含吃子（音色更沉）；默认关闭' },
+      options: [['file:pieces/pieces_wood', '棋子敲击'], ['default', '合成音'], ['off', '关闭']],
+      hint: '含吃子（音色更沉）；默认为真实棋子敲击声' },
     // ⚠️ 2026-10-07：「对局 BGM」下拉已移除 —— 曲目在「装扮」里装备，总开关在右上角 🔊。
     // ⚠️ 2026-10-08：补 BGM 音量 + 是否播放对手 BGM（对局中双方曲交替循环）。
     { group: '音乐', key: 'musicVolume', type: 'range', label: 'BGM 音量',

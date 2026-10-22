@@ -2,14 +2,14 @@
  * sound.js — 音效与 BGM（Web Audio 合成 + 真实音频文件，PLAN §U4）
  *
  * 提供：
- *  - playMove()      行棋落子：短促木质敲击（噪声冲击 + 中频衰减）
- *  - playCapture()   吃子：更重的敲击（低频更足）
+ *  - playMove()      行棋落子：默认真实木棋子敲击声（可选合成音/关闭）
+ *  - playCapture()   吃子：同一素材降速播放（更沉；可选合成音）
  *  - playByoyomi()   读秒滴答：高频短「嗒」
  *  - playStart()     对局开始：上扬双音
  *  - playEnd()       对局结束：下行双音
  *  - bgmStart/Stop/Sync 对局 BGM（只播放管理员上架/装备的音频；没有则不播）
  *
- * 两种音源并存（2026-10-21 起**默认全部关闭**，音效需用户显式选择）：
+ * 两种音源并存（2026-10-22 起：落子/吃子默认真实棋子敲击声；其余音效默认关闭）：
  *  - `default` 方案由 AudioContext 实时合成（仅当用户明确选择时使用）；
  *  - `file:<名字>` / 后台素材 URL 播放真实音频；
  *    文件缺失或自动播放被拦时**保持静音**，不回退合成音，也绝不抛错。
@@ -55,7 +55,7 @@
   function playMove() {
     if (!enabled) return;
     const v = variant('soundMove');
-    if (v === 'off') return;            // 2026-10-21：默认无音效
+    if (v === 'off') return;            // 用户显式关闭
     if (v === 'default') { synthMove(); return; }
     // 文件方案失败 → 静音（不再自动回退合成音；合成音只在用户显式选 default 时使用）
     playMoveFile(1);
@@ -799,6 +799,25 @@
   }
 
   /**
+   * 棋盘纹理（装扮 board 槽）。写入 CSS 变量，所有已渲染棋盘立即生效：
+   * `.shogi-board` 的 background-image 第三层读取 `--board-skin`。
+   * 传 null / 空 → 移除变量，回落到基础桧木渐变。
+   */
+  function setBoardSkin(url) {
+    const doc = global.document;
+    const root = doc && doc.documentElement;
+    if (!root || !root.style) return;
+    try {
+      if (url) {
+        const safe = String(url).replace(/["\\\n\r]/g, '');
+        root.style.setProperty('--board-skin', `url("${safe}")`);
+      } else {
+        root.style.removeProperty('--board-skin');
+      }
+    } catch (_) { /* 老浏览器不支持 CSS 变量：保持基础木纹 */ }
+  }
+
+  /**
    * 页面加载后拉取 BGM 三轨并起菜单曲。
    * ⚠️ 2026-10-08：带上会话令牌 —— 登录玩家返回**装备的**三首（默认自带），
    * 游客走系统默认轨。
@@ -820,12 +839,13 @@
       if (bgmPhase === 'menu') setPhase('menu');
     };
 
-    /** 棋子图集 / 读秒音（装扮装备）——写入全局供 board.js / playByoyomi 使用 */
+    /** 棋子图集 / 棋盘纹理 / 读秒音（装扮装备）——写入全局供 board.js / playByoyomi 使用 */
     const applyAppearance = (ap) => {
       if (!ap || typeof ap !== 'object') return;
       try {
         // atlas=null ⇒ 回到游戏基础图集（不是商品默认装扮）；byoyomi=null ⇒ 静音
         if ('atlas' in ap) global.PIECE_ATLAS_DEFAULT = ap.atlas || 'pieces/kinki.png';
+        if ('board' in ap) setBoardSkin(ap.board || null);
         if ('byoyomi' in ap) setByoyomiVariant(ap.byoyomi || null);
         // 让已渲染的棋盘按新图集重画（play.js / review.js 监听此事件）
         if (global.document && global.document.dispatchEvent) {
@@ -878,7 +898,7 @@
   global.Sound = {
     playMove, playCapture, playByoyomi, playStart, playEnd,
     playMinuteWarning, playByoyomiMark,
-    variant, setByoyomiVariant,
+    variant, setByoyomiVariant, setBoardSkin,
     // 读秒语音包（2026-10-12）：报时决策 + 播报 + manifest 加载
     chooseCountdown, announceCountdown, loadVoicePack, hasVoicePack,
     // BGM 三轨（2026-10-07）+ 音量 / 对手 BGM 交替（2026-10-08）

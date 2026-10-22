@@ -190,7 +190,70 @@
         </div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.7;">
           先上传素材，再新建商品。BGM / 头像 / 立绘 / 棋子 / 棋盘 / 读秒音**默认全部为空**：
-          玩家装备后才生效，代码仓库不再自带音乐或头像素材。
+          玩家装备后才生效，代码仓库不再自带音乐或头像素材。<br>
+          推荐把整套装扮打成 <b>.tdpack</b> 扩展包上传：先校验 → 安装为草稿 → 在下方预览 → 确认后发布。
+        </div>
+
+        <!-- 0. 扩展包（2026-10-22） -->
+        <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;background:rgba(201,162,39,0.04);">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+            <div style="font-size:12px;font-weight:700;">📦 扩展包（.tdpack）</div>
+            <span style="font-size:11px;color:var(--text-dim);">ZIP + 根目录 manifest.json · 上限 64MB / 64 件</span>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <input type="file" id="packFile" accept=".tdpack,.zip,application/zip" style="font-size:12px;" aria-label="选择 .tdpack 扩展包文件">
+            <button class="btn btn-primary btn-sm" id="btnPackUpload">上传并校验</button>
+            <button class="btn btn-ghost btn-sm" id="btnPackTemplate" type="button" title="下载可直接上传测试的 .tdpack 示例包">⬇ 下载模板</button>
+            <button class="btn btn-ghost btn-sm" id="btnPackRefresh">刷新扩展包</button>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:5px;">
+            模板是<b>完整可上传</b>的示例包（纯色占位图 + 10 秒静音 BGM + 提示音读秒），
+            先走一遍校验/草稿/发布流程，再替换成自己的素材即可。
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-top:8px;">
+            <input type="checkbox" id="packRights">
+            我确认拥有包内图片 / 音频的版权或合法授权，并同意在站内分发
+          </label>
+          <div id="packReport" role="status" aria-live="polite" style="margin-top:8px;font-size:12px;"></div>
+
+          <details style="margin-top:10px;font-size:11px;color:var(--text-dim);line-height:1.8;">
+            <summary style="cursor:pointer;">📖 扩展包格式与读秒素材规范</summary>
+            <div style="margin-top:6px;">
+              <code>manifest.json</code>：<code>{ "format":"tdshogi-pack", "formatVersion":1, "id":"sakura",
+              "name":"樱", "versionName":"1.0.0", "author":"…", "license":"CC-BY-4.0",
+              "items":[ … ] }</code><br>
+              图片目录 <code>avatars/ sprites/ pieces/ boards/</code>，BGM <code>bgm/</code>，读秒 <code>byoyomi/</code>；
+              可选 <code>cover.webp</code>、<code>LICENSE.txt</code>。<br>
+              头像必须 256×256；棋子图集必须 2:1（推荐 512×256，8 列 × 4 行）；棋盘建议 ≥512。<br>
+              读秒包需 13 条：<code>remain_60/30/20</code> + <code>count_10…count_01</code>；
+              也接受 <code>60/30/20.mp3</code> 与 <code>1…10.mp3</code>（或中文「一…十」）。
+              MP3 建议 96kbps 单声道 44.1kHz，单条 0.4–1.8 秒、≤2MB。
+            </div>
+          </details>
+
+          <!-- 单独导入读秒 ZIP（MP3 一到十等） -->
+          <div style="border-top:1px dashed var(--border);margin-top:10px;padding-top:10px;">
+            <div style="font-size:12px;font-weight:700;margin-bottom:6px;">⏱ 单独导入读秒语音 ZIP</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <input type="file" id="byoyomiZip" accept=".zip,application/zip" style="font-size:12px;" aria-label="选择读秒语音 ZIP 文件">
+              <input class="input" id="byoyomiZipName" placeholder="商品名（默认：读秒语音包）" aria-label="读秒语音商品名" style="width:190px;">
+              <input class="input" id="byoyomiZipPrice" placeholder="价格（空=免费）" aria-label="读秒语音价格" style="width:130px;">
+              <button class="btn btn-primary btn-sm" id="btnByoyomiZip">导入为草稿</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:5px;">
+              ZIP 内放 1–10（或 count_01–count_10）即可；缺 60/30/20 节点音时自动用「十」顶替。
+            </div>
+            <div id="byoyomiZipResult" role="status" aria-live="polite" style="margin-top:6px;font-size:12px;"></div>
+          </div>
+        </div>
+
+        <!-- F. 已安装扩展包 -->
+        <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+            <div style="font-size:12px;font-weight:700;">📚 已安装扩展包（<span id="packCount">0</span>）</div>
+            <span style="font-size:11px;color:var(--text-dim);">草稿仅管理端可见；发布后玩家才能购买/装备</span>
+          </div>
+          <div id="packList"></div>
         </div>
 
         <!-- A. 上传素材 -->
@@ -229,6 +292,7 @@
                 <option value="board">棋盘</option>
                 <option value="bgm">BGM</option>
                 <option value="byoyomi">读秒音</option>
+                <option value="audiopack">读秒语音包</option>
               </select>
               <button class="btn btn-ghost btn-sm" id="btnShopAssetsRefresh">刷新素材</button>
             </div>

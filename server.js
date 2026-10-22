@@ -35,6 +35,7 @@ const rateLimit = require('./src/ratelimit');
 const log = require('./src/logger');
 const { protocol, VERSION } = require('./src/http/context');
 const { requestId, securityHeaders, adminEntryGate, ipBanGate, slowLog } = require('./src/http/middleware');
+const { checkAdmin } = require('./src/http/context');
 const registerPublic = require('./src/http/routes/public');
 const registerRecords = require('./src/http/routes/records');
 const registerAccounts = require('./src/http/routes/accounts');
@@ -70,7 +71,25 @@ app.use(ipBanGate);
 // body 解析排在封禁门之后（2026-10-02 审查 P2-1）；显式限制体积（默认 100kb 偏大）。
 // ⚠️ 2026-10-07 商品管理：素材上传走 base64 JSON，单独放宽（其余接口仍 64kb）。
 // ⚠️ 2026-10-21：BGM/读秒音上限 12MB，base64 约 16MB + JSON 开销，故放宽到 24mb。
+// ⚠️ 2026-10-22 扩展包：ZIP 直接走原始字节（不再 base64 膨胀），上限 64MB；
+//    仅这两个管理端点使用，普通接口仍 64kb。
+const RAW_UPLOAD_PATHS = new Set([
+  '/api/admin/items/packs/upload',
+  '/api/admin/items/byoyomi/upload',
+]);
+// ⚠️ 大文件上传先鉴权再解析 body：否则未登录请求也能让进程分配 24–64MB 内存
+// （限流在 body 解析之后才生效，挡不住单次大包）。真正的路由鉴权仍走 adminOnly。
+const BULK_UPLOAD_PATHS = new Set([...RAW_UPLOAD_PATHS, '/api/admin/items/upload']);
 app.use((req, res, next) => {
+  if (req.method === 'POST' && BULK_UPLOAD_PATHS.has(req.path) && !checkAdmin(req)) {
+    return res.status(403).json({ error: '无管理员权限' });
+  }
+  next();
+});
+app.use((req, res, next) => {
+  if (RAW_UPLOAD_PATHS.has(req.path)) {
+    return express.raw({ type: () => true, limit: '64mb' })(req, res, next);
+  }
   const isUpload = req.path === '/api/admin/items/upload';
   return express.json({ limit: isUpload ? '24mb' : '64kb' })(req, res, next);
 });
@@ -248,6 +267,12 @@ server.listen(PORT, () => {
     log.error('cleanup', '游客清理启动失败', { err });
   }
   // 清理过期的登录/审计日志（保留期与容量上限见 src/audit.js）
+  try {
+    // 扩展包安装中断留下的 .tmp-* / .bak-*（超过 1 小时）在启动时清掉
+    require('./src/items').packs.sweepPackRoot();
+  } catch (err) {
+    log.error('items', '扩展包临时目录清理失败', { err });
+  }
   try {
     const pruned = audit.prune();
     if (pruned.expired || pruned.overflow) {

@@ -23,7 +23,7 @@ const ipban = require('../../ipban');
 const net = require('../../net');
 const announcements = require('../../announcements');
 const reports = require('../../reports');
-const { adminOnly, adminWrite, tournamentAction } = require('../middleware');
+const { adminOnly, adminWrite, adminWriteAsync, tournamentAction } = require('../middleware');
 const { protocol, resolvePlayer } = require('../context');
 
 /**
@@ -503,6 +503,15 @@ module.exports = function registerAdmin(app) {
   app.post('/api/admin/items/assets/:id/delete', adminWrite((req) => {
     const asset = itemsMod.assets.getAsset(req.params.id);
     if (!asset) return { ok: false, error: '素材不存在', code: 'NO_ASSET', action: 'item-asset-delete' };
+    if (asset.packId) {
+      return {
+        ok: false,
+        error: '该素材属于扩展包，请到「扩展包」列表删除/停用整个包',
+        code: 'PACK_MANAGED',
+        packId: asset.packId,
+        action: 'item-asset-delete',
+      };
+    }
     const refs = itemsMod.catalog()
       .filter((it) => it.asset && it.asset.value === asset.url)
       .map((it) => it.id);
@@ -550,6 +559,114 @@ module.exports = function registerAdmin(app) {
       ...r,
       action: 'item-bgm-roles',
       audit: r.ok ? r.roles : { error: r.error, code: r.code },
+    };
+  }));
+
+  // ---------- 扩展包（2026-10-22）：上传 → 校验报告 → 安装草稿 → 预览 → 发布 ----------
+  // 上传走原始 ZIP（server.js 对该路径用 express.raw，上限 64MB），不再 base64。
+  const packsMod = itemsMod.packs;
+  const actorOf = (req) => ({ adminId: require('../../admin').tokenIdentity(req.adminToken) });
+
+  app.get('/api/admin/items/packs', adminOnly, (req, res) => {
+    res.json({ ok: true, packs: packsMod.listPacks() });
+  });
+
+  // 下载扩展包模板：服务端即时生成（含示例图片/音频与 README），不往仓库塞二进制
+  app.get('/api/admin/items/packs/template', adminOnly, async (req, res) => {
+    try {
+      const buf = await packsMod.templateZip();
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', 'attachment; filename="tdshogi-pack-template.zip"');
+      res.setHeader('Content-Length', String(buf.length));
+      res.setHeader('Cache-Control', 'no-store');
+      res.send(buf);
+    } catch (err) {
+      if (req.log) req.log.error('admin', '扩展包模板生成失败', { err });
+      res.status(500).json({ error: '模板生成失败，请查看服务器日志' });
+    }
+  });
+
+  // 只校验 + 暂存（30 分钟内可安装），返回可读报告；不写商品目录、不写 public/
+  app.post('/api/admin/items/packs/upload', adminWriteAsync(async (req) => {
+    const buf = req.body;
+    if (!Buffer.isBuffer(buf) || !buf.length) {
+      return { ok: false, error: '请上传 .tdpack（ZIP）文件', action: 'item-pack-upload' };
+    }
+    const r = await packsMod.validateAndStage(buf);
+    return {
+      ...r,
+      action: 'item-pack-upload',
+      audit: r.ok
+        ? { packId: r.report.pack.id, items: r.report.items.length, warnings: r.report.warnings.length }
+        : { error: r.error, code: r.code },
+    };
+  }));
+
+  // 安装为草稿（必须确认授权）。令牌只能用一次；过期需重新上传。
+  app.post('/api/admin/items/packs/install', adminWriteAsync(async (req, body) => {
+    const r = await packsMod.installStaged(body && body.token, {
+      rightsConfirmed: !!(body && body.rightsConfirmed),
+      actor: actorOf(req),
+    });
+    return {
+      ...r,
+      action: 'item-pack-install',
+      audit: r.ok
+        ? { packId: r.pack.id, items: r.pack.itemCount, version: r.pack.versionName, rightsConfirmed: !!(body && body.rightsConfirmed) }
+        : { error: r.error, code: r.code },
+    };
+  }));
+
+  // 单独导入读秒语音 ZIP（MP3 一到十等；缺 60/30/20 节点音时用 count_10 顶替）
+  app.post('/api/admin/items/byoyomi/upload', adminWriteAsync(async (req) => {
+    const buf = req.body;
+    if (!Buffer.isBuffer(buf) || !buf.length) {
+      return { ok: false, error: '请上传读秒语音 ZIP 文件', action: 'item-byoyomi-upload' };
+    }
+    const q = req.query || {};
+    const one = (v) => (Array.isArray(v) ? v[0] : v);
+    const r = await packsMod.installByoyomiZip(buf, {
+      rightsConfirmed: String(one(q.rightsConfirmed) || '') === '1'
+        || String(req.get('x-rights-confirmed') || '') === '1',
+      name: one(q.name),
+      price: one(q.price),
+      author: one(q.author),
+      license: one(q.license),
+      actor: actorOf(req),
+    });
+    return {
+      ...r,
+      action: 'item-byoyomi-upload',
+      audit: r.ok
+        ? { packId: r.pack.id, items: r.pack.itemCount, license: r.pack.license }
+        : { error: r.error, code: r.code },
+    };
+  }));
+
+  app.post('/api/admin/items/packs/:id/publish', adminWrite((req) => {
+    const r = packsMod.publish(req.params.id);
+    return {
+      ...r,
+      action: 'item-pack-publish',
+      audit: { packId: req.params.id, count: r.pack ? r.pack.itemCount : null },
+    };
+  }));
+
+  app.post('/api/admin/items/packs/:id/unpublish', adminWrite((req) => {
+    const r = packsMod.unpublish(req.params.id);
+    return {
+      ...r,
+      action: 'item-pack-unpublish',
+      audit: { packId: req.params.id, count: r.count },
+    };
+  }));
+
+  app.post('/api/admin/items/packs/:id/delete', adminWrite((req) => {
+    const r = packsMod.remove(req.params.id);
+    return {
+      ...r,
+      action: 'item-pack-delete',
+      audit: { packId: req.params.id, removed: r.removed },
     };
   }));
 };

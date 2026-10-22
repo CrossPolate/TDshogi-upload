@@ -152,22 +152,48 @@ function adminWrite(handler) {
       // 带上真实原因：吞成笼统的"服务器内部错误"会让排障无从下手（2026-09-05 备注/封禁报障教训）
       r = { ok: false, error: '服务器内部错误', action: 'unknown', requestId: req.id };
     }
-    const { action, audit: detail, ...data } = r;
-    // ⚠️ 2026-10-02 体验修复（问题 2）：审计带上 `adminId`（"哪一次管理员登录"，见
-    // `admin.tokenIdentity` 的说明）。此前恒为 null，后台"操作审计"页查不出"谁做的"。
-    // 注意：**只取 token 的非敏感会话标识，绝不把 token 本身写进审计**。
-    audit.adminAction({
-      adminId: require('../admin').tokenIdentity(req.adminToken),
-      adminIp: req.clientIp || null,
-      action: action || 'unknown',
-      targetId: req.params.id || null,
-      ok: !!r.ok,
-      detail: detail || null,
-    });
-    if (!r.ok) return res.status(400).json({ error: r.error || '操作失败' });
-    res.json({ ok: true, ...data });
+    finishAdminWrite(req, res, r);
   };
   return [adminOnly, h];
+}
+
+/**
+ * 异步写路由（2026-10-22 扩展包）：上传 ZIP / 解析音频元数据是异步的，
+ * 不能复用同步包装（否则 Promise 被当成结果对象，接口永远回 ok:true）。
+ * 鉴权与审计口径与 `adminWrite` 完全一致。
+ */
+function adminWriteAsync(handler) {
+  const h = async (req, res) => {
+    let r;
+    try {
+      r = await handler(req, req.body || {});
+      if (!r) r = { ok: false, error: '无结果' };
+    } catch (err) {
+      req.log.error('admin', '异步写操作异常', { err });
+      r = { ok: false, error: '服务器内部错误', action: 'unknown', requestId: req.id };
+    }
+    finishAdminWrite(req, res, r);
+  };
+  return [adminOnly, h];
+}
+
+/** 审计 + 响应。失败时把 `errors/warnings/report` 一并回给管理端（校验报告要可见） */
+function finishAdminWrite(req, res, result) {
+  const r = result && typeof result === 'object' ? result : { ok: false, error: '无结果' };
+  const { action, audit: detail, ok, ...data } = r;
+  // ⚠️ 2026-10-02 体验修复（问题 2）：审计带上 `adminId`（"哪一次管理员登录"，见
+  // `admin.tokenIdentity` 的说明）。此前恒为 null，后台"操作审计"页查不出"谁做的"。
+  // 注意：**只取 token 的非敏感会话标识，绝不把 token 本身写进审计**。
+  audit.adminAction({
+    adminId: require('../admin').tokenIdentity(req.adminToken),
+    adminIp: req.clientIp || null,
+    action: action || 'unknown',
+    targetId: req.params.id || null,
+    ok: !!ok,
+    detail: detail || null,
+  });
+  if (!ok) return res.status(400).json({ error: r.error || '操作失败', ...data });
+  res.json({ ok: true, ...data });
 }
 
 /** 赛事审核/取消动作（幂等：状态已变更返回 400） */
@@ -226,6 +252,6 @@ function slowLog(req, res, next) {
 }
 
 module.exports = {
-  requestId, securityHeaders, adminEntryGate, adminOnly, adminWrite,
+  requestId, securityHeaders, adminEntryGate, adminOnly, adminWrite, adminWriteAsync,
   tournamentAction, ADMIN_ENTRY_KEY, ipBanGate, slowLog,
 };

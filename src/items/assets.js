@@ -20,7 +20,9 @@ const path = require('path');
 const crypto = require('crypto');
 const { readJson, writeJson } = require('../storage');
 
-const UPLOAD_DIR = path.join(__dirname, '..', '..', 'public', 'uploads', 'items');
+const UPLOAD_DIR = process.env.ITEMS_UPLOAD_DIR
+  ? path.resolve(process.env.ITEMS_UPLOAD_DIR)
+  : path.join(__dirname, '..', '..', 'public', 'uploads', 'items');
 const ASSETS_FILE = 'items-assets.json';
 
 const IMAGE_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
@@ -191,11 +193,71 @@ function getAsset(id) {
   return loadAssets()[id] || null;
 }
 
+/**
+ * 扩展包素材批量登记（2026-10-22）。
+ *
+ * 包内文件由 `packs.js` 写到 `public/uploads/packs/<packId>/`，这里只登记元数据，
+ * 让素材库能看到/预览，并让“被引用”检查有统一来源。包内素材**不能单独删除**
+ * （文件属于整个包，单删会让包不完整）—— 由 `deleteAsset` 的 PACK_MANAGED 拦截。
+ *
+ * @param {string} packId
+ * @param {Array<{kind:string,name?:string,ext?:string,url:string,size?:number,width?:number,height?:number}>} list
+ * @returns {{ok:true, count:number}|{ok:false,error:string,code:string}}
+ */
+function replacePackAssets(packId, list) {
+  const id = String(packId || '').trim();
+  if (!id) return { ok: false, error: '缺少扩展包 id', code: 'BAD_PACK_ID' };
+  const map = loadAssets();
+  for (const [key, a] of Object.entries(map)) {
+    if (a && a.packId === id) delete map[key];
+  }
+  for (const a of list || []) {
+    const assetId = crypto.createHash('sha1').update(`${id}\n${a.url}`).digest('hex').slice(0, 16);
+    map[assetId] = {
+      id: assetId,
+      kind: a.kind,
+      name: String(a.name || a.kind || 'pack-asset').slice(0, 40),
+      ext: a.ext || '',
+      url: a.url,
+      size: Number(a.size) || 0,
+      width: a.width || null,
+      height: a.height || null,
+      packId: id,
+      managedByPack: true,
+      createdAt: Date.now(),
+    };
+  }
+  if (!persistAssets(map)) return { ok: false, error: '素材注册失败', code: 'PERSIST_FAILED' };
+  return { ok: true, count: (list || []).length };
+}
+
+/** 删除某个包的全部素材登记（不删文件；文件由 packs.js 删目录） */
+function removePackAssets(packId) {
+  const id = String(packId || '').trim();
+  if (!id) return { ok: false, error: '缺少扩展包 id', code: 'BAD_PACK_ID' };
+  const map = loadAssets();
+  let n = 0;
+  for (const [key, a] of Object.entries(map)) {
+    if (a && a.packId === id) { delete map[key]; n += 1; }
+  }
+  if (!n) return { ok: true, removed: 0 };
+  if (!persistAssets(map)) return { ok: false, error: '素材注册更新失败', code: 'PERSIST_FAILED' };
+  return { ok: true, removed: n };
+}
+
 /** 删除素材文件 + 注册项（商品引用中时由调用方先解绑） */
 function deleteAsset(id) {
   const map = loadAssets();
   const a = map[id];
   if (!a) return { ok: false, error: '素材不存在', code: 'NO_ASSET' };
+  if (a.packId || a.managedByPack) {
+    return {
+      ok: false,
+      error: '该素材属于扩展包，请到「扩展包」列表删除/停用整个包',
+      code: 'PACK_MANAGED',
+      packId: a.packId || null,
+    };
+  }
   delete map[id];
   if (!persistAssets(map)) return { ok: false, error: '素材注册更新失败', code: 'PERSIST_FAILED' };
   if (a.url && a.url.startsWith('/uploads/items/')) {
@@ -213,6 +275,8 @@ module.exports = {
   listAssets,
   getAsset,
   deleteAsset,
+  replacePackAssets,
+  removePackAssets,
   imageSize,
   audioKind,
   UPLOAD_DIR,

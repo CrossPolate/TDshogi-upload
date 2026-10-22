@@ -39,9 +39,11 @@
     let CATALOG = [];
     let ASSETS = [];
     let ROLES = { menu: '', game: '', endgame: '' };
+    let PACKS = [];
+    let PACK_TOKEN = null;   // 已校验、待安装的 .tdpack（30 分钟内有效，一次性）
     const BY_ID = new Map();
-    const KIND_LABEL = { avatar: '头像', sprite: '立绘', pieces: '棋子', board: '棋盘', bgm: 'BGM', byoyomi: '读秒音' };
-    const KIND_TO_TYPE = { avatar: 'avatar', sprite: 'sprite', pieces: 'pieces', board: 'board', bgm: 'bgm', byoyomi: 'byoyomi' };
+    const KIND_LABEL = { avatar: '头像', sprite: '立绘', pieces: '棋子', board: '棋盘', bgm: 'BGM', byoyomi: '读秒音', audiopack: '读秒语音包' };
+    const KIND_TO_TYPE = { avatar: 'avatar', sprite: 'sprite', pieces: 'pieces', board: 'board', bgm: 'bgm', byoyomi: 'byoyomi', audiopack: 'byoyomi' };
 
     function authHeaders() {
       return { 'Content-Type': 'application/json', 'x-admin-token': getToken() };
@@ -94,6 +96,7 @@
         await fetchCatalog();
         await loadBgmRoles();   // 先拿三轨，素材下拉才知道要保留哪些“当前值”
         await loadAssets();
+        await loadPacks();
       } catch (e) {
         if (!alive()) return;
         if (box) box.innerHTML = empty('加载商城数据失败');
@@ -122,13 +125,19 @@
       if (!CATALOG.length) { box.innerHTML = empty('目录为空'); return; }
       const rows = CATALOG.map((it) => {
         const role = it.type === 'bgm' && it.role ? ` · ${esc({ menu: '菜单', game: '开局', endgame: '终盘' }[it.role] || it.role)}` : '';
+        const draft = it.status === 'draft'
+          ? ' · <b style="color:var(--red-light);">草稿</b>' : '';
+        const pack = it.packId
+          ? ` · <span style="color:var(--gold-light);">包 ${esc(it.packId)}</span>` : '';
         return `
         <div class="record-item" style="font-size:13px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
           <span style="flex:1;min-width:180px;">${esc(it.name || it.id)}
-            <span style="color:var(--text-dim);font-size:11px;">${esc(it.id)} · ${esc(it.type)}${it.rarity ? ' · ' + esc(it.rarity) : ''}${role}${it.limited ? ' · <b style="color:var(--gold-light);">限定</b>' : ''}</span></span>
+            <span style="color:var(--text-dim);font-size:11px;">${esc(it.id)} · ${esc(it.type)}${it.rarity ? ' · ' + esc(it.rarity) : ''}${role}${it.limited ? ' · <b style="color:var(--gold-light);">限定</b>' : ''}${pack}${draft}</span></span>
           <span style="color:${it.price === null ? 'var(--green)' : 'var(--gold-light)'};font-size:12px;">${it.price === null ? '免费' : esc(String(it.price)) + ' 币'}</span>
           <button class="btn btn-ghost btn-sm" data-edit-item="${esc(it.id)}" type="button">编辑</button>
-          <button class="btn btn-ghost btn-sm" data-del-item="${esc(it.id)}" type="button">删除</button>
+          ${it.packId
+            ? '<span style="font-size:11px;color:var(--text-dim);">由扩展包管理</span>'
+            : `<button class="btn btn-ghost btn-sm" data-del-item="${esc(it.id)}" type="button">删除</button>`}
         </div>`;
       }).join('');
       box.innerHTML = rows;
@@ -233,6 +242,299 @@
       } catch (e) { onErr(e); }
     }
 
+    // ---------------- 扩展包（2026-10-22） ----------------
+
+    /** 原始字节上传（ZIP）；不经过 base64，服务端用 express.raw 接收 */
+    async function apiUploadRaw(path, file) {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'x-admin-token': getToken() || '', 'Content-Type': 'application/zip' },
+        body: file,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        const err = new Error((data && data.error) || `上传失败（HTTP ${res.status}）`);
+        err.data = data;
+        throw err;
+      }
+      return data;
+    }
+
+    /** 校验/安装错误 → 可读文本（含 warnings 与缺失条目） */
+    function packErrText(e) {
+      const d = (e && e.data) || {};
+      const bits = [String((e && e.message) || '操作失败')];
+      if (Array.isArray(d.missing) && d.missing.length) bits.push('缺少：' + d.missing.join('、'));
+      if (Array.isArray(d.warnings) && d.warnings.length) bits.push('提示：' + d.warnings.slice(0, 6).join('；'));
+      return bits.join(' —— ');
+    }
+
+    function moneyText(p) {
+      return p === null || p === undefined ? '免费' : `${p} 币`;
+    }
+
+    /** 包内商品预览：图片缩略图 / BGM 试听 / 读秒包 manifest 链接 */
+    function packItemArt(it) {
+      const a = (it && it.asset) || {};
+      if (a.kind === 'image' && a.value) {
+        return `<img src="${esc(a.value)}" alt="" loading="lazy" style="height:34px;max-width:70px;object-fit:contain;border-radius:4px;background:var(--bg);">`;
+      }
+      if (a.kind === 'audio' && a.value) {
+        return `<audio controls preload="none" src="${esc(a.value)}" style="height:28px;width:150px;"></audio>`;
+      }
+      if (a.kind === 'audiopack' && a.value) {
+        return `<a href="${esc(a.value)}" target="_blank" rel="noopener" style="font-size:11px;color:var(--gold-light);">🎙 manifest</a>`;
+      }
+      return '<span style="font-size:11px;color:var(--text-dim);">📦</span>';
+    }
+
+    function renderPackReport(report, installed) {
+      const box = $('packReport');
+      if (!box) return;
+      if (installed) {
+        box.innerHTML = `<div style="padding:8px 10px;border-radius:8px;background:rgba(76,175,80,0.12);color:var(--green);">
+          ✅ 已安装为草稿：<b>${esc(installed.name || installed.id)}</b>（${installed.itemCount || 0} 件）。
+          请在下方「已安装扩展包」中预览，确认后点「发布」。
+        </div>`;
+        return;
+      }
+      if (!report) { box.innerHTML = ''; return; }
+      const warnings = (report.warnings || []).length
+        ? `<div style="margin-top:6px;padding:8px 10px;border-radius:8px;background:rgba(201,162,39,0.10);color:var(--gold-light);">
+            提示（${report.warnings.length}）：${report.warnings.map(esc).join('；')}
+          </div>` : '';
+      const rows = (report.items || []).map((it) => `
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 0;border-top:1px dashed var(--border);">
+          <b style="min-width:120px;">${esc(it.name)}</b>
+          <span style="color:var(--text-dim);font-size:11px;">${esc(it.id)} · ${esc(it.type)}${it.role ? ' / ' + esc(it.role) : ''}</span>
+          <span style="font-size:11px;">${esc(it.summary || '')}</span>
+          <span style="color:var(--gold-light);font-size:11px;">${esc(moneyText(it.price))}</span>
+          ${(it.warnings || []).length ? `<span style="font-size:11px;color:var(--red-light);">${it.warnings.map(esc).join('；')}</span>` : ''}
+        </div>`).join('');
+      box.innerHTML = `
+        <div style="padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);">
+          <div style="font-size:13px;">
+            <b style="color:var(--green);">✅ 校验通过</b> ·
+            <b>${esc(report.pack.name)}</b>
+            <span style="color:var(--text-dim);font-size:11px;">${esc(report.pack.id)} · v${esc(report.pack.versionName)} · ${report.items.length} 件</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
+            ${report.pack.author ? '作者：' + esc(report.pack.author) + ' · ' : ''}
+            授权：${esc(report.pack.license || '见 LICENSE.txt')} ·
+            ${Math.round((report.totalBytes || 0) / 1024)} KB
+          </div>
+          ${report.pack.description ? `<div style="font-size:11px;margin-top:4px;">${esc(report.pack.description)}</div>` : ''}
+          ${rows}
+          ${warnings}
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" data-install-pack type="button">安装为草稿</button>
+            <span style="font-size:11px;color:var(--text-dim);">安装前需勾选上方版权确认；安装后不会立即对玩家可见。</span>
+          </div>
+        </div>`;
+      box.onclick = (e) => {
+        const btn = e.target.closest && e.target.closest('[data-install-pack]');
+        if (btn) installPack();
+      };
+    }
+
+    async function uploadPack() {
+      const input = $('packFile');
+      const file = input && input.files && input.files[0];
+      const out = $('packReport');
+      if (!file) return toast('请选择 .tdpack 文件');
+      if (file.size > 64 * 1024 * 1024) return toast('文件超过 64MB，请精简素材后重试');
+      PACK_TOKEN = null;
+      if (out) out.innerHTML = '<span style="color:var(--text-dim);">正在上传并校验（音频解析可能需要几秒）…</span>';
+      try {
+        const r = await apiUploadRaw('/api/admin/items/packs/upload', file);
+        if (!alive()) return;
+        PACK_TOKEN = r.token || null;
+        renderPackReport(r.report);
+        toast('校验通过，请确认授权后安装为草稿');
+      } catch (e) {
+        if (!alive()) return;
+        PACK_TOKEN = null;
+        if (out) out.innerHTML = `<span style="color:var(--danger);">${esc(packErrText(e))}</span>`;
+      }
+    }
+
+    /** 下载服务端即时生成的 .tdpack 示例包（含 manifest/README/占位素材） */
+    async function downloadPackTemplate() {
+      try {
+        const res = await fetch('/api/admin/items/packs/template', {
+          headers: { 'x-admin-token': getToken() || '' },
+        });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          throw new Error(d.error || `下载失败（HTTP ${res.status}）`);
+        }
+        const blob = await res.blob();
+        if (!alive()) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'tdshogi-pack-template.zip';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 2000);
+        toast('模板已下载，可直接上传测试');
+      } catch (e) { onErr(e); }
+    }
+
+    async function installPack() {
+      if (!PACK_TOKEN) return toast('上传已过期，请重新上传并校验');
+      if (!($('packRights') && $('packRights').checked)) return toast('请先勾选「拥有版权/合法授权」确认');
+      const btn = document.querySelector('[data-install-pack]');
+      if (btn) { btn.disabled = true; btn.textContent = '安装中…'; }
+      try {
+        const r = await apiPost('/api/admin/items/packs/install', {
+          token: PACK_TOKEN,
+          rightsConfirmed: true,
+        });
+        if (!alive()) return;
+        PACK_TOKEN = null;
+        renderPackReport(null, r.pack || { name: '扩展包', itemCount: (r.items || []).length });
+        if ($('packFile')) $('packFile').value = '';
+        await fetchCatalog();
+        await loadAssets();
+        await loadPacks();
+        toast('扩展包已安装为草稿');
+      } catch (e) {
+        if (!alive()) return;
+        // 服务端安装令牌是一次性的（成功失败都会清理暂存），失败后必须重新上传校验
+        PACK_TOKEN = null;
+        const out = $('packReport');
+        if (out) out.innerHTML = `<span style="color:var(--danger);">${esc(packErrText(e))}</span>`
+          + '<div style="color:var(--text-dim);margin-top:4px;">安装未完成，请修正后重新上传并校验。</div>';
+        toast(packErrText(e));
+      }
+    }
+
+    async function uploadByoyomiZip() {
+      const input = $('byoyomiZip');
+      const file = input && input.files && input.files[0];
+      const out = $('byoyomiZipResult');
+      if (!file) return toast('请选择读秒语音 ZIP');
+      if (!($('packRights') && $('packRights').checked)) return toast('请先勾选「拥有版权/合法授权」确认');
+      if (file.size > 64 * 1024 * 1024) return toast('文件超过 64MB');
+      const name = (($('byoyomiZipName') && $('byoyomiZipName').value) || '').trim();
+      const priceRaw = (($('byoyomiZipPrice') && $('byoyomiZipPrice').value) || '').trim();
+      if (priceRaw !== '' && !Number.isFinite(Number(priceRaw))) return toast('价格必须是数字或留空（免费）');
+      const qs = new URLSearchParams({ rightsConfirmed: '1' });
+      if (name) qs.set('name', name);
+      if (priceRaw !== '') qs.set('price', priceRaw);
+      if (out) out.innerHTML = '<span style="color:var(--text-dim);">正在校验音频…</span>';
+      try {
+        const r = await apiUploadRaw(`/api/admin/items/byoyomi/upload?${qs.toString()}`, file);
+        if (!alive()) return;
+        if (out) {
+          out.innerHTML = `<span style="color:var(--green);">✅ 已导入为草稿：${esc((r.pack && r.pack.name) || name || '读秒语音包')}</span>`
+            + ((r.warnings || []).length ? `<div style="color:var(--gold-light);margin-top:4px;">${r.warnings.map(esc).join('；')}</div>` : '');
+        }
+        if (input) input.value = '';
+        await fetchCatalog();
+        await loadAssets();
+        await loadPacks();
+        toast('读秒语音包已导入为草稿');
+      } catch (e) {
+        if (!alive()) return;
+        if (out) out.innerHTML = `<span style="color:var(--danger);">${esc(packErrText(e))}</span>`;
+      }
+    }
+
+    async function loadPacks() {
+      const box = $('packList');
+      if (!box) return;
+      try {
+        const d = await apiGet('/api/admin/items/packs');
+        if (!alive()) return;
+        PACKS = d.packs || [];
+        renderPacks();
+      } catch (e) {
+        if (!alive()) return;
+        box.innerHTML = empty('扩展包列表加载失败');
+        onErr(e);
+      }
+    }
+
+    function renderPacks() {
+      const box = $('packList');
+      const cnt = $('packCount');
+      if (cnt) cnt.textContent = String(PACKS.length);
+      if (!box) return;
+      if (!PACKS.length) {
+        box.innerHTML = empty('尚未安装扩展包。可上传 .tdpack，或单独导入读秒语音 ZIP。');
+        return;
+      }
+      box.innerHTML = PACKS.map((p) => {
+        const draft = p.status !== 'published';
+        const badge = draft
+          ? '<b style="color:var(--red-light);">草稿</b>'
+          : '<b style="color:var(--green);">已发布</b>';
+        const chips = (p.items || []).map((it) => `
+          <div style="display:flex;gap:6px;align-items:center;padding:4px 7px;border:1px solid var(--border);border-radius:8px;background:var(--bg);">
+            ${packItemArt(it)}
+            <div style="font-size:11px;line-height:1.3;">
+              <div>${esc(it.name || it.id)} <span style="color:var(--text-dim);">${esc(it.type)}</span></div>
+              <div style="color:var(--text-dim);">${esc(moneyText(it.price))}</div>
+            </div>
+          </div>`).join('');
+        return `
+          <div class="record-item" style="padding:12px;display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+            <div style="width:56px;height:56px;border-radius:8px;overflow:hidden;background:var(--bg);display:flex;align-items:center;justify-content:center;flex:0 0 auto;">
+              ${p.cover ? `<img src="${esc(p.cover)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : '<span style="font-size:24px;">🎁</span>'}
+            </div>
+            <div style="flex:1;min-width:220px;">
+              <div style="font-size:13px;font-weight:700;">${esc(p.name || p.id)} ${badge}
+                <span style="font-weight:400;color:var(--text-dim);font-size:11px;">${esc(p.id)} · v${esc(p.versionName || '1.0.0')} · ${p.itemCount || 0} 件${p.kind === 'byoyomi' ? ' · 读秒包' : ''}</span>
+              </div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
+                ${p.author ? '作者：' + esc(p.author) + ' · ' : ''}授权：${esc(p.license || '未填写')}
+                ${p.installedAt ? ' · 安装于 ' + esc(new Date(p.installedAt).toLocaleString()) : ''}
+              </div>
+              ${p.description ? `<div style="font-size:11px;margin-top:3px;">${esc(p.description)}</div>` : ''}
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">${chips || '<span style="font-size:11px;color:var(--text-dim);">（包内无商品）</span>'}</div>
+              ${(p.warnings || []).length ? `<div style="font-size:11px;color:var(--gold-light);margin-top:6px;">${p.warnings.map(esc).join('；')}</div>` : ''}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;flex:0 0 auto;">
+              ${draft
+                ? `<button class="btn btn-primary btn-sm" data-pack-publish="${esc(p.id)}" type="button">发布</button>`
+                : `<button class="btn btn-ghost btn-sm" data-pack-unpublish="${esc(p.id)}" type="button">转为草稿</button>`}
+              <button class="btn btn-ghost btn-sm" data-pack-delete="${esc(p.id)}" type="button" style="color:var(--red-light);">删除</button>
+            </div>
+          </div>`;
+      }).join('');
+      box.onclick = (e) => {
+        const pub = e.target.closest && e.target.closest('[data-pack-publish]');
+        if (pub) return packAction(pub.getAttribute('data-pack-publish'), 'publish');
+        const un = e.target.closest && e.target.closest('[data-pack-unpublish]');
+        if (un) return packAction(un.getAttribute('data-pack-unpublish'), 'unpublish');
+        const del = e.target.closest && e.target.closest('[data-pack-delete]');
+        if (del) return packAction(del.getAttribute('data-pack-delete'), 'delete');
+      };
+    }
+
+    async function packAction(id, action) {
+      const p = PACKS.find((x) => x.id === id);
+      const label = (p && p.name) || id;
+      if (action === 'publish') {
+        if (!confirm(`确认发布扩展包「${label}」？发布后玩家即可看到、购买和装备包内商品。`)) return;
+      } else if (action === 'unpublish') {
+        if (!confirm(`确认把「${label}」转为草稿？玩家将立即看不到、也无法再装备包内商品（已拥有的记录保留，重新发布后恢复）。`)) return;
+      } else {
+        if (!confirm(`确认删除扩展包「${label}」？包内 ${p ? p.itemCount : 0} 件商品与素材文件会一起删除；玩家已拥有的记录会变成失效道具，且不可恢复。`)) return;
+      }
+      try {
+        await apiPost(`/api/admin/items/packs/${encodeURIComponent(id)}/${action}`, {});
+        if (!alive()) return;
+        toast(action === 'delete' ? '扩展包已删除' : action === 'publish' ? '已发布' : '已转为草稿');
+        await fetchCatalog();
+        await loadAssets();
+        await loadPacks();
+      } catch (e) { onErr(e); }
+    }
+
     // ---------------- 素材上传 ----------------
 
     function fileToBase64(file) {
@@ -311,7 +613,7 @@
       }
     }
 
-    const KIND_ICON = { avatar: '🧑', sprite: '🎭', pieces: '♟', board: '🪵', bgm: '🎵', byoyomi: '⏱' };
+    const KIND_ICON = { avatar: '🧑', sprite: '🎭', pieces: '♟', board: '🪵', bgm: '🎵', byoyomi: '⏱', audiopack: '🎙' };
 
     function renderAssets() {
       const box = $('shopAssetList');
@@ -329,12 +631,15 @@
           const isAudio = a.kind === 'bgm' || a.kind === 'byoyomi';
           const preview = isAudio
             ? `<audio controls preload="none" src="${esc(a.url)}" style="width:100%;height:32px;"></audio>`
-            : `<img src="${esc(a.url)}" alt="${esc(a.name || a.id)}" loading="lazy"
+            : a.kind === 'audiopack'
+              ? `<a href="${esc(a.url)}" target="_blank" rel="noopener" style="font-size:24px;text-decoration:none;">🎙</a>`
+              : `<img src="${esc(a.url)}" alt="${esc(a.name || a.id)}" loading="lazy"
                  style="max-width:100%;max-height:76px;object-fit:contain;display:block;margin:0 auto;">`;
           const meta = [
             KIND_LABEL[a.kind] || a.kind,
             a.width ? `${a.width}×${a.height}` : '',
             a.size ? `${Math.round(a.size / 1024)} KB` : '',
+            a.packId ? `扩展包 ${a.packId}` : '',
           ].filter(Boolean).join(' · ');
           return `<div class="record-item" style="margin:0;padding:10px;display:flex;flex-direction:column;gap:6px;cursor:default;">
             <div style="height:76px;display:flex;align-items:center;justify-content:center;background:var(--bg);border-radius:6px;overflow:hidden;">${preview}</div>
@@ -342,9 +647,11 @@
             <div style="font-size:10px;color:var(--text-dim);">${esc(meta)}</div>
             <div style="font-size:10px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(a.url)}">${esc(a.url)}</div>
             <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:auto;">
-              <button class="btn btn-primary btn-sm" data-use-asset="${esc(a.id)}" type="button" style="flex:1;padding:4px 6px;">用于新商品</button>
+              ${a.packId
+                ? '<span style="font-size:11px;color:var(--text-dim);flex:1;">由扩展包管理</span>'
+                : `<button class="btn btn-primary btn-sm" data-use-asset="${esc(a.id)}" type="button" style="flex:1;padding:4px 6px;">用于新商品</button>`}
               <button class="btn btn-ghost btn-sm" data-copy-asset="${esc(a.id)}" type="button" style="padding:4px 8px;" title="复制素材 URL">复制</button>
-              <button class="btn btn-ghost btn-sm" data-del-asset="${esc(a.id)}" type="button" style="padding:4px 8px;color:var(--red-light);" title="删除素材（被商品引用时会拒绝）">删除</button>
+              ${a.packId ? '' : `<button class="btn btn-ghost btn-sm" data-del-asset="${esc(a.id)}" type="button" style="padding:4px 8px;color:var(--red-light);" title="删除素材（被商品引用时会拒绝）">删除</button>`}
             </div>
           </div>`;
         }).join('') + '</div>';
@@ -459,7 +766,7 @@
         if (!sel) continue;
         const keep = sel.value;
         sel.innerHTML = (id === 'itemCodeId' ? '<option value="">（仅发币，不发道具）</option>' : '')
-          + CATALOG.map((it) => `<option value="${esc(it.id)}">${esc(it.name || it.id)}（${esc(it.type)}）</option>`).join('');
+          + CATALOG.map((it) => `<option value="${esc(it.id)}">${esc(it.name || it.id)}（${esc(it.type)}${it.status === 'draft' ? ' · 草稿' : ''}）</option>`).join('');
         if (keep && BY_ID.has(keep)) sel.value = keep;
       }
     }
@@ -597,6 +904,10 @@
     bind('btnShopRefresh', () => loadShopAdmin());
     bind('btnShopAssetsRefresh', () => loadAssets());
     bind('btnItemReset', () => resetItemForm());
+    bind('btnPackUpload', () => uploadPack());
+    bind('btnPackTemplate', () => downloadPackTemplate());
+    bind('btnPackRefresh', () => loadPacks());
+    bind('btnByoyomiZip', () => uploadByoyomiZip());
 
     // 素材类型筛选（纯前端过滤，不再多打一次接口）
     const assetKindEl = $('shopAssetKind');

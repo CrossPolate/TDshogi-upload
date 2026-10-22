@@ -879,6 +879,7 @@
             return `<img src="${esc(a.value)}" alt="" loading="lazy">`;
           }
           if (a.kind === 'audio') return '<span class="glyph">🎵</span>';
+          if (a.kind === 'audiopack') return '<span class="glyph">🎙</span>';
           return `<span class="glyph">${esc(a.value)}</span>`;
         }
         function unlockHint(it) {
@@ -1037,6 +1038,11 @@
           const pieces = cat(eq.pieces);
           // 未装备 → 回到游戏基础图集（不是商品默认装扮）
           window.PIECE_ATLAS_DEFAULT = (pieces && pieces.asset && pieces.asset.value) || 'pieces/kinki.png';
+          // 棋盘纹理：与 Sound 启动时同一入口（CSS 变量），棋盘已渲染也会即时换肤
+          const board = cat(eq.board);
+          if (window.Sound && window.Sound.setBoardSkin) {
+            window.Sound.setBoardSkin((board && board.asset && board.asset.value) || null);
+          }
           try { document.dispatchEvent(new CustomEvent('tdshogi-appearance')); } catch (_) {}
           const byo = cat(eq.byoyomi);
           if (window.Sound && window.Sound.setByoyomiVariant) {

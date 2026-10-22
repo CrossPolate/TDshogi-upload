@@ -29,9 +29,10 @@ const store = require('./store');
 const catalogMod = require('./catalog');
 const bgmRoles = require('./bgm-roles');
 const assets = require('./assets');
+const packsMod = require('./packs');
 const {
   SLOTS, BGM_SLOTS, DEFAULT_BGM_EQUIP, DEFAULT_EQUIP, isBgmType,
-  getCatalog, reloadCatalog,
+  getCatalog, reloadCatalog, isPublished,
 } = catalogMod;
 
 // ⚠️ 2026-10-03 架构优化：目录可重载 ⇒ id 索引用可变引用 + 重建函数（原先在加载时一次性建好）
@@ -52,9 +53,9 @@ function catalog() {
   return getCatalog().map((it) => ({ ...it, equipSlot: slotForItem(it) }));
 }
 
-/** 公开目录：含元信息与素材（供商店预览图/试听；静态文件本就公开可访问） */
+/** 公开目录：仅已发布的商品（草稿只在管理端可见；素材可公开预览） */
 function publicCatalog() {
-  return getCatalog().map((it) => ({ ...it, equipSlot: slotForItem(it) }));
+  return getCatalog().filter(isPublished).map((it) => ({ ...it, equipSlot: slotForItem(it) }));
 }
 
 /** 重载目录（外置 `data/items-catalog.json` 改完后调用；CLI/后台可用），返回条目数 */
@@ -128,6 +129,7 @@ function effectiveEquipped(accountId) {
     if (cur === undefined || cur === null) continue;
     const it = getItem(cur);
     const valid = !!it
+      && isPublished(it)
       && (it.price === null || owned.has(it.id))
       && slotForItem(it, slot) === slot;
     if (!valid) delete eq[slot];
@@ -139,7 +141,7 @@ function effectiveEquipped(accountId) {
 function snapshot(accountId) {
   const id = accountId ? String(accountId) : '';
   const own = new Set(store.owned(id));
-  const list = getCatalog().map((it) => {
+  const list = getCatalog().filter(isPublished).map((it) => {
     const unlocked = it.price === null || own.has(it.id);
     const withSlot = { ...it, equipSlot: slotForItem(it) };
     return unlocked ? withSlot : { ...withSlot, locked: true };
@@ -203,6 +205,8 @@ function equip(accountId, slot, itemId) {
 
   const item = getItem(itemId);
   if (!item) return { ok: false, error: '道具不存在', code: 'NO_ITEM' };
+  // 扩展包草稿：管理员预览用，玩家不可装备（id 可猜，必须在业务层挡）
+  if (!isPublished(item)) return { ok: false, error: '道具尚未上架', code: 'NOT_PUBLISHED' };
   // 槽位确定：统一走 slotForItem（唯一真相源）——BGM 按 role 落到 bgm-menu/game/endgame，
   // 缺 role 时按调用方 hint / 兜底 bgm-game，**绝不产生 'bgm' 这类非法槽**
   const effectiveSlot = slotForItem(item, rawSlot);
@@ -257,6 +261,7 @@ function buy(accountId, itemId) {
   const id = accountId ? String(accountId) : '';
   const item = getItem(itemId);
   if (!item) return { ok: false, error: '道具不存在', code: 'NO_ITEM' };
+  if (!isPublished(item)) return { ok: false, error: '道具尚未上架', code: 'NOT_PUBLISHED' };
   // ⚠️ 2026-10-11（问题3）：限定装扮不可购买（只能发放/兑换获得）
   if (item.limited) return { ok: false, error: '限定装扮无法购买', code: 'NOT_FOR_SALE' };
   // ⚠️ 2026-10-05 修复：先校验解锁门槛（等级/对局数），不满足直接拒绝
@@ -300,8 +305,11 @@ function redeem(accountId, code) {
   if (Array.isArray(entry.redeemedBy) && entry.redeemedBy.includes(id)) {
     return { ok: false, error: '该账号已兑换过此码', code: 'ALREADY_REDEEMED' };
   }
-  if (entry.itemId && !getItem(entry.itemId)) {
-    return { ok: false, error: '兑换码对应道具已下架', code: 'NO_ITEM' };
+  if (entry.itemId) {
+    const it = getItem(entry.itemId);
+    if (!it || !isPublished(it)) {
+      return { ok: false, error: '兑换码对应道具已下架', code: 'NO_ITEM' };
+    }
   }
 
   const r = store.applyCode(id, entry.itemId || null, entry.coin || 0, key);
@@ -377,11 +385,11 @@ function avatarOptionsFor(accountId) {
   const id = accountId ? String(accountId) : '';
   const set = new Set();
   for (const it of getCatalog()) {
-    if (it.type === 'avatar' && it.price === null) set.add(it.asset.value);
+    if (it.type === 'avatar' && it.price === null && isPublished(it)) set.add(it.asset.value);
   }
   for (const itemId of store.owned(id)) {
     const it = getItem(itemId);
-    if (it && it.type === 'avatar') set.add(it.asset.value);
+    if (it && it.type === 'avatar' && isPublished(it)) set.add(it.asset.value);
   }
   return [...set];
 }
@@ -426,8 +434,9 @@ function bgmTracksFor(accountId) {
 
 /**
  * 玩家当前应用的外观/音效（前端启动时拉一次）：
- * `{ atlas, byoyomi, bgm: {menu,game,endgame} }`
+ * `{ atlas, board, byoyomi, bgm: {menu,game,endgame} }`
  * - atlas：棋子图集 URL（装扮 pieces 槽）；未装备 → null（前端用游戏基础图集）
+ * - board：棋盘纹理 URL（装扮 board 槽）；未装备 → null（前端用基础木纹）
  * - byoyomi：读秒音文件/语音包 URL；未装备 → null（**不合成**、静音）
  * - bgm：三轨（装备优先，其次管理员配置的系统轨；默认为 null）
  */
@@ -435,15 +444,44 @@ function appearanceFor(accountId) {
   const id = accountId ? String(accountId) : '';
   const eq = effectiveEquipped(id);
   const piecesIt = eq.pieces ? getItem(eq.pieces) : null;
+  const boardIt = eq.board ? getItem(eq.board) : null;
   const byoIt = eq.byoyomi ? getItem(eq.byoyomi) : null;
   const byoKind = byoIt && byoIt.asset ? byoIt.asset.kind : null;
   return {
     atlas: (piecesIt && piecesIt.asset && piecesIt.asset.value) || null,
+    board: (boardIt && boardIt.asset && boardIt.asset.value) || null,
     // synth 只为兼容旧外置数据；新目录不接受，且前端不再用它发声
     byoyomi: (byoIt && byoIt.asset && byoKind !== 'synth' && byoIt.asset.value) || null,
     bgm: bgmTracksFor(id),
   };
 }
+
+/**
+ * 扩展包操作包装：安装/发布/下架/删除都会改目录，必须同步重建本模块的 id 索引。
+ * ⚠️ 2026-10-22：`packs.js` 直接写 catalog 时不会经过 `upsertItem` 的 reindex，
+ * 曾出现「包已发布但 equip 仍报 NOT_PUBLISHED」——索引停留在安装时的草稿快照。
+ */
+const packsApi = {
+  ...packsMod,
+  installParsed: async (...args) => {
+    const r = await packsMod.installParsed(...args);
+    if (r && r.ok) reindex();
+    return r;
+  },
+  installStaged: async (...args) => {
+    const r = await packsMod.installStaged(...args);
+    if (r && r.ok) reindex();
+    return r;
+  },
+  installByoyomiZip: async (...args) => {
+    const r = await packsMod.installByoyomiZip(...args);
+    if (r && r.ok) reindex();
+    return r;
+  },
+  publish: (id) => { const r = packsMod.publish(id); if (r && r.ok) reindex(); return r; },
+  unpublish: (id) => { const r = packsMod.unpublish(id); if (r && r.ok) reindex(); return r; },
+  remove: (id) => { const r = packsMod.remove(id); if (r && r.ok) reindex(); return r; },
+};
 
 module.exports = {
   SLOTS, BGM_SLOTS, DEFAULT_BGM_EQUIP, DEFAULT_EQUIP,
@@ -465,6 +503,7 @@ module.exports = {
   upsertItem: (raw) => { const r = catalogMod.upsertItem(raw); if (r && r.ok) reindex(); return r; },
   deleteItem: (id) => { const r = catalogMod.deleteItem(id); if (r && r.ok) reindex(); return r; },
   assets,
+  packs: packsApi,
   bgmRoles,
   getBgmRoles: () => bgmRoles.getRoles(),
   setBgmRoles: (patch) => bgmRoles.setRoles(patch),

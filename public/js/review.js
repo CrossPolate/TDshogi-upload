@@ -337,13 +337,12 @@
         return fb;
       }
 
-      // 棋盘拖拽的 document 级 pointermove/pointerup 只在拖拽中挂载（freeboard-dnd），
-      // 切页时若恰好拖到一半，一并兜底解除 + 移除拖拽幽灵 / 悬停高亮（棋盘相关观察器清理）
+      // 棋盘拖拽的 document 级 pointermove/pointerup 只在拖拽中挂载（freeboard-dnd）；
+      // FreeBoard.destroy() 统一解除窗口 resize/orientationchange、棋盘事件与拖拽监听，
+      // 并移除拖拽幽灵。此前只手动清 pointermove/pointerup，窗口级监听会随每次进复盘页累积。
       teardown.push(() => {
         try {
-          if (fb && fb._docMove) document.removeEventListener('pointermove', fb._docMove);
-          if (fb && fb._docUp) document.removeEventListener('pointerup', fb._docUp);
-          if (fb && fb._drag && fb._drag.ghost) fb._drag.ghost.remove();
+          if (fb && fb.destroy) fb.destroy();
           document.querySelectorAll('.cell.drag-over').forEach((c) => c.classList.remove('drag-over'));
         } catch (_) {}
       });
@@ -465,7 +464,7 @@
       // 原 `window.rvEditComment / window.rvDeleteComment` 收敛进该命名空间，离开页面后旧句柄不再被误调用。
 
       /**
-       * 跳到第 n 手（翻页 / 跳首尾 / 键盘 / 列表与棋盘点击统一走这里）。
+       * 跳到第 n 手（翻页 / 跳首尾 / 键盘 / 手数列表统一走这里；棋盘点击刻意不导航）。
        * ⚠️ 审查 P3：自由摆放（freeMode）下翻页此前直接 `cursor = n; render()`，而 render() 在
        * freeMode 分支里只 `fb.render()` 保持草稿 → 既不刷新到新局面、也不丢弃改动，与「翻页会
        * 丢弃改动」的提示自相矛盾。这里统一在翻页前退出自由摆放（stopFreePlace 会重渲染回只读
@@ -607,7 +606,8 @@
         const dropM = /^([PLNSGBR])\*([1-9])([a-i])$/.exec(usi);
         if (dropM) {
           const sym = (window.DROP_SYMBOLS || {})[dropM[1]] || '歩';
-          return `${full[parseInt(dropM[2], 10) - 1]}${kanji[dropM[3].charCodeAt(0) - 97]}${sym}打`;
+          // full 带前导「０」，筋号直接作下标；此处再减 1 会把 5e 打成「４五」（2026-10-22 修）
+          return `${full[parseInt(dropM[2], 10)]}${kanji[dropM[3].charCodeAt(0) - 97]}${sym}打`;
         }
         if (usi.length === 4 || usi.length === 5) {
           const toFile = usi[2];
