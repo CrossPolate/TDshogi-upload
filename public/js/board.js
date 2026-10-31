@@ -135,7 +135,23 @@
     const coordsOn = !!(window.Settings && window.Settings.get('showCoords'));
     const chrome = coordsOn ? 58 : 40;
     const byViewport = Math.floor((vw - chrome) / 9);
-    return Math.max(28, Math.min(48, byViewport));
+    // 高度也要参与：横屏手机宽度够、高度不够，只看宽度会让棋盘超出屏幕。
+    const vv = window.visualViewport;
+    const vvH = vv && Number.isFinite(vv.height) ? vv.height : 0;
+    const rawVh = vvH || window.innerHeight;
+    const vh = Number.isFinite(rawVh) && rawVh > 0 ? rawVh : 0;
+    const landscape = vh > 0 && window.innerWidth > vh;
+    const playPage = !!(typeof document.querySelector === 'function' && document.querySelector('.play-layout'));
+    // 预留：导航 + 双方玩家栏 + 双方持驹 + 底部操作条/边距。数值按移动端实际布局估。
+    // 360px 档手机的房间栏/按钮会多折一行，额外预留一格左右的空间。
+    const narrow = !landscape && window.innerWidth < 400 ? 24 : 0;
+    const reserved = playPage
+      ? (landscape ? 175 : 348 + narrow)
+      : (landscape ? 130 : 200);
+    // 测试/无头环境可能没有 innerHeight：此时只用宽度约束，避免退化到最小格。
+    const byHeight = vh ? Math.floor((vh - reserved - (coordsOn ? 32 : 12)) / 9) : Infinity;
+    const byBoard = Math.min(byViewport, byHeight);
+    return Math.max(18, Math.min(48, byBoard));
   }
 
   /**

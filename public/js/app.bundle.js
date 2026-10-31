@@ -5533,7 +5533,23 @@
     const coordsOn = !!(window.Settings && window.Settings.get('showCoords'));
     const chrome = coordsOn ? 58 : 40;
     const byViewport = Math.floor((vw - chrome) / 9);
-    return Math.max(28, Math.min(48, byViewport));
+    // 高度也要参与：横屏手机宽度够、高度不够，只看宽度会让棋盘超出屏幕。
+    const vv = window.visualViewport;
+    const vvH = vv && Number.isFinite(vv.height) ? vv.height : 0;
+    const rawVh = vvH || window.innerHeight;
+    const vh = Number.isFinite(rawVh) && rawVh > 0 ? rawVh : 0;
+    const landscape = vh > 0 && window.innerWidth > vh;
+    const playPage = !!(typeof document.querySelector === 'function' && document.querySelector('.play-layout'));
+    // 预留：导航 + 双方玩家栏 + 双方持驹 + 底部操作条/边距。数值按移动端实际布局估。
+    // 360px 档手机的房间栏/按钮会多折一行，额外预留一格左右的空间。
+    const narrow = !landscape && window.innerWidth < 400 ? 24 : 0;
+    const reserved = playPage
+      ? (landscape ? 175 : 348 + narrow)
+      : (landscape ? 130 : 200);
+    // 测试/无头环境可能没有 innerHeight：此时只用宽度约束，避免退化到最小格。
+    const byHeight = vh ? Math.floor((vh - reserved - (coordsOn ? 32 : 12)) / 9) : Infinity;
+    const byBoard = Math.min(byViewport, byHeight);
+    return Math.max(18, Math.min(48, byBoard));
   }
 
   /**
@@ -6397,6 +6413,8 @@
       };
       g.addEventListener('resize', this._onViewport);
       g.addEventListener('orientationchange', this._onViewport);
+      // 手机浏览器地址栏收起/展开会改变 visualViewport 高度，棋盘需要一起重算。
+      if (g.visualViewport) g.visualViewport.addEventListener('resize', this._onViewport);
     }
 
     // ---------- 装载 ----------
@@ -6558,6 +6576,7 @@
       if (g && g.removeEventListener && this._onViewport) {
         g.removeEventListener('resize', this._onViewport);
         g.removeEventListener('orientationchange', this._onViewport);
+        if (g.visualViewport) g.visualViewport.removeEventListener('resize', this._onViewport);
       }
       this._onViewport = null;
       this.detach();
@@ -13441,7 +13460,7 @@
     render() {
       // —— 原 review.html 的 <main class="container"> … </main> 主体，逐字保留 ——
       return `
-  <main class="container">
+  <main class="container review-page">
     <!-- 加载中 -->
     <div id="loading" class="card" style="padding:40px;text-align:center;">
       加载棋谱中…
@@ -13588,10 +13607,14 @@
           </div>
         </div>
 
-        <!-- 右侧：棋谱 + 操作 -->
+        <!-- 右侧：棋谱 + 操作（手机端用 tabs 分段显示） -->
         <div class="review-side">
+          <div class="mobile-side-tabs rv-mobile-tabs" id="rvMobileTabs">
+            <button class="active" type="button" data-rv-tab="moves">棋谱</button>
+            <button type="button" data-rv-tab="current">当前手</button>
+          </div>
           <!-- 棋谱面板 -->
-          <div class="card" style="padding:18px;">
+          <div class="card rv-panel-moves mobile-active" style="padding:18px;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
               <h3 style="margin:0;font-size:15px;color:var(--gold-light);">走子记录</h3>
               <div style="display:flex;gap:8px;align-items:center;">
@@ -13615,7 +13638,7 @@
           </div>
 
           <!-- 当前手详情 -->
-          <div class="card" style="padding:18px;">
+          <div class="card rv-panel-current" style="padding:18px;">
             <h3 style="margin:0 0 10px;font-size:15px;color:var(--gold-light);">当前手</h3>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
               <button class="btn btn-ghost btn-sm" id="btnBookmark">🔖 书签</button>
@@ -13645,6 +13668,14 @@
         </div>
       </div>
     </div>
+    <!-- 手机端底部翻页条：不必滚到棋谱面板找上一手/下一手 -->
+    <div class="mobile-play-bar rv-mobile-nav" id="rvMobileNav">
+      <button class="btn btn-ghost btn-sm" type="button" data-rv-mirror="btnFirst">⏮ 首</button>
+      <button class="btn btn-ghost btn-sm" type="button" data-rv-mirror="btnPrev">◀ 上</button>
+      <button class="btn btn-primary btn-sm" type="button" data-rv-mirror="btnNext">下 ▶</button>
+      <button class="btn btn-ghost btn-sm" type="button" data-rv-mirror="btnLast">末 ⏭</button>
+    </div>
+
     <!-- 收藏到研究（1.9）：从复盘页直接选研究，不再要求用户手输棋谱 ID -->
     <div class="modal-overlay" id="studySaveModal" role="dialog" aria-modal="true" aria-label="收藏到研究" style="display:none;">
       <div class="card" style="width:420px;max-width:94vw;padding:22px;">
@@ -13699,6 +13730,27 @@
         el.addEventListener(ev, fn);
         teardown.push(() => el.removeEventListener(ev, fn));
       };
+      // 手机端：棋谱 / 当前手 分段；底部翻页条镜像原有按钮
+      const rvTabs = $('rvMobileTabs');
+      if (rvTabs) {
+        const setRvTab = (key) => {
+          rvTabs.querySelectorAll('[data-rv-tab]').forEach((b) => {
+            b.classList.toggle('active', b.getAttribute('data-rv-tab') === key);
+          });
+          document.querySelectorAll('.review-side .card').forEach((c) => {
+            c.classList.toggle('mobile-active', c.classList.contains('rv-panel-' + key));
+          });
+        };
+        on(rvTabs, 'click', (ev) => {
+          const b = ev.target.closest && ev.target.closest('[data-rv-tab]');
+          if (b) setRvTab(b.getAttribute('data-rv-tab'));
+        });
+      }
+      document.querySelectorAll('[data-rv-mirror]').forEach((m) => {
+        const src = $(m.getAttribute('data-rv-mirror'));
+        if (src) on(m, 'click', () => src.click());
+      });
+
       // document / window 级监听：必须在 unmount 解绑（SPA 文档不销毁，不解就泄漏到别的页面）
       const onDoc = (ev, fn) => {
         document.addEventListener(ev, fn);
@@ -16375,7 +16427,7 @@ function showResult(st) {
       // —— 原 play.html 的主体（<header class="nav"> 之后到 </footer> 之前）：逐字保留 ——
       // <main class="container"> + 升变弹层 + 胜负横幅；导航/页脚/toast 由外壳承载。
       return `
-  <main class="container">
+  <main class="container play-page">
     <div id="roomTop" class="room-top">
       <div class="room-meta" style="font-size:14px;color:var(--text-dim);">
         <span id="roomCodeLabel"></span>
@@ -16451,17 +16503,23 @@ function showResult(st) {
         </div>
       </div>
 
-      <!-- 右侧面板 -->
+      <!-- 右侧面板（手机端由下方 tabs 分段显示，避免三块纵向霸屏） -->
       <div class="play-side">
-        <div class="panel">
+        <div class="mobile-side-tabs" id="mobileSideTabs">
+          <button class="active" type="button" data-side-tab="moves">棋谱</button>
+          <button type="button" data-side-tab="chat">聊天</button>
+          <button type="button" data-side-tab="spectators">观众</button>
+          <button type="button" data-side-tab="actions">操作</button>
+        </div>
+        <div class="panel panel-moves mobile-active">
           <h3>走子记录</h3>
           <div class="move-list" id="moveList"></div>
         </div>
-        <div class="panel">
+        <div class="panel panel-spectators">
           <h3>观众（<span id="spectatorCount">0</span>）</h3>
           <div id="spectatorList" style="font-size:13px;min-height:20px;color:var(--text);"><div style="color:var(--text-dim);font-size:12px;">暂无观众</div></div>
         </div>
-        <div class="panel">
+        <div class="panel panel-actions">
           <h3>操作</h3>
           <div style="display:flex;flex-direction:column;gap:10px;">
             <!-- ⚠️ 2026-10-02 体验修复：认输 / 再来一局补 tooltip（此前无说明） -->
@@ -16481,7 +16539,7 @@ function showResult(st) {
           </div>
         </div>
         <!-- 聊天：§R2 kibitz 分区（全部 / 对局 / 观战），并按发言者身份配色区分 -->
-        <div class="panel">
+        <div class="panel panel-chat">
           <h3>聊天</h3>
           <div class="chat-tabs" id="chatTabs">
             <button class="chat-tab active" data-tab="all">全部</button>
@@ -16498,6 +16556,14 @@ function showResult(st) {
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- 手机端底部操作条：镜像右侧「操作」卡的关键按钮，避免必须滚到棋盘下方 -->
+    <div class="mobile-play-bar" id="mobilePlayBar">
+      <button class="btn btn-danger btn-sm" type="button" data-mobile-mirror="btnResign">认输</button>
+      <button class="btn btn-ghost btn-sm" type="button" data-mobile-mirror="btnDeclare" hidden>宣言</button>
+      <button class="btn btn-primary btn-sm" type="button" data-mobile-mirror="btnRematch" hidden>再来</button>
+      <button class="btn btn-ghost btn-sm" type="button" data-mobile-mirror="btnLeave">退出</button>
     </div>
   </main>
 
@@ -16546,6 +16612,46 @@ function showResult(st) {
         el.addEventListener(ev, fn);
         teardown.push(() => el.removeEventListener(ev, fn));
       };
+
+      // 手机端：棋谱 / 聊天 / 观众 / 操作 分段显示（桌面端这些 panel 全部照旧纵向排列）
+      const sideTabs = $('mobileSideTabs');
+      if (sideTabs) {
+        const setSide = (key) => {
+          sideTabs.querySelectorAll('[data-side-tab]').forEach((b) => {
+            b.classList.toggle('active', b.getAttribute('data-side-tab') === key);
+          });
+          document.querySelectorAll('.play-side .panel').forEach((p) => {
+            p.classList.toggle('mobile-active', p.classList.contains('panel-' + key));
+          });
+        };
+        on(sideTabs, 'click', (ev) => {
+          const b = ev.target.closest && ev.target.closest('[data-side-tab]');
+          if (b) setSide(b.getAttribute('data-side-tab'));
+        });
+      }
+
+      // 底部操作条镜像右侧操作卡：不复制业务逻辑，点击转发到原按钮
+      const mirrors = [...document.querySelectorAll('[data-mobile-mirror]')];
+      if (mirrors.length) {
+        const syncMirrors = () => {
+          mirrors.forEach((m) => {
+            const src = $(m.getAttribute('data-mobile-mirror'));
+            if (!src) { m.hidden = true; return; }
+            m.hidden = src.style.display === 'none';
+            m.disabled = !!src.disabled;
+          });
+        };
+        mirrors.forEach((m) => {
+          const src = $(m.getAttribute('data-mobile-mirror'));
+          if (src) {
+            on(m, 'click', () => src.click());
+            const mo = new MutationObserver(syncMirrors);
+            mo.observe(src, { attributes: true, attributeFilter: ['style', 'disabled'] });
+            teardown.push(() => mo.disconnect());
+          }
+        });
+        syncMirrors();
+      }
 
       // ==================================================================
       // 页面级状态（原 IIFE 闭包变量）
@@ -20409,7 +20515,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
     render() {
       // —— 原 admin.html 的 <main class="container"> … </main> 主体，逐字保留 ——
       return `
-  <main class="container">
+  <main class="container admin-page">
     <div class="section-title" style="font-size:24px;">🛡️ 管理后台</div>
     <!--
       ⚠️ 2026-10-02 体验修复（入口带 ?k=）：本页是**后台入口页**，关于进入参数的现有约定说明如下——

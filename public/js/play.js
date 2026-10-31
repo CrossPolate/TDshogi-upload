@@ -39,7 +39,7 @@
       // —— 原 play.html 的主体（<header class="nav"> 之后到 </footer> 之前）：逐字保留 ——
       // <main class="container"> + 升变弹层 + 胜负横幅；导航/页脚/toast 由外壳承载。
       return `
-  <main class="container">
+  <main class="container play-page">
     <div id="roomTop" class="room-top">
       <div class="room-meta" style="font-size:14px;color:var(--text-dim);">
         <span id="roomCodeLabel"></span>
@@ -115,17 +115,23 @@
         </div>
       </div>
 
-      <!-- 右侧面板 -->
+      <!-- 右侧面板（手机端由下方 tabs 分段显示，避免三块纵向霸屏） -->
       <div class="play-side">
-        <div class="panel">
+        <div class="mobile-side-tabs" id="mobileSideTabs">
+          <button class="active" type="button" data-side-tab="moves">棋谱</button>
+          <button type="button" data-side-tab="chat">聊天</button>
+          <button type="button" data-side-tab="spectators">观众</button>
+          <button type="button" data-side-tab="actions">操作</button>
+        </div>
+        <div class="panel panel-moves mobile-active">
           <h3>走子记录</h3>
           <div class="move-list" id="moveList"></div>
         </div>
-        <div class="panel">
+        <div class="panel panel-spectators">
           <h3>观众（<span id="spectatorCount">0</span>）</h3>
           <div id="spectatorList" style="font-size:13px;min-height:20px;color:var(--text);"><div style="color:var(--text-dim);font-size:12px;">暂无观众</div></div>
         </div>
-        <div class="panel">
+        <div class="panel panel-actions">
           <h3>操作</h3>
           <div style="display:flex;flex-direction:column;gap:10px;">
             <!-- ⚠️ 2026-10-02 体验修复：认输 / 再来一局补 tooltip（此前无说明） -->
@@ -145,7 +151,7 @@
           </div>
         </div>
         <!-- 聊天：§R2 kibitz 分区（全部 / 对局 / 观战），并按发言者身份配色区分 -->
-        <div class="panel">
+        <div class="panel panel-chat">
           <h3>聊天</h3>
           <div class="chat-tabs" id="chatTabs">
             <button class="chat-tab active" data-tab="all">全部</button>
@@ -162,6 +168,14 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- 手机端底部操作条：镜像右侧「操作」卡的关键按钮，避免必须滚到棋盘下方 -->
+    <div class="mobile-play-bar" id="mobilePlayBar">
+      <button class="btn btn-danger btn-sm" type="button" data-mobile-mirror="btnResign">认输</button>
+      <button class="btn btn-ghost btn-sm" type="button" data-mobile-mirror="btnDeclare" hidden>宣言</button>
+      <button class="btn btn-primary btn-sm" type="button" data-mobile-mirror="btnRematch" hidden>再来</button>
+      <button class="btn btn-ghost btn-sm" type="button" data-mobile-mirror="btnLeave">退出</button>
     </div>
   </main>
 
@@ -210,6 +224,46 @@
         el.addEventListener(ev, fn);
         teardown.push(() => el.removeEventListener(ev, fn));
       };
+
+      // 手机端：棋谱 / 聊天 / 观众 / 操作 分段显示（桌面端这些 panel 全部照旧纵向排列）
+      const sideTabs = $('mobileSideTabs');
+      if (sideTabs) {
+        const setSide = (key) => {
+          sideTabs.querySelectorAll('[data-side-tab]').forEach((b) => {
+            b.classList.toggle('active', b.getAttribute('data-side-tab') === key);
+          });
+          document.querySelectorAll('.play-side .panel').forEach((p) => {
+            p.classList.toggle('mobile-active', p.classList.contains('panel-' + key));
+          });
+        };
+        on(sideTabs, 'click', (ev) => {
+          const b = ev.target.closest && ev.target.closest('[data-side-tab]');
+          if (b) setSide(b.getAttribute('data-side-tab'));
+        });
+      }
+
+      // 底部操作条镜像右侧操作卡：不复制业务逻辑，点击转发到原按钮
+      const mirrors = [...document.querySelectorAll('[data-mobile-mirror]')];
+      if (mirrors.length) {
+        const syncMirrors = () => {
+          mirrors.forEach((m) => {
+            const src = $(m.getAttribute('data-mobile-mirror'));
+            if (!src) { m.hidden = true; return; }
+            m.hidden = src.style.display === 'none';
+            m.disabled = !!src.disabled;
+          });
+        };
+        mirrors.forEach((m) => {
+          const src = $(m.getAttribute('data-mobile-mirror'));
+          if (src) {
+            on(m, 'click', () => src.click());
+            const mo = new MutationObserver(syncMirrors);
+            mo.observe(src, { attributes: true, attributeFilter: ['style', 'disabled'] });
+            teardown.push(() => mo.disconnect());
+          }
+        });
+        syncMirrors();
+      }
 
       // ==================================================================
       // 页面级状态（原 IIFE 闭包变量）

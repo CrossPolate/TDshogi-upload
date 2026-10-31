@@ -86,11 +86,11 @@ a { color: inherit; text-decoration: none; }
   position: sticky;
   top: 0;
   z-index: 100;
-  height: var(--nav-h);
+  height: calc(var(--nav-h) + env(safe-area-inset-top, 0px));
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 28px;
+  padding: env(safe-area-inset-top, 0px) 28px 0;
   background: color-mix(in srgb, var(--bg) 85%, transparent);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid color-mix(in srgb, var(--gold) 20%, transparent);
@@ -661,6 +661,9 @@ input[type=file]::file-selector-button:hover {
 }
 .play-main { display: flex; flex-direction: column; align-items: center; min-width: 0; }
 
+/* 手机端专用：分段面板与底部操作条；桌面完全隐藏 */
+.mobile-side-tabs, .mobile-play-bar { display: none; }
+
 /* 玩家栏 */
 .player-bar {
   display: flex;
@@ -1046,8 +1049,8 @@ input[type=file]::file-selector-button:hover {
 
 @media (max-width: 640px) {
   :root { --cell-size: 38px; }
-  .container { padding: 16px 12px 48px; }
-  .nav { padding: 0 14px; }
+  .container { padding: 16px 12px calc(48px + env(safe-area-inset-bottom, 0px)); }
+  .nav { padding: calc(8px + env(safe-area-inset-top, 0px)) 14px 8px; }
   .nav-links a { padding: 8px 10px; font-size: 13px; }
   .board-area .hand-row { width: 44px; }
   .board-area .hand-row .hand-pieces { gap: 4px; }
@@ -1228,7 +1231,7 @@ body { -webkit-text-size-adjust: 100%; }
   #roomTop { flex-wrap: wrap; row-gap: 8px; }
 
   /* ---- 导航：紧凑单行，防溢出 ---- */
-  .nav { padding: 0 10px; gap: 6px; }
+  .nav { padding: calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; gap: 6px; }
   .brand-stamp { display: none; }
   .brand-logo { font-size: 19px; }
   .nav-links { gap: 0; }
@@ -1280,7 +1283,7 @@ body { -webkit-text-size-adjust: 100%; }
   .nav {
     height: auto;
     min-height: 56px;
-    padding: 8px 14px;
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 14px 8px;
     gap: 10px;
     flex-wrap: nowrap;
   }
@@ -1350,7 +1353,7 @@ body { -webkit-text-size-adjust: 100%; }
   .nav-user > span:first-child { display: none; }
   .brand-stamp { display: none; }
   .brand-logo { font-size: 19px; }
-  .nav { padding: 8px 10px; gap: 8px; }
+  .nav { padding: calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; gap: 8px; }
 }
 
 /* ============================================================
@@ -1415,4 +1418,225 @@ body { -webkit-text-size-adjust: 100%; }
   #tab-items select.input { width: 100% !important; min-width: 0; }
   #tab-shop input[type="file"] { width: 100%; font-size: 12px; }
   #btnItemUpsert, #btnUpload { width: 100%; }
+}
+
+/* ============================================================
+   移动端 P0 适配（2026-10-31）
+   - 对局页：分段面板 + 固定底部操作条 + bottom sheet
+   - 安全区 / 横屏短视口
+   ============================================================ */
+@media (max-width: 640px) {
+  .play-page {
+    padding-top: 8px;
+    padding-bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+  }
+  .play-page #roomTop { margin-bottom: 8px; }
+  .play-page .room-actions { gap: 6px; }
+  .play-page .room-actions .btn {
+    min-height: 34px;
+    padding: 5px 8px;
+    font-size: 12px;
+  }
+  .play-page .player-bar {
+    max-width: none;
+    padding: 6px 10px;
+    gap: 10px;
+  }
+  .play-page .player-avatar { width: 30px; height: 30px; font-size: 16px; }
+  .play-page .player-bar .name { font-size: 14px; }
+  .play-page .player-bar .rating { font-size: 11px; }
+  .play-page .player-clock { font-size: 19px; min-width: 64px; }
+  .play-page .board-area { gap: 4px; }
+  .play-page .board-area .hand-row {
+    padding: 3px 8px;
+    margin: 2px 0;
+    min-height: 28px;
+  }
+  .play-page .board-wrap,
+  .play-page .board-area .board-wrap { margin: 4px 0; }
+
+  .mobile-side-tabs {
+    display: flex;
+    gap: 6px;
+    position: sticky;
+    top: calc(var(--nav-h) + env(safe-area-inset-top, 0px));
+    z-index: 30;
+    padding: 6px 0;
+    background: var(--bg);
+  }
+  .mobile-side-tabs button {
+    flex: 1;
+    min-height: 38px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
+    background: var(--bg-2);
+    color: var(--text-dim);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .mobile-side-tabs button.active {
+    color: var(--gold-light);
+    border-color: var(--gold);
+    background: color-mix(in srgb, var(--gold) 12%, transparent);
+  }
+
+  /* 手机端一次只显示一个面板，避免“棋谱 + 观众 + 操作 + 聊天”四块纵向霸屏 */
+  .play-side { gap: 10px; }
+  .play-side .panel { display: none; }
+  .play-side .panel.mobile-active { display: block; }
+  .play-side .panel-moves .move-list { max-height: 36dvh; }
+  .play-side .panel-chat .chat-box { max-height: 32dvh; }
+  .play-side .panel-actions .btn { width: 100%; }
+
+  .mobile-play-bar {
+    display: flex;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 220;
+    gap: 8px;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    border-top: 1px solid color-mix(in srgb, var(--gold) 22%, transparent);
+  }
+  .mobile-play-bar .btn {
+    flex: 1;
+    min-height: 40px;
+    padding: 6px;
+    font-size: 14px;
+  }
+  .mobile-play-bar .btn[hidden] { display: none !important; }
+
+  /* 升变 / 通用弹窗：手机端改底部抽屉，键盘弹出也不至于顶到屏幕外 */
+  .promote-overlay { align-items: flex-end; }
+  .promote-box {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 18px 18px 0 0;
+    padding: 20px 18px calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+  .promote-actions { flex-direction: column; }
+  .promote-actions .btn { width: 100%; }
+
+  .modal-overlay { align-items: flex-end; padding: 0; }
+  .modal-overlay > .card {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 85dvh;
+    overflow-y: auto;
+    margin: 0;
+    border-radius: 18px 18px 0 0;
+    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  /* 表格宁可横向滚动，也不要把 6 列压成不可读 */
+  .arena-table { min-width: 520px; }
+}
+
+/* 横屏手机：宽度往往 >640，旧的“手机断点”完全不生效；按高度单独处理 */
+@media (max-height: 520px) and (orientation: landscape) {
+  :root { --cell-size: auto; }
+  .play-page { padding-top: 4px; padding-bottom: 8px; }
+  .nav {
+    height: calc(48px + env(safe-area-inset-top, 0px));
+    min-height: 48px;
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  .play-page #roomTop { margin-bottom: 2px; }
+  .play-page .room-actions .btn {
+    min-height: 30px;
+    padding: 3px 6px;
+    font-size: 11px;
+  }
+  .play-page .player-bar .rating { display: none; }
+  .play-page .player-bar { padding: 3px 8px; }
+  .mobile-play-bar { display: none; }
+  .mobile-side-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 4px 0;
+    margin-top: 6px;
+  }
+  .mobile-side-tabs button {
+    flex: 1;
+    min-height: 34px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
+    background: var(--bg-2);
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .mobile-side-tabs button.active {
+    color: var(--gold-light);
+    border-color: var(--gold);
+  }
+  .play-side .panel { display: none; }
+  .play-side .panel.mobile-active { display: block; }
+  .play-side .panel-moves .move-list { max-height: 30dvh; }
+  .play-side .panel-chat .chat-box { max-height: 28dvh; }
+
+  .play-main .player-bar { padding: 4px 10px; gap: 8px; }
+  .play-main .player-bar .name { font-size: 13px; }
+  .play-main .player-bar .rating { font-size: 10px; }
+  .play-main .player-avatar { width: 26px; height: 26px; font-size: 14px; }
+  .play-main .player-clock { font-size: 17px; min-width: 60px; }
+  .board-area { flex-direction: row; gap: 8px; }
+  .board-area .hand-row {
+    width: 48px;
+    flex-direction: column;
+    padding: 4px 2px;
+  }
+  .board-area .hand-row .hand-pieces { flex-direction: column; flex-wrap: nowrap; }
+  .board-area .hand-label { margin-bottom: 4px; font-size: 10px; }
+  .hand-piece { width: 30px; height: 30px; }
+  .board-wrap, .board-area .board-wrap { margin: 3px 0; }
+}
+
+/* 短屏手机：隐藏 ELO 副行并压缩玩家栏，保证底部操作条不压住自己的棋钟 */
+@media (max-width: 640px) and (max-height: 700px) {
+  .play-page .player-bar .rating { display: none; }
+  .play-page .player-bar { padding: 4px 8px; }
+  .play-page .player-bar .name { font-size: 13px; }
+}
+
+/* ============================================================
+   复盘页移动端（P1）：棋谱/当前手分段 + 底部翻页
+   ============================================================ */
+@media (max-width: 640px) {
+  .review-page { padding-bottom: calc(70px + env(safe-area-inset-bottom, 0px)); }
+  .review-side { gap: 10px; }
+  .review-side .card { display: none; }
+  .review-side .card.mobile-active { display: block; }
+  .rv-mobile-tabs { margin-bottom: 2px; }
+  .rv-mobile-nav .btn { min-height: 40px; padding: 6px; font-size: 14px; }
+}
+
+@media (max-height: 520px) and (orientation: landscape) {
+  .review-page { padding-bottom: 8px; }
+  .review-side .card { display: none; }
+  .review-side .card.mobile-active { display: block; }
+  .rv-mobile-nav { display: none; }
+}
+
+/* 管理后台：窄屏卡片内部横向内容允许折行，操作按钮不被压扁 */
+@media (max-width: 640px) {
+  .admin-page .record-item { padding: 12px; }
+  .admin-page .record-item > div { min-width: 0; }
+  .admin-page .record-item [style*="justify-content:space-between"] { flex-wrap: wrap; }
+  .admin-page .record-item .btn { flex-shrink: 0; }
+}
+
+/* 复盘页：复用对局页的紧凑棋盘栏，避免底部翻页条压住棋盘 */
+@media (max-width: 640px) {
+  .review-page .player-bar { padding: 6px 10px; gap: 10px; }
+  .review-page .player-bar .name { font-size: 14px; }
+  .review-page .player-clock { font-size: 19px; min-width: 64px; }
+  .review-page .board-area { gap: 4px; }
+  .review-page .board-area .hand-row { padding: 3px 8px; margin: 2px 0; min-height: 28px; }
+  .review-page .board-wrap,
+  .review-page .board-area .board-wrap { margin: 4px 0; }
+  .review-page .review-layout > div > .card { padding: 12px !important; }
 }

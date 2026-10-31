@@ -63,7 +63,7 @@
     render() {
       // —— 原 admin.html 的 <main class="container"> … </main> 主体，逐字保留 ——
       return `
-  <main class="container">
+  <main class="container admin-page">
     <div class="section-title" style="font-size:24px;">🛡️ 管理后台</div>
     <!--
       ⚠️ 2026-10-02 体验修复（入口带 ?k=）：本页是**后台入口页**，关于进入参数的现有约定说明如下——

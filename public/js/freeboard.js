@@ -86,6 +86,8 @@
       };
       g.addEventListener('resize', this._onViewport);
       g.addEventListener('orientationchange', this._onViewport);
+      // 手机浏览器地址栏收起/展开会改变 visualViewport 高度，棋盘需要一起重算。
+      if (g.visualViewport) g.visualViewport.addEventListener('resize', this._onViewport);
     }
 
     // ---------- 装载 ----------
@@ -247,6 +249,7 @@
       if (g && g.removeEventListener && this._onViewport) {
         g.removeEventListener('resize', this._onViewport);
         g.removeEventListener('orientationchange', this._onViewport);
+        if (g.visualViewport) g.visualViewport.removeEventListener('resize', this._onViewport);
       }
       this._onViewport = null;
       this.detach();
