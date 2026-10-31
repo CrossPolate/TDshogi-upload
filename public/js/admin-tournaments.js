@@ -103,9 +103,9 @@
         const pendingN = (t.entrants || []).filter((e) => e.status === 'pending').length;
         const meta = [
           // 赛制要显示出来：T8 起有瑞士制，审核与排障时"这是哪种赛制"是首要信息
-          t.formatLabel || (t.format === 'swiss' ? '瑞士制' : '单败淘汰'),
+          t.formatLabel || ({ swiss: '瑞士制', 'round-robin': '循环赛' }[t.format] || '单败淘汰'),
           `${approved}/${t.size} 人${pendingN ? `（待批准 ${pendingN}）` : ''}`,
-          (t.format === 'swiss' && t.totalRounds)
+          (['swiss', 'round-robin'].includes(t.format) && t.totalRounds)
             ? `第 ${t.currentRound || 0}/${t.totalRounds} 轮` : '',
           t.ownerName ? `主办 ${esc(t.ownerName)}` : '',
           global.I18N.fmt(t.createdAt),

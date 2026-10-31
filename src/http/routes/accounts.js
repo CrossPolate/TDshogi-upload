@@ -16,7 +16,18 @@ const accounts = require('../../accounts');
 // ⚠️ 本文件（`src/http/routes/accounts.js`）与 `src/accounts.js` 同名但不同物：
 // 后者是账号存储域模块（上一行），本文件是它的 HTTP 路由。
 const rateLimit = require('../../ratelimit');
-const { resolveAccount } = require('../context');
+const { resolveAccount, protocol } = require('../context');
+
+/** 凭据变更后主动断开该账号的所有 WS；客户端会带新令牌重连。 */
+function kickPlayerSockets(accountId) {
+  const set = protocol.playerToClients.get(accountId);
+  if (!set) return;
+  for (const clientId of [...set]) {
+    const ws = protocol.clients.get(clientId);
+    if (!ws) continue;
+    try { ws.close(4001, 'credentials_changed'); } catch (_) { /* 已断开 */ }
+  }
+}
 
 module.exports = function registerAccounts(app) {
   // 注册：{username, password, guestId?}（guestId 用于游客升级保留数据）
@@ -69,6 +80,27 @@ module.exports = function registerAccounts(app) {
     const r = accounts.updateProfile(accountId, { phone: body.phone, style: body.style });
     if (!r.ok) return res.status(400).json(r);
     res.json({ ok: true, profile: r.profile });
+  });
+
+  // 自主修改密码：{currentPassword, newPassword}
+  app.post('/api/account/password/change', rateLimit.expressMiddleware(rateLimit.auth), (req, res) => {
+    const accountId = resolveAccount(req);
+    if (!accountId) return res.status(401).json({ error: '未登录或令牌已失效' });
+    const b = req.body || {};
+    const r = accounts.changePassword(accountId, b.currentPassword, b.newPassword);
+    if (!r.ok) return res.status(r.code === 'BAD_CURRENT' ? 403 : 400).json(r);
+    kickPlayerSockets(accountId);
+    res.json({ ok: true, token: r.token });
+  });
+
+  // 退出所有设备：撤销该账号全部旧令牌
+  app.post('/api/account/logout-all', rateLimit.expressMiddleware(rateLimit.auth), (req, res) => {
+    const accountId = resolveAccount(req);
+    if (!accountId) return res.status(401).json({ error: '未登录或令牌已失效' });
+    const r = accounts.invalidateAllTokens(accountId);
+    if (!r.ok) return res.status(400).json(r);
+    kickPlayerSockets(accountId);
+    res.json({ ok: true });
   });
 
   // 改昵称（花积分）：{nickname} ——昵称是对外显示名，与登录用户名分离；

@@ -58,6 +58,9 @@ function createTournament(name, size, owner, opts) {
   // 瑞士制总轮数（T8）：不填则按人数给建议值（max(3, ceil(log2(n)))）。
   // ⚠️ 必须在这里定死并存下来——轮数是赛程的一部分，中途改会让已打的轮次失去意义。
   let totalRounds = null;
+  if (format === 'round-robin') {
+    totalRounds = size % 2 === 0 ? size - 1 : size;
+  }
   if (format === 'swiss') {
     const wanted = Math.round(Number(o.totalRounds) || 0);
     totalRounds = wanted || swiss.suggestRounds(size);
@@ -343,6 +346,9 @@ function voidPlayer(tournamentId, playerId, actor) {
   if ((t.format || 'single-elimination') === 'swiss') {
     return voidPlayerSwiss(t, playerId, actor);
   }
+  if ((t.format || 'single-elimination') === 'round-robin') {
+    return require('./round-robin').voidPlayer(t, playerId, actor);
+  }
 
   let affected = 0;
   // ⚠️ 自底向上（高索引 → 根）：先作废叶子侧对局、再处理父节点。
@@ -477,7 +483,10 @@ function startTournament(tournamentId, logEntry) {
 
   t.players = approved;
 
-  if ((t.format || 'single-elimination') === 'swiss') {
+  if ((t.format || 'single-elimination') === 'round-robin') {
+    const rr = require('./round-robin');
+    rr.start(t, approved);
+  } else if ((t.format || 'single-elimination') === 'swiss') {
     // 瑞士制（T8）：**没有对阵树**，开赛就是"配第一轮"。
     // 人数不必是 2 的幂——配对算法自己会处理奇数（最低分且未轮空者轮空）。
     t.bracket = [];
@@ -520,7 +529,7 @@ function startMatch(playerId, spec) {
   let players = null;
   let commit = null;
 
-  if ((t.format || 'single-elimination') === 'swiss') {
+  if (['swiss', 'round-robin'].includes(t.format || 'single-elimination')) {
     const rec = (t.rounds || []).find((r) => r.round === s.round);
     if (!rec) return { ok: false, error: '轮次不存在' };
     const pair = (rec.pairs || [])[s.pairIndex];

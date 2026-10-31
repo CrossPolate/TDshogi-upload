@@ -17,12 +17,15 @@ const auth = require('../../auth');
 const accounts = require('../../accounts');
 const ratings = require('../../ratings');
 const tournaments = require('../../tournaments');
+const seasons = require('../../seasons');
+const arenas = require('../../arenas');
 const audit = require('../../audit');
 const rateLimit = require('../../ratelimit');
 const ipban = require('../../ipban');
 const net = require('../../net');
 const announcements = require('../../announcements');
 const reports = require('../../reports');
+const puzzles = require('../../puzzles');
 const { adminOnly, adminWrite, adminWriteAsync, tournamentAction } = require('../middleware');
 const { protocol, resolvePlayer } = require('../context');
 
@@ -46,6 +49,30 @@ const { protocol, resolvePlayer } = require('../context');
 const { resolveAdminUserId, resolveItemTargetDetail, targetLabel } = require('../../items/targets');
 
 module.exports = function registerAdmin(app) {
+  // ---------- 赛季快照 / Arena 管理 ----------
+  app.get('/api/admin/seasons', adminOnly, (req, res) => {
+    res.json({ ok: true, seasons: seasons.list() });
+  });
+
+  app.post('/api/admin/seasons', adminWrite((req, body) => {
+    const r = seasons.create({ name: body.name, startsAt: body.startsAt, endsAt: body.endsAt });
+    return { ...r, action: 'season-create', audit: { name: body.name, startsAt: body.startsAt, endsAt: body.endsAt } };
+  }));
+
+  app.post('/api/admin/seasons/:id/close', adminWrite((req) => {
+    const r = seasons.close(req.params.id);
+    return { ...r, action: 'season-close', audit: { id: req.params.id } };
+  }));
+
+  app.get('/api/admin/arenas', adminOnly, (req, res) => {
+    res.json({ ok: true, arenas: arenas.list(null) });
+  });
+
+  app.post('/api/admin/arenas/:id/cancel', adminWrite((req) => {
+    const r = arenas.adminCancel(req.params.id);
+    return { ...r, action: 'arena-cancel', audit: { id: req.params.id } };
+  }));
+
   // ---------- 全量数据（管理后台表格数据源） ----------
 
   // 全量棋谱（管理后台"全部棋谱"专供）：**仅管理员**。
@@ -160,6 +187,21 @@ module.exports = function registerAdmin(app) {
   app.get('/api/admin/audit', rateLimit.expressMiddleware(rateLimit.heavy), adminOnly, (req, res) => {
     res.json({ events: audit.query({ type: 'admin', limit: 200 }) });
   });
+
+  // ---------- 题库（1.6 每日诘将棋） ----------
+  app.get('/api/admin/puzzles', adminOnly, (req, res) => {
+    res.json({ ok: true, puzzles: puzzles.list() });
+  });
+
+  app.post('/api/admin/puzzles/import', adminWrite((req, body) => {
+    const r = puzzles.importPuzzles((body && body.puzzles) || []);
+    return { ...r, action: 'puzzle-import', audit: { imported: r.imported, errors: (r.errors || []).length } };
+  }));
+
+  app.post('/api/admin/puzzles/:id/status', adminWrite((req, body) => {
+    const r = require('../../storage').setPuzzleStatus(req.params.id, body && body.status);
+    return { ok: r > 0, updated: r, action: 'puzzle-status', audit: { status: body && body.status } };
+  }));
 
   // 管理员：导入 KIF 棋谱
   app.post('/api/admin/records/import', adminOnly, (req, res) => {

@@ -78,7 +78,7 @@
           b.classList.toggle('btn-ghost', b !== btn);
         });
         // ⚠️ 2026-10-02 审查 P1-7：必须含 'rooms'/'reports'，否则这两页（初始 display:none）永不被置为 block。
-        ['overview', 'records', 'users', 'tournaments', 'rooms', 'reports', 'announcements', 'audit', 'ipbans', 'shop', 'items'].forEach((t) => {
+        ['overview', 'records', 'users', 'tournaments', 'seasons', 'rooms', 'reports', 'announcements', 'audit', 'ipbans', 'shop', 'items', 'puzzles'].forEach((t) => {
           const el = $('tab-' + t);
           if (el) el.style.display = t === btn.dataset.tab ? 'block' : 'none';
         });
@@ -95,11 +95,13 @@
         else if (tab === 'records' && hub.loadRecords) hub.loadRecords();
         else if (tab === 'users' && hub.loadUsers) hub.loadUsers();
         else if (tab === 'tournaments' && hub.loadTournaments) hub.loadTournaments();
+        else if (tab === 'seasons' && hub.loadSeasonsAdmin) hub.loadSeasonsAdmin();
         else if (tab === 'audit' && hub.loadAudit) hub.loadAudit();
         else if (tab === 'reports' && hub.loadReports) hub.loadReports();
         // 商城 / 道具发放（2026-10-21 拆分）：各自拉自己需要的数据
         else if (tab === 'shop' && hub.loadShopAdmin) hub.loadShopAdmin();
         else if (tab === 'items' && hub.loadItemsAdmin) hub.loadItemsAdmin();
+        else if (tab === 'puzzles' && hub.loadPuzzlesAdmin) hub.loadPuzzlesAdmin();
       });
     });
 

@@ -18,6 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+const migrations = require('./migrations');
 const log = require('./logger');
 
 // 运行时数据根目录（可用环境变量 DATA_DIR 覆盖，便于部署到持久目录）
@@ -86,6 +87,16 @@ function getDb() {
       savedAt INTEGER
     );
   `);
+  // 版本化结构迁移：1.6–1.9 的新表在这里统一创建；失败直接抛出，避免半迁移状态继续服务。
+  try {
+    const m = migrations.apply(db);
+    if (m.applied.length) {
+      log.info('storage', `schema 迁移完成：v${m.from} → v${m.to}`, { applied: m.applied });
+    }
+  } catch (err) {
+    log.error('storage', 'schema 迁移失败，拒绝启动', { err });
+    throw err;
+  }
   migrateLegacyJson();
   // 老库补列（幂等）——必须早于任何写/读摘要列的语句
   ensureRecordColumns();
@@ -565,6 +576,368 @@ function deleteGameSnapshot(roomId) {
   getDb().prepare('DELETE FROM gamesnapshots WHERE roomId = ?').run(roomId);
 }
 
+// ---------------- puzzles：题库 / 每日题（1.6） ----------------
+function mapPuzzle(row) {
+  if (!row) return null;
+  let solution = [];
+  try { solution = JSON.parse(row.solution); } catch (_) { solution = []; }
+  let tags = [];
+  try { tags = row.tags ? JSON.parse(row.tags) : []; } catch (_) { tags = []; }
+  return {
+    id: row.id,
+    type: row.type,
+    sfen: row.sfen,
+    solution: Array.isArray(solution) ? solution : [],
+    difficulty: row.difficulty,
+    tags: Array.isArray(tags) ? tags : [],
+    source: row.source,
+    license: row.license,
+    status: row.status,
+    createdAt: row.createdAt,
+  };
+}
+
+function listPuzzles(limit = 200) {
+  return getDb().prepare('SELECT * FROM puzzles ORDER BY createdAt ASC, id ASC LIMIT ?').all(Math.max(1, Math.min(1000, limit))).map(mapPuzzle);
+}
+
+function listActivePuzzleIds() {
+  return getDb().prepare("SELECT id FROM puzzles WHERE status = 'active' ORDER BY id ASC").all().map((r) => r.id);
+}
+
+function getPuzzleById(id) {
+  return mapPuzzle(getDb().prepare('SELECT * FROM puzzles WHERE id = ?').get(id));
+}
+
+function putPuzzle(p) {
+  getDb().prepare(`INSERT OR REPLACE INTO puzzles
+    (id, type, sfen, solution, difficulty, tags, source, license, status, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    p.id, p.type, p.sfen, JSON.stringify(p.solution || []),
+    Number(p.difficulty) || 1, JSON.stringify(p.tags || []),
+    p.source || null, p.license || null, p.status || 'active',
+    p.createdAt || Date.now()
+  );
+}
+
+function setPuzzleStatus(id, status) {
+  return getDb().prepare('UPDATE puzzles SET status = ? WHERE id = ?')
+    .run(status === 'active' ? 'active' : 'disabled', id).changes;
+}
+
+function getPuzzleAttempt(playerId, puzzleId, day) {
+  return getDb().prepare('SELECT * FROM puzzle_attempts WHERE playerId = ? AND puzzleId = ? AND day = ?')
+    .get(playerId, puzzleId, day) || null;
+}
+
+function putPuzzleAttempt(playerId, puzzleId, day, { ok = false, attempts = 0 } = {}) {
+  const prev = getPuzzleAttempt(playerId, puzzleId, day);
+  const now = Date.now();
+  const firstAt = prev && prev.firstAt ? prev.firstAt : now;
+  const wasSolved = !!(prev && prev.ok);
+  const solvedAt = (prev && prev.solvedAt) || ((ok || wasSolved) ? now : null);
+  getDb().prepare(`INSERT OR REPLACE INTO puzzle_attempts
+    (playerId, puzzleId, day, ok, attempts, firstAt, solvedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    playerId, puzzleId, day, (ok || wasSolved) ? 1 : 0, Number(attempts) || 0, firstAt, solvedAt
+  );
+}
+
+function listPuzzleSolvedDays(playerId, sinceDay) {
+  return getDb().prepare(`SELECT DISTINCT day FROM puzzle_attempts
+    WHERE playerId = ? AND ok = 1 AND day >= ? ORDER BY day DESC`)
+    .all(playerId, sinceDay).map((r) => r.day);
+}
+
+// ---------------- studies：研究收藏（1.9） ----------------
+function mapStudy(row) {
+  if (!row) return null;
+  return {
+    id: row.id, ownerId: row.ownerId, title: row.title,
+    visibility: row.visibility, createdAt: row.createdAt, updatedAt: row.updatedAt,
+  };
+}
+function listStudies({ ownerId = null, includePublic = false } = {}) {
+  let rows;
+  if (ownerId && includePublic) {
+    rows = getDb().prepare("SELECT * FROM studies WHERE ownerId = ? OR visibility = 'public' ORDER BY updatedAt DESC").all(ownerId);
+  } else if (ownerId) {
+    rows = getDb().prepare('SELECT * FROM studies WHERE ownerId = ? ORDER BY updatedAt DESC').all(ownerId);
+  } else if (includePublic) {
+    rows = getDb().prepare("SELECT * FROM studies WHERE visibility = 'public' ORDER BY updatedAt DESC").all();
+  } else {
+    rows = [];
+  }
+  return rows.map(mapStudy);
+}
+function getStudy(id) { return mapStudy(getDb().prepare('SELECT * FROM studies WHERE id = ?').get(id)); }
+function putStudy(st) {
+  getDb().prepare(`INSERT OR REPLACE INTO studies (id, ownerId, title, visibility, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?)`).run(st.id, st.ownerId, st.title, st.visibility || 'private', st.createdAt || Date.now(), st.updatedAt || Date.now());
+}
+function deleteStudy(id) {
+  const r = getDb().prepare('DELETE FROM studies WHERE id = ?').run(id).changes;
+  getDb().prepare('DELETE FROM study_items WHERE studyId = ?').run(id);
+  return r;
+}
+function listStudyItems(studyId) {
+  return getDb().prepare('SELECT * FROM study_items WHERE studyId = ? ORDER BY sort ASC, recordId ASC').all(studyId);
+}
+function putStudyItem(item) {
+  getDb().prepare(`INSERT OR REPLACE INTO study_items (studyId, recordId, ply, note, sort)
+    VALUES (?, ?, ?, ?, ?)`).run(item.studyId, item.recordId, Number(item.ply) || 0, item.note || null, Number(item.sort) || 0);
+}
+function deleteStudyItem(studyId, recordId, ply = 0) {
+  return getDb().prepare('DELETE FROM study_items WHERE studyId = ? AND recordId = ? AND ply = ?')
+    .run(studyId, recordId, Number(ply) || 0).changes;
+}
+
+// ---------------- seasons：赛季快照（1.8） ----------------
+function mapSeason(row) {
+  if (!row) return null;
+  let data = null;
+  try { data = row.data ? JSON.parse(row.data) : null; } catch (_) { data = null; }
+  return {
+    id: row.id, name: row.name, startsAt: row.startsAt || null, endsAt: row.endsAt || null,
+    status: row.status || 'open', data, createdAt: row.createdAt, closedAt: row.closedAt || null,
+  };
+}
+function putSeason(s) {
+  getDb().prepare(`INSERT OR REPLACE INTO seasons (id, name, startsAt, endsAt, status, data, createdAt, closedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    s.id, s.name, s.startsAt || null, s.endsAt || null, s.status || 'open',
+    s.data ? JSON.stringify(s.data) : null, s.createdAt || Date.now(), s.closedAt || null
+  );
+}
+function getSeason(id) {
+  return mapSeason(getDb().prepare('SELECT * FROM seasons WHERE id = ?').get(id));
+}
+function listSeasons(limit = 50) {
+  return getDb().prepare('SELECT * FROM seasons ORDER BY createdAt DESC LIMIT ?')
+    .all(Math.max(1, Math.min(100, Number(limit) || 50))).map(mapSeason);
+}
+
+// ---------------- notifications：站内通知中心（1.7） ----------------
+function mapNotification(row) {
+  if (!row) return null;
+  let data = null;
+  try { data = row.data ? JSON.parse(row.data) : null; } catch (_) { data = null; }
+  return {
+    id: row.id,
+    playerId: row.playerId,
+    type: row.type,
+    title: row.title,
+    body: row.body || '',
+    data,
+    read: !!row.readAt,
+    readAt: row.readAt || null,
+    createdAt: row.createdAt,
+  };
+}
+function putNotification(n) {
+  const r = getDb().prepare(`INSERT OR IGNORE INTO notifications
+    (id, playerId, type, title, body, data, dedupeKey, readAt, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    n.id, n.playerId, n.type, n.title, n.body || null,
+    n.data ? JSON.stringify(n.data) : null, n.dedupeKey || null, n.readAt || null, n.createdAt || Date.now()
+  );
+  if (r.changes) pruneNotifications(n.playerId);
+  return r.changes > 0;
+}
+function listNotifications(playerId, { limit = 30, offset = 0 } = {}) {
+  return getDb().prepare(`SELECT * FROM notifications WHERE playerId = ?
+    ORDER BY createdAt DESC, id DESC LIMIT ? OFFSET ?`)
+    .all(playerId, Math.max(1, Math.min(100, Number(limit) || 30)), Math.max(0, Number(offset) || 0))
+    .map(mapNotification);
+}
+function unreadNotificationCount(playerId) {
+  return getDb().prepare('SELECT COUNT(*) AS n FROM notifications WHERE playerId = ? AND readAt IS NULL')
+    .get(playerId).n;
+}
+function markNotificationRead(playerId, id) {
+  return getDb().prepare('UPDATE notifications SET readAt = ? WHERE playerId = ? AND id = ? AND readAt IS NULL')
+    .run(Date.now(), playerId, id).changes;
+}
+function markAllNotificationsRead(playerId) {
+  return getDb().prepare('UPDATE notifications SET readAt = ? WHERE playerId = ? AND readAt IS NULL')
+    .run(Date.now(), playerId).changes;
+}
+function pruneNotifications(playerId, keep = 200) {
+  return getDb().prepare(`DELETE FROM notifications WHERE playerId = ? AND id NOT IN (
+    SELECT id FROM notifications WHERE playerId = ? ORDER BY createdAt DESC, id DESC LIMIT ?
+  )`).run(playerId, playerId, Math.max(10, Number(keep) || 200)).changes;
+}
+
+// ---------------- 开局统计（1.9）：只读公开棋谱的 meta.opening 标签 ----------------
+function openingTagStats(limit = 500) {
+  return getDb().prepare(`SELECT TRIM(json_extract(meta, '$.opening')) AS openingTag,
+      COUNT(*) AS n,
+      SUM(CASE WHEN result = 'b' THEN 1 ELSE 0 END) AS blackWins,
+      SUM(CASE WHEN result = 'w' THEN 1 ELSE 0 END) AS whiteWins,
+      SUM(CASE WHEN result = '-' THEN 1 ELSE 0 END) AS draws
+    FROM records
+    WHERE pub = 1 AND meta IS NOT NULL
+      AND TRIM(json_extract(meta, '$.opening')) <> ''
+    GROUP BY openingTag
+    ORDER BY n DESC
+    LIMIT ?`).all(Math.max(1, Math.min(2000, limit)));
+}
+function countPublicRecords() {
+  return getDb().prepare('SELECT COUNT(*) AS n FROM records WHERE pub = 1').get().n;
+}
+
+// ---------------- corr_games：异步长局（1.8） ----------------
+function mapCorrGame(row) {
+  if (!row) return null;
+  let moves = [];
+  try { moves = JSON.parse(row.moves || '[]'); } catch (_) { moves = []; }
+  return {
+    id: row.id,
+    startSfen: row.startSfen,
+    moves: Array.isArray(moves) ? moves : [],
+    playerB: row.playerB,
+    playerW: row.playerW,
+    timePerMoveMs: row.timePerMoveMs,
+    deadlineB: row.deadlineB || null,
+    deadlineW: row.deadlineW || null,
+    status: row.status,
+    result: row.result || null,
+    resultDetail: row.resultDetail || null,
+    drawOfferBy: row.drawOfferBy || null,
+    drawOfferedAt: row.drawOfferedAt || null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+function putCorrGame(g) {
+  getDb().prepare(`INSERT OR REPLACE INTO corr_games
+    (id, startSfen, moves, playerB, playerW, timePerMoveMs, deadlineB, deadlineW, status, result, resultDetail, drawOfferBy, drawOfferedAt, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    g.id, g.startSfen, JSON.stringify(g.moves || []), g.playerB, g.playerW,
+    g.timePerMoveMs, g.deadlineB || null, g.deadlineW || null,
+    g.status || 'playing', g.result || null, g.resultDetail || null,
+    g.drawOfferBy || null, g.drawOfferedAt || null, g.createdAt || Date.now(), g.updatedAt || Date.now()
+  );
+}
+function getCorrGame(id) {
+  return mapCorrGame(getDb().prepare('SELECT * FROM corr_games WHERE id = ?').get(id));
+}
+function listCorrGames(playerId) {
+  return getDb().prepare('SELECT * FROM corr_games WHERE playerB = ? OR playerW = ? ORDER BY updatedAt DESC LIMIT 100')
+    .all(playerId, playerId).map(mapCorrGame);
+}
+function updateCorrGame(g) {
+  getDb().prepare(`UPDATE corr_games SET moves = ?, deadlineB = ?, deadlineW = ?, status = ?, result = ?, resultDetail = ?,
+    drawOfferBy = ?, drawOfferedAt = ?, updatedAt = ? WHERE id = ?`).run(
+    JSON.stringify(g.moves || []), g.deadlineB || null, g.deadlineW || null,
+    g.status, g.result || null, g.resultDetail || null,
+    g.drawOfferBy || null, g.drawOfferedAt || null, g.updatedAt || Date.now(), g.id
+  );
+}
+function listCorrDue(now = Date.now()) {
+  return getDb().prepare(`SELECT * FROM corr_games WHERE status = 'playing'
+    AND ((deadlineB IS NOT NULL AND deadlineB <= ?) OR (deadlineW IS NOT NULL AND deadlineW <= ?))`)
+    .all(now, now).map(mapCorrGame);
+}
+
+// ---------------- account_tokens：邮箱验证 / 找回令牌（1.7） ----------------
+function putAccountToken(t) {
+  getDb().prepare(`INSERT INTO account_tokens
+    (id, accountId, purpose, tokenHash, expiresAt, usedAt, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    t.id, t.accountId, t.purpose, t.tokenHash, t.expiresAt, null, t.createdAt || Date.now()
+  );
+}
+function getAccountToken(tokenHash) {
+  return getDb().prepare('SELECT * FROM account_tokens WHERE tokenHash = ?').get(tokenHash) || null;
+}
+function useAccountToken(id) {
+  return getDb().prepare('UPDATE account_tokens SET usedAt = ? WHERE id = ? AND usedAt IS NULL')
+    .run(Date.now(), id).changes;
+}
+function deleteAccountTokens(accountId, purposePrefix = null) {
+  if (purposePrefix) {
+    return getDb().prepare('DELETE FROM account_tokens WHERE accountId = ? AND purpose LIKE ?')
+      .run(accountId, `${purposePrefix}%`).changes;
+  }
+  return getDb().prepare('DELETE FROM account_tokens WHERE accountId = ?').run(accountId).changes;
+}
+
+// ---------------- social：好友 / 关注 / 拉黑 / 约战（1.7） ----------------
+function getFriendship(a, b) {
+  return getDb().prepare('SELECT * FROM friendships WHERE a = ? AND b = ?').get(a, b) || null;
+}
+function listFriendships(playerId) {
+  return getDb().prepare('SELECT * FROM friendships WHERE a = ? OR b = ? ORDER BY updatedAt DESC')
+    .all(playerId, playerId);
+}
+function putFriendship(a, b, status) {
+  const now = Date.now();
+  getDb().prepare(`INSERT INTO friendships (a, b, status, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(a, b) DO UPDATE SET status = excluded.status, updatedAt = excluded.updatedAt`)
+    .run(a, b, status, now, now);
+}
+function deleteFriendship(a, b) {
+  return getDb().prepare('DELETE FROM friendships WHERE (a = ? AND b = ?) OR (a = ? AND b = ?)')
+    .run(a, b, b, a).changes;
+}
+function putFollow(followerId, followeeId) {
+  getDb().prepare('INSERT OR IGNORE INTO follows (followerId, followeeId, createdAt) VALUES (?, ?, ?)')
+    .run(followerId, followeeId, Date.now());
+}
+function deleteFollow(followerId, followeeId) {
+  return getDb().prepare('DELETE FROM follows WHERE followerId = ? AND followeeId = ?')
+    .run(followerId, followeeId).changes;
+}
+function listFollowing(playerId) {
+  return getDb().prepare('SELECT followeeId AS id FROM follows WHERE followerId = ? ORDER BY createdAt DESC')
+    .all(playerId).map((r) => r.id);
+}
+function listFollowers(playerId) {
+  return getDb().prepare('SELECT followerId AS id FROM follows WHERE followeeId = ? ORDER BY createdAt DESC')
+    .all(playerId).map((r) => r.id);
+}
+function getBlock(a, b) {
+  return getDb().prepare('SELECT * FROM blocks WHERE a = ? AND b = ?').get(a, b) || null;
+}
+function putBlock(a, b) {
+  getDb().prepare('INSERT OR IGNORE INTO blocks (a, b, createdAt) VALUES (?, ?, ?)').run(a, b, Date.now());
+}
+function deleteBlock(a, b) {
+  return getDb().prepare('DELETE FROM blocks WHERE a = ? AND b = ?').run(a, b).changes;
+}
+function listBlocks(playerId) {
+  return getDb().prepare('SELECT b AS id FROM blocks WHERE a = ? ORDER BY createdAt DESC')
+    .all(playerId).map((r) => r.id);
+}
+function getChallenge(id) {
+  return getDb().prepare('SELECT * FROM challenges WHERE id = ?').get(id) || null;
+}
+function putChallenge(c) {
+  getDb().prepare(`INSERT OR REPLACE INTO challenges
+    (id, fromId, toId, timeControl, handicap, rated, createdAt, expiresAt, status, roomId, code)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    c.id, c.fromId, c.toId, c.timeControl || null, c.handicap || null,
+    c.rated ? 1 : 0, c.createdAt || Date.now(), c.expiresAt || 0, c.status || 'pending',
+    c.roomId || null, c.code || null
+  );
+}
+function listChallenges(playerId, now = Date.now()) {
+  return getDb().prepare(`SELECT * FROM challenges
+    WHERE (fromId = ? OR toId = ?) AND status IN ('pending', 'accepted')
+    ORDER BY createdAt DESC LIMIT 50`).all(playerId, playerId)
+    .filter((c) => c.status !== 'pending' || c.expiresAt > now);
+}
+function deleteChallenge(id) {
+  return getDb().prepare('DELETE FROM challenges WHERE id = ?').run(id).changes;
+}
+
+function markChallengeAccepted(id, roomId, code) {
+  return getDb().prepare("UPDATE challenges SET status = 'accepted', roomId = ?, code = ? WHERE id = ?")
+    .run(roomId, code, id).changes;
+}
+
 // ---------------- 兼容旧导出（供仍引用 RECORDS_DIR 的代码） ----------------
 function ensureDataDirs() {
   ensureDir(DATA_DIR);
@@ -609,6 +982,66 @@ module.exports = {
   getGameSnapshot,
   listGameSnapshots,
   deleteGameSnapshot,
+  // studies（1.9）
+  listStudies,
+  getStudy,
+  putStudy,
+  deleteStudy,
+  listStudyItems,
+  putStudyItem,
+  deleteStudyItem,
+  // seasons（1.8）
+  putSeason,
+  getSeason,
+  listSeasons,
+  // notifications（1.7）
+  putNotification,
+  listNotifications,
+  unreadNotificationCount,
+  markNotificationRead,
+  markAllNotificationsRead,
+  pruneNotifications,
+  // 开局统计（1.9）
+  openingTagStats,
+  countPublicRecords,
+  // corr_games（1.8）
+  putCorrGame,
+  getCorrGame,
+  listCorrGames,
+  updateCorrGame,
+  listCorrDue,
+  // account_tokens（1.7）
+  putAccountToken,
+  getAccountToken,
+  useAccountToken,
+  deleteAccountTokens,
+  // social（1.7）
+  getFriendship,
+  listFriendships,
+  putFriendship,
+  deleteFriendship,
+  putFollow,
+  deleteFollow,
+  listFollowing,
+  listFollowers,
+  getBlock,
+  putBlock,
+  deleteBlock,
+  listBlocks,
+  getChallenge,
+  putChallenge,
+  listChallenges,
+  deleteChallenge,
+  markChallengeAccepted,
+  // puzzles（1.6）
+  listPuzzles,
+  listActivePuzzleIds,
+  getPuzzleById,
+  putPuzzle,
+  setPuzzleStatus,
+  getPuzzleAttempt,
+  putPuzzleAttempt,
+  listPuzzleSolvedDays,
   // 仅供测试/工具
   _getDb: getDb,
 };

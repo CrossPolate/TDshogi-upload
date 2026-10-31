@@ -273,6 +273,18 @@
       return p === null || p === undefined ? '免费' : `${p} 币`;
     }
 
+    /** 版本号统一显示为 vX.Y.Z（作者可能自带 v 前缀） */
+    function versionText(v) {
+      const s = String(v || '1.0.0').trim() || '1.0.0';
+      return /^v/i.test(s) ? s : `v${s}`;
+    }
+
+    /** 每个扩展包/读秒包都需要重新确认授权，避免沿用上一次的勾选 */
+    function resetRightsConfirmation() {
+      const el = $('packRights');
+      if (el) el.checked = false;
+    }
+
     /** 包内商品预览：图片缩略图 / BGM 试听 / 读秒包 manifest 链接 */
     function packItemArt(it) {
       const a = (it && it.asset) || {};
@@ -316,7 +328,7 @@
           <div style="font-size:13px;">
             <b style="color:var(--green);">✅ 校验通过</b> ·
             <b>${esc(report.pack.name)}</b>
-            <span style="color:var(--text-dim);font-size:11px;">${esc(report.pack.id)} · v${esc(report.pack.versionName)} · ${report.items.length} 件</span>
+            <span style="color:var(--text-dim);font-size:11px;">${esc(report.pack.id)} · ${esc(versionText(report.pack.versionName))} · ${report.items.length} 件</span>
           </div>
           <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
             ${report.pack.author ? '作者：' + esc(report.pack.author) + ' · ' : ''}
@@ -394,6 +406,7 @@
         });
         if (!alive()) return;
         PACK_TOKEN = null;
+        resetRightsConfirmation();
         renderPackReport(null, r.pack || { name: '扩展包', itemCount: (r.items || []).length });
         if ($('packFile')) $('packFile').value = '';
         await fetchCatalog();
@@ -430,9 +443,11 @@
         if (!alive()) return;
         if (out) {
           out.innerHTML = `<span style="color:var(--green);">✅ 已导入为草稿：${esc((r.pack && r.pack.name) || name || '读秒语音包')}</span>`
+            + '<div style="color:var(--text-dim);margin-top:2px;">请在「已安装扩展包」中预览并发布。</div>'
             + ((r.warnings || []).length ? `<div style="color:var(--gold-light);margin-top:4px;">${r.warnings.map(esc).join('；')}</div>` : '');
         }
         if (input) input.value = '';
+        resetRightsConfirmation();
         await fetchCatalog();
         await loadAssets();
         await loadPacks();
@@ -487,7 +502,7 @@
             </div>
             <div style="flex:1;min-width:220px;">
               <div style="font-size:13px;font-weight:700;">${esc(p.name || p.id)} ${badge}
-                <span style="font-weight:400;color:var(--text-dim);font-size:11px;">${esc(p.id)} · v${esc(p.versionName || '1.0.0')} · ${p.itemCount || 0} 件${p.kind === 'byoyomi' ? ' · 读秒包' : ''}</span>
+                <span style="font-weight:400;color:var(--text-dim);font-size:11px;">${esc(p.id)} · ${esc(versionText(p.versionName))} · ${p.itemCount || 0} 件${p.kind === 'byoyomi' ? ' · 读秒包' : ''}</span>
               </div>
               <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
                 ${p.author ? '作者：' + esc(p.author) + ' · ' : ''}授权：${esc(p.license || '未填写')}
@@ -908,6 +923,19 @@
     bind('btnPackTemplate', () => downloadPackTemplate());
     bind('btnPackRefresh', () => loadPacks());
     bind('btnByoyomiZip', () => uploadByoyomiZip());
+
+    // 重新选文件后，旧的上传令牌/校验报告立即失效——否则会误装上一个包
+    const packFileEl = $('packFile');
+    if (packFileEl) on(packFileEl, 'change', () => {
+      PACK_TOKEN = null;
+      const out = $('packReport');
+      if (out) out.innerHTML = '';
+    });
+    const byoyomiFileEl = $('byoyomiZip');
+    if (byoyomiFileEl) on(byoyomiFileEl, 'change', () => {
+      const out = $('byoyomiZipResult');
+      if (out) out.innerHTML = '';
+    });
 
     // 素材类型筛选（纯前端过滤，不再多打一次接口）
     const assetKindEl = $('shopAssetKind');

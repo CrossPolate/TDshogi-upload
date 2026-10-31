@@ -320,7 +320,7 @@
                 主办：<span data-player-id="${esc(T.ownerId || '')}">${esc(T.ownerName || '未知')}</span
                 > · ${esc(T.formatLabel || '单败淘汰')} · ${joinedCount(T)}/${T.size} 人${
       // 瑞士制的"打到哪了"光看状态看不出来，把轮次一并显示
-      (T.format === 'swiss' && T.totalRounds) ? ` · 第 ${T.currentRound || 0}/${T.totalRounds} 轮` : ''}
+      (['swiss', 'round-robin'].includes(T.format) && T.totalRounds) ? ` · 第 ${T.currentRound || 0}/${T.totalRounds} 轮` : ''}
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px;">
@@ -676,7 +676,7 @@
           ['报名审核', T.requireApproval ? '需主办人审核' : '免审核（报名即参赛）'],
           ['提交时间', fmtTime(T.createdAt)],
         ];
-        if (T.format === 'swiss' && T.totalRounds) {
+        if (['swiss', 'round-robin'].includes(T.format) && T.totalRounds) {
           rows.splice(1, 0, ['轮次', `共 ${T.totalRounds} 轮${T.currentRound ? `（已进行到第 ${T.currentRound} 轮）` : ''}`]);
         }
         const reason = T.reason
@@ -804,7 +804,7 @@
       function renderBracketCard() {
         const card = el('tnBracketCard');
         // T8：瑞士制没有淘汰树，用"轮次列表 + 名次表"呈现
-        if (T.format === 'swiss') { renderSwissCard(card); return; }
+        if (['swiss', 'round-robin'].includes(T.format)) { renderSwissCard(card); return; }
         if (!(T.bracket || []).length) {
           card.style.display = 'none';
           return;
@@ -854,7 +854,7 @@
           card.innerHTML = `
             <div class="section-title" style="margin-bottom:10px;">赛程（${esc(T.formatLabel || '瑞士制')}）</div>
             <div style="color:var(--text-dim);font-size:13px;">
-              尚未开赛。共 ${T.totalRounds || 0} 轮，开赛后每轮按积分重新配对。
+              尚未开赛。共 ${T.totalRounds || 0} 轮，${T.format === 'round-robin' ? '开赛后按固定轮转进行。' : '开赛后每轮按积分重新配对。'}
             </div>`;
           return;
         }
@@ -862,7 +862,6 @@
 
         const roundsHtml = rounds.map((r) => {
           const isCur = r.round === T.currentRound && T.status === 'playing';
-          let failedN = 0;
           const rows = (r.pairs || []).map(([a, b], i) => {
             const w = (r.results || {})[pairKey(a, b)];
             const mine = !!myPlayerId && (a === myPlayerId || b === myPlayerId);
@@ -881,10 +880,8 @@
                 ? `<a class="btn btn-primary btn-sm" href="play.html?room=${encodeURIComponent(roomId)}&join=1">进入对局</a>`
                 : `<a class="btn btn-ghost btn-sm" href="play.html?room=${encodeURIComponent(roomId)}&spectate=1">观战</a>`;
             } else {
-              // ⚠️ 问题 8：既无结果、又没有房间 id = 建房失败（startSwissRound 建房失败时 matchIds[i]=null）。
-              // 原实现只显示「—」，把「这轮有一场根本没打起来」静默掉了。
-              failedN++;
-              tag = '<span style="color:var(--red-light);" title="该场未能创建房间，需主办人 / 管理员重试或安排重赛">⚠️ 未能开局</span>';
+              // 约战制下 matchIds 为空表示“双方尚未自行开局”，不是建房失败。
+              tag = '<span style="color:var(--text-dim);">待开始</span>';
             }
             const voided = (r.voided || []).some((v) => v === a || v === b);
             return `
@@ -899,7 +896,6 @@
           // ⚠️ 问题 8：轮次级告警（退让原因 / 建房失败）显式呈现，避免「静默卡住一轮」。
           const roundWarn = [];
           if (r.degraded) roundWarn.push(`配对经过退让${r.reason ? `：${esc(r.reason)}` : ''}，可能有重复对阵`);
-          if (failedN) roundWarn.push(`有 ${failedN} 场未能创建房间，需主办人 / 管理员处理`);
           return `
             <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;${isCur ? 'border-color:var(--gold);' : ''}">
               <div style="font-size:13px;font-weight:700;margin-bottom:6px;">
@@ -923,7 +919,7 @@
         card.innerHTML = `
           <div class="section-title" style="margin-bottom:4px;">赛程（${esc(T.formatLabel || '瑞士制')} · 共 ${T.totalRounds} 轮）</div>
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
-            每轮按积分重新配对：强者遇强者、不重复对阵（没有淘汰，输一两场仍有机会）。
+            ${T.format === 'round-robin' ? '循环赛：固定轮转，所有人两两交手；每轮所有对局结束后进入下一轮。' : '每轮按积分重新配对：强者遇强者、不重复对阵（没有淘汰，输一两场仍有机会）。'}
             当前第 ${T.currentRound || 0} 轮${T.status === 'playing' ? '' : '（已结束）'}。
           </div>
           ${roundsHtml}

@@ -164,3 +164,142 @@
   .rv-comments { padding-left: 12px; }
   .rv-comment-text { min-width: 0; }   /* 允许真正折行，而不是撑宽整行 */
 }
+
+/* ============ 1.6 引擎分析 ============ */
+.rv-analysis-card { padding: 16px 18px; margin-bottom: 16px; }
+.rv-analysis-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.rv-analysis-title { font-size: 14px; font-weight: 800; color: var(--gold-light); }
+.rv-analysis-state { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+.rv-analysis-state.err { color: var(--red-light); }
+.rv-analysis-chart {
+  display: block;
+  width: 100%;
+  height: 120px;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.rv-analysis-summary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.rv-analysis-summary b { color: var(--text); }
+.rv-analysis-hint { margin-top: 8px; font-size: 11px; color: var(--text-dim); line-height: 1.6; }
+.rv-eval-num {
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.rv-eval-tag {
+  margin-left: 4px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.rv-eval-tag.inaccuracy { color: #e8a33d; background: rgba(232, 163, 61, 0.14); }
+.rv-eval-tag.mistake { color: #e05a47; background: rgba(224, 90, 71, 0.14); }
+.rv-eval-tag.blunder { color: #fff; background: rgba(176, 58, 46, 0.75); }
+
+@media (max-width: 640px) {
+  .rv-analysis-card { padding: 14px; }
+  .rv-analysis-head { align-items: flex-start; }
+  .rv-analysis-head .btn { width: 100%; }
+  .rv-analysis-chart { height: 96px; }
+}
+
+/* ============ 1.6 每日诘将棋 ============ */
+.pz-card { padding: 18px; }
+.pz-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.pz-title { font-size: 16px; font-weight: 800; color: var(--gold-light); }
+.pz-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.pz-stat {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.pz-stat span {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.pz-placeholder {
+  padding: 28px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.pz-board-area { margin: 0 auto; }
+.pz-board-area .board-area { margin: 0 auto; }
+.pz-msg {
+  min-height: 22px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--gold-light);
+  text-align: center;
+}
+.pz-msg.err { color: var(--red-light); }
+.pz-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.pz-hint {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+  line-height: 1.6;
+}
+@media (max-width: 640px) {
+  .pz-card { padding: 14px; }
+  .pz-head { gap: 8px; }
+  .pz-board-area .board-area { width: 100%; }
+}
+
+/* ============ 1.7 好友 / 约战 ============ */
+.fr-card { padding: 18px; }
+.fr-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.fr-title { font-size: 16px; font-weight: 800; color: var(--gold-light); }
+.fr-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.fr-placeholder { padding: 28px 12px; text-align: center; font-size: 13px; color: var(--text-dim); line-height: 1.8; }
+.fr-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.fr-section { border-top: 1px solid var(--border); padding: 12px 0; }
+.fr-section-title { font-size: 12px; font-weight: 700; color: var(--text-dim); margin-bottom: 4px; }
+.fr-subtitle { font-size: 11px; color: var(--text-dim); margin: 8px 0 2px; }
+.fr-list { display: flex; flex-direction: column; }
+.fr-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+.fr-row:last-child { border-bottom: none; }
+.fr-who { flex: 1; min-width: 130px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.fr-who span { font-size: 11px; color: var(--text-dim); }
+.fr-who span.on { color: var(--green); }
+.fr-empty { padding: 12px 0; font-size: 12px; color: var(--text-dim); }
+.fr-wait { font-size: 11px; color: var(--text-dim); }
+@media (max-width: 640px) {
+  .fr-card { padding: 14px; }
+  .fr-toolbar .input { max-width: 100% !important; flex: 1 1 100%; }
+  .fr-row .btn { padding: 7px 9px; }
+}

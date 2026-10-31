@@ -34,7 +34,13 @@
       <div class="card lobby-card">
         <h3>⚔️ 快速匹配</h3>
         <p>一键匹配在线对手，两人即开，实时对局。</p>
-        <div style="font-size:12px;color:var(--text-dim);margin:10px 0 14px;">⏱ 10 分钟包干（标准比赛）</div>
+        <div style="font-size:12px;color:var(--text-dim);margin:10px 0 6px;">⏱ 比赛时间</div>
+        <select class="select" id="matchTimeControl" style="width:100%;margin-bottom:14px;">
+          <option value="10:00" selected>10 分钟包干（标准）</option>
+          <option value="15+60">15 分钟 + 60 秒读秒</option>
+          <option value="10+30">10 分钟 + 30 秒读秒</option>
+          <option value="10sec">10 秒快棋</option>
+        </select>
         <div id="matchControls">
           <button class="btn btn-primary btn-lg" id="btnQuickMatch" style="width:100%;">开始匹配</button>
         </div>
@@ -153,9 +159,14 @@
       // ---- 快速匹配 ----
       on($('btnQuickMatch'), 'click', () => {
         this._matchActive = true;
-        api.send({ type: 'quick_match' });
+        const sel = $('matchTimeControl');
+        const timeControl = (sel && sel.value) || '10:00';
+        const tcName = sel && sel.selectedOptions && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : timeControl;
+        api.send({ type: 'quick_match', data: { timeControl } });
         $('matchControls').style.display = 'none';
         const wait = $('matchWait');
+        const waitTitle = wait.querySelector('div:nth-child(2)');
+        if (waitTitle) waitTitle.childNodes[0].nodeValue = `正在寻找 ${tcName} 对手…`;
         wait.classList.add('show');
         // ⚠️ 2026-10-02 体验修复：显示已等待时长（此前只有 spinner，用户无法判断是否卡死）
         let tip = $('matchWaitTimer');

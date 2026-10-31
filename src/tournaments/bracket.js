@@ -201,6 +201,9 @@ function onMatchFinished(tournamentId, matchId, winnerId) {
   if ((t.format || 'single-elimination') === 'swiss') {
     return swissOnMatchFinished(t, matchId, winnerId);
   }
+  if ((t.format || 'single-elimination') === 'round-robin') {
+    return require('./round-robin').onMatchFinished(t, matchId, winnerId);
+  }
   // 找到包含该 matchId 的节点，填入胜者
   let node = t.bracket.find((n) => n.matchId === matchId);
   if (!node) return { ok: false, error: '对局不属于该赛事' };

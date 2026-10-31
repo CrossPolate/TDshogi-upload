@@ -72,6 +72,7 @@
                所以不能写 inline 的 display/gap——inline 会盖掉媒体查询） -->
           <div class="rv-meta-actions">
             <button class="btn btn-ghost btn-sm" id="btnFlipView" title="切换先手 / 后手视角">🔄 翻转视角</button>
+            <button class="btn btn-ghost btn-sm" id="btnSaveStudy" style="display:none;">📚 收藏到研究</button>
             <button class="btn btn-ghost btn-sm" id="btnExportKif">导出 KIF</button>
             <button class="btn btn-ghost btn-sm" id="btnExportCsa">导出 CSA</button>
             <button class="btn btn-ghost btn-sm" data-href="profile.html#records">返回</button>
@@ -93,6 +94,15 @@
             <input class="input" id="adPlayedOn" maxlength="40" placeholder="2026-09-06" style="width:130px;"></div>
           <div><div style="font-size:11px;color:var(--text-dim);">标签（逗号分隔）</div>
             <input class="input" id="adTags" style="width:180px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">开局 / 战法 / 围玉</div>
+            <input class="input" id="adOpening" list="adOpeningList" maxlength="40" placeholder="如：矢仓 / 美浓 / 雁木" style="width:180px;">
+            <datalist id="adOpeningList">
+              <option value="矢仓"></option><option value="美浓"></option><option value="穴熊"></option>
+              <option value="雁木"></option><option value="银冠"></option><option value="舟围"></option>
+              <option value="四间飞车"></option><option value="三间飞车"></option><option value="向飞车"></option>
+              <option value="石田流"></option><option value="相挂"></option><option value="横步"></option>
+              <option value="角交换"></option><option value="相居飞车"></option><option value="相振飞车"></option>
+            </datalist></div>
           <div><div style="font-size:11px;color:var(--text-dim);">先手展示名</div>
             <input class="input" id="adNameB" maxlength="120" style="width:130px;"></div>
           <div><div style="font-size:11px;color:var(--text-dim);">後手展示名</div>
@@ -115,6 +125,22 @@
           </select>
           <button class="btn btn-ghost btn-sm" id="btnSaveVisibility">应用可见性</button>
           <span id="adTip" style="font-size:12px;color:var(--text-dim);"></span>
+        </div>
+      </div>
+
+      <!-- 1.6 引擎复盘：开关 FEATURE_ANALYSIS 打开时才显示 -->
+      <div class="card rv-analysis-card" id="rvAnalysisCard" style="display:none;">
+        <div class="rv-analysis-head">
+          <div>
+            <div class="rv-analysis-title">引擎分析</div>
+            <div class="rv-analysis-state" id="rvAnalysisState">尚未分析</div>
+          </div>
+          <button class="btn btn-primary btn-sm" id="btnAnalyze" type="button">开始分析</button>
+        </div>
+        <div id="rvAnalysisBody" style="display:none;">
+          <canvas class="rv-analysis-chart" id="rvEvalChart" aria-label="评估曲线"></canvas>
+          <div class="rv-analysis-summary" id="rvAnalysisSummary"></div>
+          <div class="rv-analysis-hint">评估在浏览器本地完成；仅分析已结束棋谱，不提供实时支招。</div>
         </div>
       </div>
 
@@ -215,6 +241,21 @@
         </div>
       </div>
     </div>
+    <!-- 收藏到研究（1.9）：从复盘页直接选研究，不再要求用户手输棋谱 ID -->
+    <div class="modal-overlay" id="studySaveModal" role="dialog" aria-modal="true" aria-label="收藏到研究" style="display:none;">
+      <div class="card" style="width:420px;max-width:94vw;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div style="font-size:17px;font-weight:800;">📚 收藏到研究</div>
+          <button class="btn btn-ghost btn-sm" id="studySaveClose" type="button">关闭</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">选择研究</div>
+        <select class="input" id="studySaveSelect" style="width:100%;"></select>
+        <div style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">备注（可选）</div>
+        <input class="input" id="studySaveNote" maxlength="200" style="width:100%;" placeholder="这一手为什么值得研究">
+        <div style="font-size:12px;color:var(--text-dim);margin-top:10px;">收藏当前第 <span id="studySavePly">0</span> 手</div>
+        <button class="btn btn-primary" id="studySaveConfirm" type="button" style="width:100%;margin-top:14px;">收藏</button>
+      </div>
+    </div>
   </main>`;
     },
 
@@ -246,6 +287,7 @@
       const $ = (id) => UI.$(id);
       const esc = (s) => UI.esc(s);
       const toast = (m) => UI.toast(m);
+      const tr = (text, vars) => (global.I18N && global.I18N.t ? global.I18N.t(text, vars) : text);
 
       // 元素事件统一登记（元素虽随 DOM 销毁，仍一并记录，双保险）
       const on = (el, ev, fn) => {
@@ -279,6 +321,144 @@
       // 复盘视角（PLAN §S6）：默认先手，可翻转。与对局页观战视角共用 FreeBoard.setViewpoint
       let viewpoint = 'b';
 
+      // ---- 1.6 引擎分析（FEATURE_ANALYSIS + 浏览器本地 WASM）----
+      let analysisData = null;
+      let analysisInit = false;
+
+      function setAnalysisState(text, isErr) {
+        const el = $('rvAnalysisState');
+        if (!el) return;
+        el.textContent = text;
+        el.classList.toggle('err', !!isErr);
+      }
+
+      function evalRate(cp) {
+        if (!Number.isFinite(cp)) return 0.5;
+        return 1 / (1 + Math.pow(10, -cp / 400));
+      }
+
+      function applyAnalysis(data) {
+        analysisData = data;
+        const body = $('rvAnalysisBody');
+        if (body) body.style.display = '';
+        const btn = $('btnAnalyze');
+        if (btn) { btn.disabled = true; btn.textContent = tr('已完成'); }
+        setAnalysisState(tr('已完成'));
+        renderAnalysisSummary();
+        drawAnalysisChart();
+        renderMoveList();
+      }
+
+      function renderAnalysisSummary() {
+        const box = $('rvAnalysisSummary');
+        if (!box) return;
+        if (!analysisData) { box.textContent = ''; return; }
+        const s = analysisData.summary || {};
+        const total = Math.max(0, (analysisData.positions || []).length - 1);
+        box.innerHTML = `<span>${tr('共 {n} 手', { n: total })}</span>`
+          + `<span>${tr('不精确')} <b>${s.inaccuracies || 0}</b></span>`
+          + `<span>${tr('失误')} <b>${s.mistakes || 0}</b></span>`
+          + `<span>${tr('恶手')} <b>${s.blunders || 0}</b></span>`
+          + `<span style="margin-left:auto;">${tr('深度 {n}', { n: esc(String(analysisData.depth || '—')) })}</span>`;
+      }
+
+      function drawAnalysisChart() {
+        const canvas = $('rvEvalChart');
+        const positions = analysisData && analysisData.positions;
+        if (!canvas || !positions || positions.length < 2) return;
+        const cssW = canvas.clientWidth || 640;
+        const cssH = canvas.clientHeight || 120;
+        const dpr = global.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.round(cssW * dpr));
+        canvas.height = Math.max(1, Math.round(cssH * dpr));
+        const ctx = canvas.getContext && canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, cssW, cssH);
+        ctx.fillStyle = 'rgba(128,128,128,0.10)';
+        ctx.fillRect(0, 0, cssW, cssH);
+        ctx.strokeStyle = 'rgba(128,128,128,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, cssH / 2);
+        ctx.lineTo(cssW, cssH / 2);
+        ctx.stroke();
+        const pts = [];
+        positions.forEach((p, i) => {
+          const v = evalRate(p && p.cp);
+          pts.push({ x: (i / (positions.length - 1)) * cssW, y: cssH - v * cssH });
+        });
+        if (!pts.length) return;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, cssH);
+        pts.forEach((pt) => ctx.lineTo(pt.x, pt.y));
+        ctx.lineTo(pts[pts.length - 1].x, cssH);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(201,162,39,0.12)';
+        ctx.fill();
+        ctx.beginPath();
+        pts.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
+        ctx.strokeStyle = 'rgba(232,196,106,0.95)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (cursor >= 0 && cursor < pts.length) {
+          const pt = pts[cursor];
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = '#e8c46a';
+          ctx.fill();
+        }
+      }
+
+      function loadCachedAnalysis() {
+        const cached = global.AnalysisEngine && global.AnalysisEngine.loadCached
+          ? global.AnalysisEngine.loadCached(recordId) : null;
+        if (cached) { applyAnalysis(cached); return; }
+        setAnalysisState(tr('尚未分析'));
+        const btn = $('btnAnalyze');
+        if (btn) { btn.disabled = false; btn.textContent = tr('开始分析'); }
+      }
+
+      async function runAnalysis() {
+        const btn = $('btnAnalyze');
+        if (!global.AnalysisEngine || !global.AnalysisEngine.isSupported || !global.AnalysisEngine.isSupported()) {
+          setAnalysisState(tr('当前浏览器不支持本地引擎'), true);
+          if (btn) { btn.disabled = false; btn.textContent = tr('重试'); }
+          return;
+        }
+        if (!review) return;
+        if (btn) { btn.disabled = true; btn.textContent = tr('分析中…'); }
+        setAnalysisState(tr('分析中…'));
+        try {
+          const data = await global.AnalysisEngine.analyze(review, {
+            onProgress: (done, total) => { if (alive) setAnalysisState(tr('分析中…') + ` ${done}/${total}`); },
+          });
+          if (alive) applyAnalysis(data);
+        } catch (e) {
+          if (!alive) return;
+          setAnalysisState((e && e.message) || tr('分析请求失败'), true);
+          if (btn) { btn.disabled = false; btn.textContent = tr('重试'); }
+        }
+      }
+
+      function setupAnalysis() {
+        if (!review || !alive) return;
+        const card = $('rvAnalysisCard');
+        if (!global.FEATURES || !global.FEATURES.isOn('analysis')) {
+          if (card) card.style.display = 'none';
+          return;
+        }
+        if (card) card.style.display = '';
+        if (analysisInit) return;
+        analysisInit = true;
+        on($('btnAnalyze'), 'click', runAnalysis);
+        loadCachedAnalysis();
+      }
+
+      if (global.FEATURES && global.FEATURES.ready) {
+        global.FEATURES.ready.then(() => setupAnalysis()).catch(() => {});
+      }
+
       async function load() {
         const authQ = `guest=${encodeURIComponent(guest.id)}${adminToken ? `&token=${encodeURIComponent(adminToken)}` : ''}`;
         const url = `/api/records/${recordId}/review?${authQ}`;
@@ -304,6 +484,7 @@
         cursor = 0;
         render();
         initPermissionUI();
+        setupAnalysis();
         $('loading').style.display = 'none';
         $('review').style.display = 'block';
       }
@@ -397,6 +578,7 @@
         $('adRound').value = m.round || '';
         $('adPlayedOn').value = m.playedOn || '';
         $('adTags').value = (m.tags || []).join(', ');
+        if ($('adOpening')) $('adOpening').value = m.opening || '';
         $('adNameB').value = (m.nameOverrides && m.nameOverrides.b) || '';
         $('adNameW').value = (m.nameOverrides && m.nameOverrides.w) || '';
         $('adResultNote').value = m.resultNote || '';
@@ -414,6 +596,7 @@
           round: val('adRound'),
           playedOn: val('adPlayedOn'),
           tags: val('adTags').split(/[,，\s]+/).map((t) => t.trim()).filter(Boolean),
+          opening: val('adOpening'),
           description: val('adDesc'),
           nameOverrides: { b: val('adNameB'), w: val('adNameW') },
           resultNote: val('adResultNote'),
@@ -527,6 +710,7 @@
         renderMoveList();
         renderAnnotations();
         renderVariations();
+        if (analysisData) drawAnalysisChart();
       }
 
       function renderMoveList() {
@@ -544,9 +728,16 @@
           const spent = Number(times[no - 1]) || 0;
           cum += spent;
           const timeTxt = spent ? ` <span style="color:var(--text-dim);font-size:11px;">(${Math.floor(spent / 60)}:${String(spent % 60).padStart(2, '0')}/${Math.floor(cum / 3600)}:${String(Math.floor((cum % 3600) / 60)).padStart(2, '0')}:${String(cum % 60).padStart(2, '0')})</span>` : '';
+          const ana = analysisData && analysisData.summary && analysisData.summary.moves
+            ? analysisData.summary.moves[no - 1] : null;
+          const anaTxt = ana && Number.isFinite(ana.cp)
+            ? `<span class="rv-eval-num">${(ana.cp / 100).toFixed(1)}</span>` + (ana.tag
+              ? `<span class="rv-eval-tag ${ana.tag}" title="${ana.tag === 'blunder' ? '恶手' : ana.tag === 'mistake' ? '失误' : '不精确'}">${ana.tag === 'blunder' ? '???' : ana.tag === 'mistake' ? '??' : '?'}</span>`
+              : '')
+            : '';
           html.push(`<div class="rv-move-row${cursor === no ? ' current' : ''}">
         <span class="rv-no">${no}</span>
-        <span class="rv-mv${cursor === no ? ' cursor' : ''}${isBookmarked(no) ? ' bookmark' : ''}${hasComment(no) ? ' has-comment' : ''}${hasVariation(no) ? ' has-var' : ''}" data-no="${no}">${mark} ${text}${timeTxt}</span>
+        <span class="rv-mv${cursor === no ? ' cursor' : ''}${isBookmarked(no) ? ' bookmark' : ''}${hasComment(no) ? ' has-comment' : ''}${hasVariation(no) ? ' has-var' : ''}" data-no="${no}">${mark} ${text}${timeTxt}${anaTxt}</span>
       </div>`);
           // §L：评论直接展示在手数下方（旧格式位置），管理员可就地编辑/删除
           const cs = (review.comments && review.comments[no]) || [];
@@ -1218,6 +1409,54 @@
           if (alive) toast('网络错误，导出失败');
         }
       }
+      // ---- 收藏到研究（1.9）：复盘页直接选研究，不再要求手输棋谱 ID ----
+      const accountToken = typeof guest.id === 'string' && guest.id.includes('.') ? guest.id : '';
+      const saveStudyBtn = $('btnSaveStudy');
+      if (saveStudyBtn && accountToken) {
+        saveStudyBtn.style.display = '';
+        if (global.FEATURES && global.FEATURES.ready) {
+          global.FEATURES.ready.then(() => {
+            if (saveStudyBtn && !global.FEATURES.isOn('studies')) saveStudyBtn.style.display = 'none';
+          });
+        }
+      }
+      async function openStudySave() {
+        try {
+          const r = await fetch('/api/studies', { headers: { 'X-Account-Token': accountToken } });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || d.ok === false) throw new Error(d.error || '加载研究失败');
+          const mine = (d.studies || []).filter((s) => s.mine);
+          if (!mine.length) return toast('请先在研究页创建研究');
+          $('studySaveSelect').innerHTML = mine
+            .map((s) => `<option value="${UI.esc(s.id)}">${UI.esc(s.title)}（${s.itemCount || 0} 条）</option>`)
+            .join('');
+          $('studySavePly').textContent = String(cursor);
+          $('studySaveNote').value = '';
+          $('studySaveModal').style.display = 'flex';
+        } catch (e) { toast(e.message); }
+      }
+      async function confirmStudySave() {
+        const studyId = $('studySaveSelect') && $('studySaveSelect').value;
+        if (!studyId) return;
+        try {
+          const r = await fetch(`/api/studies/${encodeURIComponent(studyId)}/items`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Account-Token': accountToken },
+            body: JSON.stringify({ recordId, ply: cursor, note: $('studySaveNote').value || '' }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || d.ok === false) throw new Error(d.error || '收藏失败');
+          $('studySaveModal').style.display = 'none';
+          toast('已收藏到研究');
+        } catch (e) { toast(e.message); }
+      }
+      on($('btnSaveStudy'), 'click', openStudySave);
+      on($('studySaveConfirm'), 'click', confirmStudySave);
+      on($('studySaveClose'), 'click', () => { $('studySaveModal').style.display = 'none'; });
+      on($('studySaveModal'), 'click', (e) => {
+        if (e.target === $('studySaveModal')) $('studySaveModal').style.display = 'none';
+      });
+
       on($('btnExportKif'), 'click', () => doExport('kif'));
       on($('btnExportCsa'), 'click', () => doExport('csa'));
 

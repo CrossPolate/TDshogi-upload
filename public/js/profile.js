@@ -81,6 +81,24 @@
             </div>
             <button class="btn btn-ghost btn-sm" id="btnLogout">退出登录</button>
           </div>
+          <div id="accountEmailRow" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">邮箱找回 <span id="emailStatus" style="color:var(--gold-light);"></span></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <input class="input" id="emailInput" type="email" placeholder="name@example.com" style="max-width:240px;">
+              <button class="btn btn-ghost btn-sm" id="btnEmailSave" type="button">绑定并发送验证</button>
+              <a href="reset.html" style="font-size:12px;color:var(--gold-light);">忘记密码？</a>
+            </div>
+          </div>
+          <div id="accountSecurityRow" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">修改密码</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <input class="input" id="pwCurrent" type="password" placeholder="当前密码" style="max-width:160px;">
+              <input class="input" id="pwNew" type="password" placeholder="新密码（至少 8 位）" style="max-width:190px;">
+              <input class="input" id="pwConfirm" type="password" placeholder="确认新密码" style="max-width:160px;">
+              <button class="btn btn-ghost btn-sm" id="btnChangePassword" type="button">更新密码</button>
+              <button class="btn btn-ghost btn-sm" id="btnLogoutAll" type="button" style="color:var(--red-light);">退出所有设备</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -113,6 +131,7 @@
           <div style="color:var(--text-dim);font-size:13px;">ELO 积分</div>
           <div style="margin-top:6px;font-size:14px;font-weight:700;color:var(--gold-light);" id="pLevel">Lv.0</div>
           <div style="color:var(--text-dim);font-size:12px;" id="pExp">经验 0</div>
+          <div id="pCategoryRatings" style="margin-top:8px;font-size:11px;color:var(--text-dim);line-height:1.7;"></div>
         </div>
       </div>
 
@@ -159,6 +178,12 @@
         <div class="section-title">🏆 赛事荣誉</div>
         <div id="honorsStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:10px;"></div>
         <div id="honorsList" style="margin-top:6px;"></div>
+      </div>
+
+      <!-- 赛季快照（1.8）：关闭后展示总榜前 3；进行中展示时间窗口 -->
+      <div class="card" id="seasonsCard" style="display:none;padding:22px;margin-bottom:28px;">
+        <div class="section-title">🏁 赛季</div>
+        <div id="seasonsList"></div>
       </div>
 
       <!-- ELO 走势 -->
@@ -376,6 +401,10 @@
           if (!$('editPhone')) return; // SPA：已切页，回调回来时 DOM 已销毁 → 放弃写入
           $('editPhone').value = a.profile.phone || '';
           $('editStyle').value = a.profile.style || '不设定';
+          const emailRow = $('accountEmailRow');
+          if (emailRow) emailRow.style.display = (global.FEATURES && global.FEATURES.isOn('mail')) ? '' : 'none';
+          if ($('emailInput')) $('emailInput').value = a.email || '';
+          if ($('emailStatus')) $('emailStatus').textContent = a.email ? (a.emailVerified ? '已验证' : '未验证') : '未绑定';
           $('createdAtLabel').textContent = I18N.fmtDate(a.createdAt);
           // 身份卡补充棋风与注册日期
           const role = $('pRoleLabel');
@@ -391,6 +420,32 @@
               ` · 📅 注册于 ${I18N.fmtDate(a.createdAt)}`;
           }
         } catch (_) { /* 令牌失效等情况静默 */ }
+      }
+
+      const emailSaveBtn = $('btnEmailSave');
+      if (emailSaveBtn) on(emailSaveBtn, 'click', async () => {
+        const email = ($('emailInput') && $('emailInput').value || '').trim();
+        if (!email) return UI.alert('绑定邮箱', '请输入邮箱');
+        try {
+          const res = await global.ApiUtils.post('/api/account/email', { token: sessionToken(), email });
+          toast('验证邮件已发送，请查收');
+          if (res && res.email && $('emailInput')) $('emailInput').value = res.email;
+          if ($('emailStatus')) $('emailStatus').textContent = '未验证';
+        } catch (e) {
+          UI.alert('发送失败', (e && e.message) || '邮件服务不可用，请联系管理员');
+        }
+      });
+
+      // 邮箱验证链接：/profile?emailToken=...
+      const verifyToken = new URLSearchParams(location.search).get('emailToken');
+      if (verifyToken) {
+        fetch('/api/account/email/verify', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: verifyToken }),
+        }).then((r) => r.json()).then((d) => {
+          if (d && d.ok) { toast('邮箱已验证'); loadMyProfile(); }
+          else UI.alert('邮箱验证失败', (d && d.error) || '链接无效或已过期');
+        }).catch(() => {});
       }
 
       on($('btnSaveProfile'), 'click', async () => {
@@ -503,6 +558,38 @@
         global.Router.reload();
       });
 
+      // ---- 修改密码 / 退出所有设备 ----
+      on($('btnChangePassword'), 'click', async () => {
+        const currentPassword = $('pwCurrent').value;
+        const newPassword = $('pwNew').value;
+        if (!currentPassword || !newPassword) return UI.alert('修改密码', '请填写当前密码和新密码');
+        if (newPassword !== $('pwConfirm').value) return UI.alert('修改密码', '两次输入的新密码不一致');
+        try {
+          const res = await global.ApiUtils.post('/api/account/password/change', {
+            token: sessionToken(), currentPassword, newPassword,
+          });
+          if (!res.ok) return UI.alert('修改密码失败', res.error || '未知原因');
+          applySession(res.token, guest.name, '密码已更新，其他设备已下线');
+        } catch (e) { UI.alert('修改密码失败', (e && e.message) || '请稍后再试'); }
+      });
+
+      on($('btnLogoutAll'), 'click', async () => {
+        if (!global.confirm('确定退出所有设备？当前设备也会退出。')) return;
+        try {
+          await global.ApiUtils.post('/api/account/logout-all', { token: sessionToken() });
+        } catch (e) {
+          return UI.alert('退出失败', (e && e.message) || '请稍后再试');
+        }
+        localStorage.removeItem(SESSION_KEY);
+        const fresh = { id: global.NAV.genId(), name: global.NAV.randomName() };
+        global.NAV.saveGuest(fresh);
+        window.sessionStorage.setItem('tdshogi_flash', '已退出所有设备');
+        guest = fresh;
+        if (api.reconnectAs) api.reconnectAs(fresh.id);
+        if (global.NAV.refreshBadge) global.NAV.refreshBadge();
+        global.Router.reload();
+      });
+
       $('pName').textContent = guest.name;
       $('pId').textContent = isLoggedIn(guest.id) ? guest.id.split('.')[0] : guest.id;
 
@@ -564,6 +651,34 @@
 
       // 放在头像块之后：`renderAccountUI()` 会经 `renderAvatars()` 读 `myAvatar`
       renderAccountUI();
+
+      // 赛季快照（1.8）：只在开关开启时展示，失败静默
+      (async function loadSeasons() {
+        if (!global.FEATURES) return;
+        try { await global.FEATURES.ready; } catch (_) {}
+        if (!global.FEATURES.isOn('seasons')) return;
+        try {
+          const d = await global.ApiUtils.get('/api/seasons');
+          const list = (d.seasons || []).slice(0, 3);
+          if (!list.length) return;
+          const card = $('seasonsCard');
+          const box = $('seasonsList');
+          if (!card || !box) return;
+          card.style.display = '';
+          box.innerHTML = list.map((s) => {
+            const top = s.data && s.data.categories && s.data.categories.overall
+              ? s.data.categories.overall.slice(0, 3) : [];
+            return `<div style="padding:7px 0;border-bottom:1px dashed var(--border);">
+              <div style="font-size:13px;font-weight:700;">${UI.esc(s.name)}
+                <span style="font-size:11px;color:var(--text-dim);">${s.status === 'closed' ? '已结算' : '进行中'}</span>
+              </div>
+              <div style="font-size:12px;color:var(--text-dim);">${top.length
+                ? top.map((x, i) => `${i + 1}. ${UI.esc(x.name)}（${x.rating}）`).join(' · ')
+                : '结算后展示总榜前 3'}</div>
+            </div>`;
+          }).join('');
+        } catch (_) { /* 赛季未开放 / 网络失败不影响个人页 */ }
+      })();
 
       // 游客改名（免费，WS rename）
       on($('btnRename'), 'click', () => {
@@ -641,6 +756,12 @@
           if (expEl) {
             const need = Math.pow(2, Math.min((p.level || 0) + 1, 64) + 1) - 2;
             expEl.textContent = p.level >= 64 ? `满级 · 经验 ${p.exp}` : `经验 ${p.exp} / ${need}`;
+          }
+          const catBox = $('pCategoryRatings');
+          if (catBox) {
+            catBox.innerHTML = Object.entries(p.categories || {}).map(([, c]) =>
+              `<span style="display:inline-block;margin-right:8px;">${esc(c.label || '')} <b style="color:var(--gold-light);">${c.unrated ? '未定级' : c.rating}</b>${c.games ? ` <span>(${c.games}局)</span>` : ''}</span>`
+            ).join('');
           }
           $('sGames').textContent = p.games;
           $('sWins').textContent = p.wins;
@@ -943,7 +1064,7 @@
           const unlocked = unlockHint(it);
           const audioSrc = it.asset && it.asset.kind === 'audio' && it.asset.value ? it.asset.value : null;
           const previewBtn = audioSrc
-            ? `<button class="btn btn-ghost btn-sm shop-preview" data-preview="${esc(audioSrc)}" type="button" title="试听">▶ 试听</button>`
+            ? `<button class="btn btn-ghost btn-sm shop-preview" data-preview="${esc(audioSrc)}" type="button" title="试听" aria-label="试听">▶</button>`
             : '';
           let action;
           if (equippedSlot) {
@@ -1058,7 +1179,9 @@
           if (previewEl) { try { previewEl.pause(); } catch (_) {} previewEl = null; }
           container.querySelectorAll('.shop-preview.playing').forEach((b) => {
             b.classList.remove('playing');
-            b.textContent = '▶ 试听';
+            b.textContent = '▶';
+            b.title = '试听';
+            b.setAttribute('aria-label', '试听');
           });
           // 试听结束 → 恢复 BGM（2026-10-08：试听时停 BGM）
           if (window.Sound && window.Sound.bgmResumeFromPreview) window.Sound.bgmResumeFromPreview();
@@ -1080,7 +1203,9 @@
             if (p && p.catch) p.catch(() => { stopPreview(); note('试听被浏览器拦截，请再点一次', true); });
             previewEl = a;
             btn.classList.add('playing');
-            btn.textContent = '■ 停止';
+            btn.textContent = '■';
+            btn.title = '停止试听';
+            btn.setAttribute('aria-label', '停止试听');
           } catch (_) { note('试听失败', true); stopPreview(); }
         }
         // SPA：切页时停掉试听、恢复 BGM（否则音频会跟到别的页面继续响）

@@ -7,6 +7,7 @@
 'use strict';
 
 const records = require('../../records');
+const ratings = require('../../ratings');
 const { protocol, VERSION, resolvePlayer, resolveAccount } = require('../context');
 
 module.exports = function registerPublic(app) {
@@ -21,6 +22,14 @@ module.exports = function registerPublic(app) {
     // ⚠️ 解析身份只走 context 的唯一点：`resolveAccount`（令牌）优先，回退 `resolvePlayer`（游客 id）。
     const who = resolveAccount(req) || resolvePlayer(req.query.player);
     res.json(protocol.lobbyData(who));
+  });
+
+  // 分时制排行榜（公开只读；category=overall|standard|ultra）
+  app.get('/api/leaderboard', (req, res) => {
+    const raw = String(req.query.category || 'overall');
+    const category = ['overall', 'standard', 'ultra'].includes(raw) ? raw : 'overall';
+    const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 10));
+    res.json({ ok: true, category, ...ratings.leaderboard(null, limit, category) });
   });
 
   // 个人数据
@@ -48,6 +57,7 @@ module.exports = function registerPublic(app) {
   app.get('/api/gallery', (req, res) => {
     res.json(records.listPublic({
       tag: req.query.tag || '',
+      opening: req.query.opening || '',
       query: req.query.q || req.query.query || '',
       page: req.query.page || 1,
       limit: req.query.limit || 20,

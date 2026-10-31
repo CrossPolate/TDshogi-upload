@@ -180,7 +180,7 @@ module.exports = function applyGameplay(X) {
       };
       // ELO 结算（仅 rated 房间）
       if (room.rated && b && w && game.result) {
-        safe(() => ratings.applyGameResult(b.playerId, w.playerId, game.result), 'ELO 结算');
+        safe(() => ratings.applyGameResult(b.playerId, w.playerId, game.result, { timeControl: room.timeControl }), 'ELO 结算');
       }
       // 对局经验（PLAN §K7）：完成一局双方 +1（含赛事对局；离开/断线判负同样算完成）
       try {
@@ -198,6 +198,7 @@ module.exports = function applyGameplay(X) {
       // 只要这局属于某个赛事，就必须能被所有人查看（赛事详情页要展示全部对局）。
       // 写在落盘路径上，将来新增的建房入口也不会漏掉这条规则。
       const tournamentId = room.tournamentId || null;
+      const arenaId = room.arenaId || null;
       const record = safe(() => saveRecord({
         // 让子局：初始局面已包含"上手少掉的棋子"，棋谱据此才能正确重放与导出
         startSfen: game.startSfen,
@@ -218,7 +219,7 @@ module.exports = function applyGameplay(X) {
         // 棋谱列表会把这些对局标成"计入评分"，与事实不符。
         rated: room.rated !== false,
         tournamentId,
-        visibility: tournamentId ? 'public' : undefined,
+        visibility: (tournamentId || arenaId) ? 'public' : undefined,
       }), '棋谱保存');
       room.recordId = record ? record.id : null;
       // 赛事回调。⚠️ 2026-10-02 审查 P1-5：**和棋（'-'）也要通知赛事**，
@@ -229,6 +230,13 @@ module.exports = function applyGameplay(X) {
           onMatchFinished(room.tournamentId, room.id, winnerId || '-');
         } catch (err) {
           log.error('rooms', '赛事回调失败', { roomId: room.id, err });
+        }
+      }
+      if (room.arenaId && (winnerId || game.result === '-')) {
+        try {
+          require('../arenas').onMatchFinished(room.arenaId, room.id, winnerId || '-');
+        } catch (err) {
+          log.error('rooms', 'Arena 回调失败', { roomId: room.id, err });
         }
       }
       // 广播对局结束（record 可能为 null：棋谱保存失败时仍必须广播终局）
@@ -253,8 +261,8 @@ module.exports = function applyGameplay(X) {
       if (!room || room.status !== 'FINISHED') return { ok: false, error: '对局尚未结束' };
       // ⚠️ 2026-10-02 体验修复：赛事对局不能"再来一局"——重开会污染赛事对阵/finished 结果。
       // 此前只靠前端隐藏按钮，而感想战工具条的按钮按「是不是选手」显示 → 赛事终局仍可点到。
-      if (room.tournamentId || room.type === 'tournament') {
-        return { ok: false, error: '赛事对局不能再来一局' };
+      if (room.tournamentId || room.arenaId || room.type === 'tournament' || room.type === 'arena') {
+        return { ok: false, error: '赛事 / 竞技场对局不能再来一局' };
       }
       room.rematchVotes = room.rematchVotes || {};
       const already = !!room.rematchVotes[seat.seat];

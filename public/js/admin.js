@@ -98,6 +98,7 @@
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="records">全部棋谱</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="users">全部用户</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="tournaments">赛事管理</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="seasons">🏁 赛季 / 竞技场</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="announcements">📢 公告</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="rooms">🕹 对局干预</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="audit">操作审计</button>
@@ -105,6 +106,7 @@
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="reports">🚩 举报</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="shop">🛒 商城</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="items">🎒 发放</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="puzzles">📚 题库</button>
       </div>
 
       <!-- 总览仪表盘（§C1）：进后台第一眼看到全局 -->
@@ -182,6 +184,25 @@
         </div>
       </div>
 
+      <!-- 赛季快照与竞技场管理（1.8） -->
+      <div class="card" id="tab-seasons" style="padding:20px;display:none;">
+        <div class="section-title">🏁 赛季快照</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin:10px 0 14px;">
+          <div><div style="font-size:11px;color:var(--text-dim);">赛季名称</div>
+            <input class="input" id="seasonName" maxlength="20" placeholder="如：2026 秋季赛" style="width:180px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">开始（可选）</div>
+            <input class="input" id="seasonStart" type="datetime-local" style="width:190px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">结束（可选）</div>
+            <input class="input" id="seasonEnd" type="datetime-local" style="width:190px;"></div>
+          <button class="btn btn-primary btn-sm" id="btnSeasonCreate" type="button">创建赛季</button>
+        </div>
+        <div id="seasonAdminList"><div style="color:var(--text-dim);font-size:13px;">加载中…</div></div>
+
+        <div class="section-title" style="margin-top:24px;">⚔️ 竞技场管理</div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">主办人失联或违规时，管理员可在这里直接取消。</div>
+        <div id="arenaAdminList"><div style="color:var(--text-dim);font-size:13px;">加载中…</div></div>
+      </div>
+
       <!-- 商城管理（2026-10-21 商城化）：素材上传 / 商品目录 / BGM 三轨 -->
       <div class="card" id="tab-shop" style="padding:20px;display:none;">
         <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
@@ -190,7 +211,7 @@
         </div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.7;">
           先上传素材，再新建商品。BGM / 头像 / 立绘 / 棋子 / 棋盘 / 读秒音**默认全部为空**：
-          玩家装备后才生效，代码仓库不再自带音乐或头像素材。<br>
+          玩家装备后才生效，代码仓库不再自带 BGM 或头像素材。<br>
           推荐把整套装扮打成 <b>.tdpack</b> 扩展包上传：先校验 → 安装为草稿 → 在下方预览 → 确认后发布。
         </div>
 
@@ -204,7 +225,6 @@
             <input type="file" id="packFile" accept=".tdpack,.zip,application/zip" style="font-size:12px;" aria-label="选择 .tdpack 扩展包文件">
             <button class="btn btn-primary btn-sm" id="btnPackUpload">上传并校验</button>
             <button class="btn btn-ghost btn-sm" id="btnPackTemplate" type="button" title="下载可直接上传测试的 .tdpack 示例包">⬇ 下载模板</button>
-            <button class="btn btn-ghost btn-sm" id="btnPackRefresh">刷新扩展包</button>
           </div>
           <div style="font-size:11px;color:var(--text-dim);margin-top:5px;">
             模板是<b>完整可上传</b>的示例包（纯色占位图 + 10 秒静音 BGM + 提示音读秒），
@@ -241,7 +261,8 @@
               <button class="btn btn-primary btn-sm" id="btnByoyomiZip">导入为草稿</button>
             </div>
             <div style="font-size:11px;color:var(--text-dim);margin-top:5px;">
-              ZIP 内放 1–10（或 count_01–count_10）即可；缺 60/30/20 节点音时自动用「十」顶替。
+              ZIP 内放 1–10（或 count_01–count_10）即可；缺 60/30/20 节点音时自动用「十」顶替。<br>
+              导入前需勾选上方「拥有版权/合法授权」确认。
             </div>
             <div id="byoyomiZipResult" role="status" aria-live="polite" style="margin-top:6px;font-size:12px;"></div>
           </div>
@@ -251,7 +272,10 @@
         <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
             <div style="font-size:12px;font-weight:700;">📚 已安装扩展包（<span id="packCount">0</span>）</div>
-            <span style="font-size:11px;color:var(--text-dim);">草稿仅管理端可见；发布后玩家才能购买/装备</span>
+            <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span style="font-size:11px;color:var(--text-dim);">草稿仅管理端可见；发布后玩家才能购买/装备</span>
+              <button class="btn btn-ghost btn-sm" id="btnPackRefresh" type="button">刷新列表</button>
+            </span>
           </div>
           <div id="packList"></div>
         </div>
@@ -363,6 +387,27 @@
         <!-- E. 商品目录 -->
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">商品目录（点「编辑」回填上方表单；可删除任意商品）</div>
         <div id="itemsCatalogList" style="max-height:42vh;overflow-y:auto;"></div>
+      </div>
+
+      <!-- 题库（1.6 每日诘将棋） -->
+      <div class="card" id="tab-puzzles" style="padding:20px;display:none;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>📚 题库（<span id="puzzleCount">0</span>）</span>
+          <button class="btn btn-ghost btn-sm" id="btnPuzzleRefresh">刷新题库</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);line-height:1.7;margin-bottom:10px;">
+          每日诘将棋 / 下一手题库。导入 JSON 数组（全量校验通过才写入）；type 为 tsume 或 next，
+          solution 是 USI 手顺，tsume 最后必须是詰み。不内置版权题目，请只导入自有/授权内容。
+        </div>
+        <textarea class="input" id="puzzleImportText" rows="7" spellcheck="false"
+          style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12px;"
+          placeholder='[{"id":"sample-1","type":"next","sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","solution":["7g7f"],"difficulty":1,"tags":["demo"]}]'></textarea>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;">
+          <button class="btn btn-primary btn-sm" id="btnPuzzleImport">导入 / 覆盖</button>
+          <span id="puzzleImportReport" role="status" aria-live="polite" style="font-size:12px;"></span>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin:10px 0 6px;">题库列表（停用后不会出现在每日题中）</div>
+        <div id="puzzleList" style="max-height:46vh;overflow-y:auto;"></div>
       </div>
 
       <!-- 道具发放（2026-10-03 新功能：道具系统） -->
@@ -691,7 +736,7 @@
         isAlive: () => alive,
         on,
       };
-      const PARTS = ['shell', 'records', 'users', 'audit', 'tournaments', 'moderation', 'console', 'items'];
+      const PARTS = ['shell', 'records', 'users', 'audit', 'tournaments', 'seasons', 'moderation', 'console', 'items', 'puzzles'];
       for (const name of PARTS) {
         const part = global.AdminParts && global.AdminParts[name];
         if (!part || typeof part.mount !== 'function') {

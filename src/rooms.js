@@ -32,6 +32,7 @@
 'use strict';
 
 const tournaments = require('./tournaments'); // 建房工厂注入（见 constructor）
+const arenas = require('./arenas'); // Arena-lite：建房工厂 / 空闲检查注入（见 constructor）
 
 // §M1：时间控制 / 超时常量 / 打子符号表 / `initClockState()` 均在 `rooms/config.js`；
 // 本骨架只用到房间码字母表与快照间隔。
@@ -42,7 +43,7 @@ class RoomManager {
     this.broadcaster = broadcaster; // (clientId, payload) => void
     this.rooms = new Map();         // roomId -> room
     this.byCode = new Map();        // code -> roomId
-    this.matchQueue = [];           // 快速匹配队列（clientId 数组）
+    this.matchQueue = [];           // 快速匹配队列（{clientId, playerId, timeControl, rating, since}）
     this.clientToRoom = new Map();  // clientId -> roomId（含观战）
     this.clientToPlayer = new Map();// clientId -> {roomId, seat}
     this.playerToClient = new Map();// playerId -> clientId（当前活跃连接）
@@ -83,9 +84,29 @@ class RoomManager {
     const _sweepMs = Math.max(1000, Math.min(60 * 1000, NO_MEMBER_CLEANUP_MS, FINISHED_TTL_MS));
     this._finishedCleanupTimer = setInterval(() => this._cleanupFinished(), _sweepMs);
     if (this._finishedCleanupTimer.unref) this._finishedCleanupTimer.unref(); // 同上：后台清扫，不阻止退出
+    // 匹配队列每 2 秒重新评估一次：分差带会随等待时间放宽，不能只在「新人入队」时才配对。
+    this._matchTimer = setInterval(() => {
+      try { this._sweepMatchQueue(); } catch (_) { /* 下一拍重试 */ }
+    }, 2000);
+    if (this._matchTimer.unref) this._matchTimer.unref();
     // 赛事建房工厂：供 tournaments 层推进对阵表时创建对局
     tournaments.setMatchFactory((tournamentId, playerIds) =>
       this.createTournamentMatch(tournamentId, playerIds));
+    arenas.setMatchFactory((arenaId, playerIds, timeControl) => this.createArenaMatch(arenaId, playerIds, timeControl));
+    arenas.setRoomActiveChecker((roomId) => {
+      const room = this._room(roomId);
+      return !!(room && room.status === 'PLAYING');
+    });
+    // Arena 只给「在线且没有坐在等待/进行中房间、也没排队」的选手配对，
+    // 否则会把正在别处下棋的人拉进第二盘（同一身份同时挂两局）。
+    arenas.setAvailabilityChecker((playerId) => {
+      for (const room of this.rooms.values()) {
+        if (room.status !== 'WAITING' && room.status !== 'PLAYING') continue;
+        if ((room.players.b && room.players.b.playerId === playerId)
+          || (room.players.w && room.players.w.playerId === playerId)) return false;
+      }
+      return !this.matchQueue.some((e) => e.playerId === playerId);
+    });
   }
 
   // ==================================================================

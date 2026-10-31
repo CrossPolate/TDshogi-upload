@@ -68,6 +68,7 @@ module.exports = function applySnapshot(X) {
         isPrivate: !!room.isPrivate,
         passwordHash: room.passwordHash || null,
         tournamentId: room.tournamentId,
+        arenaId: room.arenaId || null,
         // 駒落ち（让子）：虽然 `startSfen` 已能还原盘面，但**展示用的标签也得存** ——
         // 否则重启后房间会对局页显示成平手局，而盘上确实少着棋子，看着像数据坏了
         handicap: room.handicap || null,
@@ -226,6 +227,7 @@ module.exports = function applySnapshot(X) {
         isPrivate: !!snap.isPrivate, // §T2：恢复私人房属性（否则重启后私人房会变成公开）
         passwordHash: snap.passwordHash || null,
         tournamentId: snap.tournamentId || null,
+        arenaId: snap.arenaId || null,
       };
       return room;
     },

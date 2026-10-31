@@ -221,7 +221,10 @@ function login(username, password) {
  * 签发会话令牌：payload=账号 id，HMAC-SHA256 签名，带过期时间。
  */
 function issueToken(accountId) {
-  const payload = `${accountId}.${Date.now()}`;
+  // 同一毫秒内改密/重置密码时，新令牌必须严格晚于 tokenInvalidBefore，否则会被当成旧令牌。
+  const acct = getCache()[accountId];
+  const ts = Math.max(Date.now(), ((acct && acct.tokenInvalidBefore) || 0) + 1);
+  const payload = `${accountId}.${ts}`;
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
   return `${payload}.${sig}`;
 }
@@ -256,7 +259,7 @@ function verifyToken(token) {
   const acct = getCache()[accountId];
   if (!acct) return null;
   // §K3：管理员重置密码后使旧令牌全部失效（签发时间早于重置时刻的令牌不再有效）
-  if (acct.tokenInvalidBefore && Number(ts) < acct.tokenInvalidBefore) return null;
+  if (acct.tokenInvalidBefore && Number(ts) <= acct.tokenInvalidBefore) return null;
   return accountId;
 }
 
@@ -306,6 +309,94 @@ function listAccountsRaw() {
   return Object.values(getCache());
 }
 
+// ---------------- 邮箱（1.7：验证 / 找回）----------------
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+function setEmail(accountId, email) {
+  const a = getCache()[accountId];
+  if (!a) return { ok: false, error: '账号不存在' };
+  const e = normalizeEmail(email);
+  if (!e || e.length > 200 || !EMAIL_RE.test(e)) return { ok: false, error: '邮箱格式不正确' };
+  const dup = Object.values(getCache()).find((x) => x.id !== accountId && x.email === e);
+  if (dup) return { ok: false, error: '该邮箱已被其他账号使用' };
+  if (a.email !== e) {
+    a.email = e;
+    a.emailVerifiedAt = null;
+    a.updatedAt = Date.now();
+    persist();
+  }
+  return { ok: true, email: e, verified: !!a.emailVerifiedAt };
+}
+function getEmailInfo(accountId) {
+  const a = getCache()[accountId];
+  if (!a) return null;
+  return { email: a.email || '', verified: !!a.emailVerifiedAt, verifiedAt: a.emailVerifiedAt || null };
+}
+function findAccountByEmail(email) {
+  const e = normalizeEmail(email);
+  if (!e) return null;
+  const a = Object.values(getCache()).find((x) => x.email === e);
+  return a ? publicInfo(a) : null;
+}
+function markEmailVerified(accountId, email) {
+  const a = getCache()[accountId];
+  if (!a || !a.email || normalizeEmail(email) !== a.email) return { ok: false, error: '邮箱已变更' };
+  a.emailVerifiedAt = Date.now();
+  a.updatedAt = Date.now();
+  persist();
+  return { ok: true };
+}
+/** 当前密码校验通过的自主改密；成功后旧令牌全部失效，签发一枚新令牌。 */
+function changePassword(accountId, currentPassword, newPassword) {
+  const a = getCache()[accountId];
+  if (!a) return { ok: false, error: '账号不存在' };
+  if (!verifyPassword(String(currentPassword || ''), a.salt, a.passHash, a.hashAlg)) {
+    return { ok: false, code: 'BAD_CURRENT', error: '当前密码不正确' };
+  }
+  const pass = String(newPassword || '');
+  if (pass.length < MIN_PASSWORD) return { ok: false, error: `密码至少 ${MIN_PASSWORD} 位` };
+  if (WEAK_PASSWORDS.has(pass.toLowerCase())) return { ok: false, error: '密码过于常见，请更换更复杂的密码' };
+  if (pass.toLowerCase() === String(a.username).toLowerCase()) return { ok: false, error: '密码不能与用户名相同' };
+  if (verifyPassword(pass, a.salt, a.passHash, a.hashAlg)) return { ok: false, error: '新密码不能与当前密码相同' };
+  const { salt, hash, alg } = hashPassword(pass);
+  a.salt = salt;
+  a.passHash = hash;
+  a.hashAlg = alg;
+  a.tokenInvalidBefore = Date.now();
+  a.updatedAt = Date.now();
+  persist();
+  return { ok: true, token: issueToken(accountId) };
+}
+
+/** 退出所有设备：撤销该账号已签发的全部令牌。 */
+function invalidateAllTokens(accountId) {
+  const a = getCache()[accountId];
+  if (!a) return { ok: false, error: '账号不存在' };
+  a.tokenInvalidBefore = Date.now();
+  a.updatedAt = Date.now();
+  persist();
+  return { ok: true };
+}
+
+function resetPassword(accountId, newPassword) {
+  const a = getCache()[accountId];
+  if (!a) return { ok: false, error: '账号不存在' };
+  const pass = String(newPassword || '');
+  if (pass.length < MIN_PASSWORD) return { ok: false, error: `密码至少 ${MIN_PASSWORD} 位` };
+  if (WEAK_PASSWORDS.has(pass.toLowerCase())) return { ok: false, error: '密码过于常见，请更换更复杂的密码' };
+  if (pass.toLowerCase() === String(a.username).toLowerCase()) return { ok: false, error: '密码不能与用户名相同' };
+  const { salt, hash, alg } = hashPassword(pass);
+  a.salt = salt;
+  a.passHash = hash;
+  a.hashAlg = alg;
+  a.tokenInvalidBefore = Date.now();
+  a.updatedAt = Date.now();
+  persist();
+  return { ok: true };
+}
+
 // ---------------- 个人资料（PLAN §F）----------------
 
 // 棋风预设（公开字段）
@@ -324,6 +415,8 @@ function getOwnProfile(accountId) {
     username: a.username,
     nickname: a.nickname || a.username, // 昵称（显示名）；老账号回落用户名
     createdAt: a.createdAt,
+    email: a.email || '',
+    emailVerified: !!a.emailVerifiedAt,
     profile: {
       phone: (a.profile && a.profile.phone) || '',
       style: (a.profile && a.profile.style) || '不设定',
@@ -608,6 +701,13 @@ module.exports = {
   getOwnProfile,
   updateProfile,
   getPublicCard,
+  setEmail,
+  getEmailInfo,
+  findAccountByEmail,
+  markEmailVerified,
+  changePassword,
+  invalidateAllTokens,
+  resetPassword,
   setNickname, // 改昵称（花积分，见上）
   setNicknameAdmin, // 管理员改昵称（不扣积分；adminRename 同步账号侧真相源用）
   adminUpdateProfile,

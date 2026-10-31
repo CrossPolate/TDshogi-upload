@@ -18,6 +18,22 @@ const log = require('./logger');
 const START_RATING = 1500;
 const K = 32;
 
+/** 分时制评级：先分两档，避免人口不够时出现大量空榜。 */
+const CATEGORIES = {
+  standard: { label: '标准', timeControls: ['10:00', '10+30', '15+60'] },
+  ultra: { label: '极速', timeControls: ['10sec'] },
+};
+function categoryForTimeControl(timeControl) {
+  const tc = String(timeControl || '');
+  for (const [cat, def] of Object.entries(CATEGORIES)) {
+    if (def.timeControls.includes(tc)) return cat;
+  }
+  return 'standard';
+}
+function defaultCategory() {
+  return { rating: START_RATING, games: 0, wins: 0, losses: 0, draws: 0, history: [] };
+}
+
 function defaultRating() {
   return {
     rating: START_RATING,
@@ -28,6 +44,8 @@ function defaultRating() {
     points: 0,    // 积分（F1）：与 ELO 独立，每完成一局 +1
     exp: 0,       // 等级经验（PLAN §K7）
     level: 0,     // 等级（由 exp 推导，冗余存储便于查询/编辑）
+    // 分时制评级（惰性创建；老数据没有也不影响总评级）
+    categories: {},
     // 历史采样点（供个人页 ELO 走势图）：[{t, rating}]
     history: [],
   };
@@ -130,6 +148,12 @@ function ensurePlayer(ratings, playerId) {
   return ratings[playerId];
 }
 
+function ensureCategory(playerRating, category) {
+  if (!playerRating.categories || typeof playerRating.categories !== 'object') playerRating.categories = {};
+  if (!playerRating.categories[category]) playerRating.categories[category] = defaultCategory();
+  return playerRating.categories[category];
+}
+
 function expectedScore(rA, rB) {
   return 1 / (1 + Math.pow(10, (rB - rA) / 400));
 }
@@ -140,7 +164,7 @@ function expectedScore(rA, rB) {
  * @param {string} playerB 后手 id
  * @param {'b'|'w'|'-'} winner 胜者；b=先手 w=后手 -=平
  */
-function applyGameResult(playerA, playerB, winner) {
+function applyGameResult(playerA, playerB, winner, opts = {}) {
   const ratings = getCache();
   const a = ensurePlayer(ratings, playerA);
   const b = ensurePlayer(ratings, playerB);
@@ -167,8 +191,30 @@ function applyGameResult(playerA, playerB, winner) {
   b.history.push({ t: now, rating: b.rating });
   trimHistory(a); trimHistory(b); // §5.1：history 有上界
 
+  // 分时制评级：与总评级并行结算，独立历史；让 10 秒将棋和 10 分钟将棋各自有意义。
+  const category = opts.category || categoryForTimeControl(opts.timeControl);
+  const ca = ensureCategory(a, category);
+  const cb = ensureCategory(b, category);
+  const crA = ca.rating;
+  const crB = cb.rating;
+  ca.rating = Math.round(crA + K * (scoreA - expectedScore(crA, crB)));
+  cb.rating = crB - (ca.rating - crA);
+  ca.games++; cb.games++;
+  if (winner === 'b') ca.wins++, cb.losses++;
+  else if (winner === 'w') ca.losses++, cb.wins++;
+  else { ca.draws++; cb.draws++; }
+  ca.history.push({ t: now, rating: ca.rating });
+  cb.history.push({ t: now, rating: cb.rating });
+  trimHistory(ca); trimHistory(cb);
+
   persist();
-  return { deltaA: a.rating - rA, deltaB: b.rating - rB };
+  return {
+    deltaA: a.rating - rA,
+    deltaB: b.rating - rB,
+    category,
+    deltaCategoryA: ca.rating - crA,
+    deltaCategoryB: cb.rating - crB,
+  };
 }
 
 /**
@@ -193,22 +239,24 @@ function sessionNameMap() {
 /** 使会话名缓存失效（改名/迁移/封禁等写点调用） */
 function invalidateSessionCache() { _sessionCache = null; }
 
-function leaderboard(playerId, limit = 10) {
+function leaderboard(playerId, limit = 10, category = 'overall') {
   const ratings = getCache();
   const names = sessionNameMap();
   const withName = (e) => {
     e.name = names.has(e.id) ? names.get(e.id) : e.id;
     return e;
   };
+  const pick = (r) => (category === 'overall' ? r : (r.categories && r.categories[category]) || null);
   const entries = Object.entries(ratings)
-    .filter(([, r]) => r.games > 0)
-    .map(([id, r]) => ({
+    .map(([id, r]) => ({ id, r, c: pick(r) }))
+    .filter(({ c }) => c && c.games > 0)
+    .map(({ id, c }) => ({
       id,
-      rating: r.rating,
-      games: r.games,
-      wins: r.wins,
-      losses: r.losses,
-      draws: r.draws,
+      rating: c.rating,
+      games: c.games,
+      wins: c.wins,
+      losses: c.losses,
+      draws: c.draws,
     }))
     // 确定性 tiebreak：rating↓ → games↓ → wins↓ → id↑（否则同分名次随对象键序漂移、不稳定）
     .sort((x, y) => y.rating - x.rating || y.games - x.games || y.wins - x.wins
@@ -380,6 +428,20 @@ function profile(playerId) {
     exp: r.exp || 0,
     level: levelFromExp(r.exp || 0),
     history: r.history.slice(-50),
+    categories: Object.fromEntries(Object.entries(CATEGORIES).map(([key, def]) => {
+      const c = (r.categories && r.categories[key]) || defaultCategory();
+      return [key, {
+        label: def.label,
+        rating: c.rating,
+        games: c.games,
+        wins: c.wins,
+        losses: c.losses,
+        draws: c.draws,
+        winRate: c.games ? Math.round((c.wins / c.games) * 100) : 0,
+        unrated: c.games === 0,
+        history: (c.history || []).slice(-50),
+      }];
+    })),
   };
 }
 
@@ -444,6 +506,8 @@ function removePlayer(playerId) {
 module.exports = {
   START_RATING,
   K,
+  CATEGORIES,
+  categoryForTimeControl,
   MAX_LEVEL,
   levelFromExp,
   nextLevelExp,

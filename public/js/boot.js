@@ -36,6 +36,15 @@
     // 5) 全局开局兜底：用户停在没有 game_start 处理器的页面（首页/个人/棋谱/复盘等）时，
     //    服务端开局仍要把人带回对局，否则对手面对的是一个“在线但看不见棋盘”的玩家。
     //    大厅/赛事/播放页各自有处理器（赛事页还要带 join=1），这里不抢它们的活。
+    // 通知铃铛：连接/身份就绪与相关实时事件到达时刷新未读数。
+    if (api && api.on && nav && nav.refreshNotifications) {
+      ['open', 'hello'].forEach((t) => api.on(t, () => nav.refreshNotifications()));
+      [
+        'friend_request', 'friend_accepted', 'challenge_created', 'challenge_answered',
+        'corr_created', 'corr_move', 'corr_finished', 'tournament_match_started',
+      ].forEach((t) => api.on(t, () => nav.refreshNotifications()));
+    }
+
     const R = global.Router;
     // 只有“页面确实挂载成功”时才算它自己会处理；渲染失败的 View 没有 mount，
     // 不能因为 currentName 是 lobby/tournament 就吞掉全局兜底。
@@ -53,6 +62,12 @@
       api.on('tournament_match_started', (d) => {
         if (!d || !d.roomId || R.current === 'play') return;
         R.navigate(`play.html?room=${encodeURIComponent(d.roomId)}&join=1`);
+      });
+      // 好友约战被接受：发起者（房主）自动进入房间；接受者由好友页直接带 join=1 跳转。
+      api.on('challenge_answered', (d) => {
+        const roomId = d && d.accepted && d.challenge && d.challenge.roomId;
+        if (!roomId || R.current === 'play') return;
+        R.navigate(`play.html?room=${encodeURIComponent(roomId)}`);
       });
     }
 

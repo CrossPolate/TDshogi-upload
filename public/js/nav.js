@@ -99,8 +99,18 @@
     // 2026-10-04：顶部导航「棋谱」项移除 —— 棋谱检索台已并入个人页「棋谱」标签
     // （history.html 改为跳转）。棋谱广场入口仍在 gallery.html 与个人页棋谱标签。
     { id: 'tournaments', label: '赛事', href: 'tournaments.html' },
+    { id: 'arenas', label: '竞技场', href: 'arenas.html', feature: 'arenas' },
+    { id: 'puzzles', label: '题库', href: 'puzzles.html', feature: 'puzzles' },
+    { id: 'friends', label: '好友', href: 'friends.html', feature: 'social' },
+    { id: 'study', label: '研究', href: 'study.html', feature: 'studies' },
+    { id: 'correspondence', label: '长局', href: 'correspondence.html', feature: 'correspondence' },
     { id: 'profile', label: '个人', href: 'profile.html' },
   ];
+
+  /** 只保留当前启用的功能入口；开关未加载/关闭时这些入口不渲染。 */
+  function visibleNav() {
+    return NAV.filter((n) => !n.feature || !!(global.FEATURES && global.FEATURES.isOn(n.feature)));
+  }
 
   /**
    * 本机是否已登录管理员（localStorage 持有 admin token）。
@@ -117,6 +127,38 @@
   function adminEntryHtml() {
     if (!isAdminSession()) return '';
     return `<a class="admin-entry" href="admin.html" title="管理后台">🛡️</a>`;
+  }
+
+  /** 站内通知铃铛；仅在 FEATURE_NOTIFICATIONS 开启时渲染。 */
+  function bellHtml() {
+    if (!(global.FEATURES && global.FEATURES.isOn('notifications'))) return '';
+    const label = tr('通知');
+    return `<a class="nav-bell" id="navBell" href="notifications.html" title="${label}" aria-label="${label}">
+      <span aria-hidden="true">🔔</span><span class="nav-bell-count" id="navBellCount" hidden></span>
+    </a>`;
+  }
+
+  /** 刷新铃铛未读数；游客 / 开关关闭 / 请求失败时安静隐藏。 */
+  function refreshNotifications() {
+    const bell = document.getElementById('navBell');
+    const count = document.getElementById('navBellCount');
+    if (!bell || !count) return;
+    const g = getGuest();
+    const isAccount = typeof g.id === 'string' && g.id.includes('.');
+    if (!isAccount || !(global.FEATURES && global.FEATURES.isOn('notifications'))) {
+      bell.style.display = 'none';
+      return;
+    }
+    bell.style.display = '';
+    fetch('/api/notifications?limit=1', { headers: { 'X-Account-Token': g.id } })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d || d.ok === false) { count.hidden = true; return; }
+        const n = Number(d.unread) || 0;
+        count.textContent = n > 99 ? '99+' : String(n);
+        count.hidden = n <= 0;
+      })
+      .catch(() => { count.hidden = true; });
   }
 
   /**
@@ -227,11 +269,12 @@
   }
   try { global.addEventListener('storage', onStorageSync); } catch (_) { /* 极老浏览器没有 storage 事件：忽略 */ }
 
-  function renderNav(current) {
+  function renderNav(current, force) {
     const guest = getGuest();
     // SPA 幂等：导航已渲染过就绝不整块重建（重建会闪烁、丢监听、换掉正在点的按钮）。
     // 只就地更新 active 态与徽章即可；这也让「迁移期某个还没转 View 的页面误调 renderNav」无害化。
-    if (renderedIdentityId != null && document.querySelector('.nav-links')) {
+    // force=true 仅供功能开关加载完成后补挂新入口（正常切页绝不使用）。
+    if (!force && renderedIdentityId != null && document.querySelector('.nav-links')) {
       if (current != null) setActive(current);
       refreshBadge();
       return guest;
@@ -262,7 +305,7 @@
         </button>
         <div class="nav-menu" id="navMenu">
           <nav class="nav-links">
-            ${NAV.map((n) => `<a href="${n.href}" class="${n.id === current ? 'active' : ''}" data-nav="${n.id}">${tr(n.label)}</a>`).join('')}
+            ${visibleNav().map((n) => `<a href="${n.href}" class="${n.id === current ? 'active' : ''}" data-nav="${n.id}">${tr(n.label)}</a>`).join('')}
           </nav>
           <div class="nav-actions">
             <button class="theme-toggle" id="langToggle" title="${tr('语言')}">${localeShort()}</button>
@@ -273,6 +316,7 @@
           </div>
         </div>
         <!-- 用户徽标留在顶行：手机端不用展开菜单也能看到身份 / 进入个人页 -->
+        ${bellHtml()}
         <a class="nav-user" href="profile.html" title="${isAccount ? tr('个人 · 已登录账号') : tr('个人 · 游客')}">
           <span>${escHtml(displayName)}</span>
           <span class="nav-avatar">${userBadge}</span>
@@ -289,7 +333,7 @@
         </button>
         <div class="nav-menu" id="navMenu">
           <nav class="nav-links">
-            ${NAV.map((x) => `<a href="${x.href}" class="${x.id === current ? 'active' : ''}" data-nav="${x.id}">${tr(x.label)}</a>`).join('')}
+            ${visibleNav().map((x) => `<a href="${x.href}" class="${x.id === current ? 'active' : ''}" data-nav="${x.id}">${tr(x.label)}</a>`).join('')}
           </nav>
           <div class="nav-actions">
             <button class="theme-toggle" id="langToggle" title="${tr('语言')}">${localeShort()}</button>
@@ -299,6 +343,7 @@
             ${adminEntryHtml()}
           </div>
         </div>
+        ${bellHtml()}
       `;
       document.body.insertBefore(n, document.body.firstChild);
     }
@@ -321,6 +366,7 @@
         mb.classList.toggle('music-off', !on);
       }
     }
+    refreshNotifications();
     return guest;
   }
 
@@ -332,7 +378,9 @@
   /** 视图名 → 顶部导航项 id（没有对应项则为 null，表示不高亮任何项） */
   const VIEW_TO_NAV = {
     home: 'home', lobby: 'lobby', gallery: null,
-    tournaments: 'tournaments', tournament: 'tournaments',
+    tournaments: 'tournaments', tournament: 'tournaments', arenas: 'arenas',
+    puzzles: 'puzzles', friends: 'friends', study: 'study', correspondence: 'correspondence',
+    notifications: null,
     profile: 'profile', review: null, play: null, admin: null,
   };
 
@@ -394,9 +442,10 @@
         e.stopPropagation();
         setMenu(!nav.classList.contains('menu-open'));
       });
-      // 点导航链接后自动收起；点外部 / Esc 也收起，避免下拉面板悬在半空
-      nav.querySelectorAll('.nav-menu a').forEach((a) => {
-        a.addEventListener('click', () => setMenu(false));
+      // 点导航链接后自动收起；点外部 / Esc 也收起，避免下拉面板悬在半空。
+      // 用事件委托而不是逐个 link 绑定：功能开关加载后会补挂入口，新链接也必须生效。
+      nav.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.nav-menu a')) setMenu(false);
       });
       document.addEventListener('click', (e) => {
         if (!nav.contains(e.target)) setMenu(false);
@@ -433,5 +482,18 @@
     applyTheme();
   }
 
-  global.NAV = { renderNav, setActive, refreshBadge, applyLocale, toggleLocale, getGuest, saveGuest, updateUserName, updateAvatar, randomName, genId, genKey, GUEST_KEY, THEME_KEY, ADMIN_KEY, isAdminSession, toggleTheme, getTheme, applyTheme };
+  global.NAV = { renderNav, setActive, refreshBadge, refreshNotifications, applyLocale, toggleLocale, getGuest, saveGuest, updateUserName, updateAvatar, randomName, genId, genKey, GUEST_KEY, THEME_KEY, ADMIN_KEY, isAdminSession, toggleTheme, getTheme, applyTheme };
+
+  // 功能开关是异步拉取的：若加载完成后确实有新增入口，补挂一次导航。
+  // 没有启用任何功能时不做任何事，避免无意义的重建。
+  if (global.FEATURES && global.FEATURES.ready) {
+    global.FEATURES.ready.then(() => {
+      try {
+        if (NAV.some((n) => n.feature && global.FEATURES.isOn(n.feature))) {
+          renderNav(global.Router && global.Router.current, true);
+          setActive(global.Router && global.Router.current);
+        }
+      } catch (_) { /* 入口补挂失败不影响主流程 */ }
+    });
+  }
 })(window);

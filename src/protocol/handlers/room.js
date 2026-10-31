@@ -61,8 +61,8 @@ module.exports = {
     }
   },
 
-  _hQuickMatch(clientId, player) {
-    const res = this.rooms.quickMatch(player);
+  _hQuickMatch(clientId, player, data) {
+    const res = this.rooms.quickMatch(player, data || {});
     if (!res.ok) fail(this, clientId, res);
     else this._send(clientId, { type: 'matching', data: { ok: true } });
   },

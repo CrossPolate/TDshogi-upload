@@ -447,6 +447,470 @@
   apply();
 })(window);
 
+/* ==== js/features.js ==== */
+/**
+ * features.js — 1.6–1.9 功能开关的前端缓存。
+ *
+ * 只负责“显示哪些入口”，不是权限：真正的鉴权/开关仍在服务端。
+ * 请求失败时保持全部关闭，旧功能不受影响。
+ */
+(function (global) {
+  'use strict';
+
+  const state = {
+    loaded: false,
+    flags: {},
+    features: [],
+  };
+  let resolveReady;
+  const ready = new Promise((resolve) => { resolveReady = resolve; });
+
+  function isOn(name) {
+    return state.flags[name] === true;
+  }
+
+  function all() {
+    return Object.assign({}, state.flags);
+  }
+
+  function info() {
+    return state.features.slice();
+  }
+
+  function whenReady(fn) {
+    return ready.then(fn);
+  }
+
+  async function load() {
+    try {
+      const res = await fetch('/api/features', { headers: { Accept: 'application/json' } });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data && data.ok) {
+        state.flags = data.flags || {};
+        state.features = Array.isArray(data.features) ? data.features : [];
+      }
+    } catch (_) {
+      // 离线/旧服务端：保持全部关闭
+    } finally {
+      state.loaded = true;
+      resolveReady(state);
+      try {
+        global.dispatchEvent(new global.CustomEvent('tdshogi-features', { detail: all() }));
+      } catch (_) { /* 老浏览器忽略 */ }
+    }
+  }
+
+  global.FEATURES = { isOn, all, info, ready, whenReady, load, get loaded() { return state.loaded; } };
+  load();
+})(window);
+
+/* ==== js/analysis.js ==== */
+/**
+ * analysis.js — 浏览器本地引擎复盘（1.6，零服务端 CPU）。
+ *
+ * 引擎是 Fairy-Stockfish WASM（GPL-3.0），资源由 `npm run sync-engine` 同步到
+ * `public/engine/`；分析在 Web Worker 中完成，结果缓存在本机 localStorage。
+ * 服务端只提供棋谱数据与功能开关，不再启动任何引擎进程。
+ *
+ * UMD：浏览器挂 `window.AnalysisEngine`；Node 测试可直接 require（纯函数可测）。
+ */
+/* global module */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.AnalysisEngine = factory();
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  const MATE_CP = 30000;
+  const DEFAULT_DEPTH = 12;
+  const DEFAULT_MOVETIME = 250;
+  const MAX_PLIES = 300;
+  const CACHE_PREFIX = 'tdshogi_analysis_v1_';
+  const DEFAULT_SFEN = 'lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1';
+
+  function parseInfo(line) {
+    const s = String(line || '').trim();
+    if (!s.startsWith('info ')) return null;
+    const tokens = s.split(/\s+/);
+    const out = {};
+    for (let i = 1; i < tokens.length; i += 1) {
+      const t = tokens[i];
+      if (t === 'depth') out.depth = Number(tokens[++i]);
+      else if (t === 'seldepth') out.seldepth = Number(tokens[++i]);
+      else if (t === 'score') {
+        const kind = tokens[++i];
+        const value = Number(tokens[++i]);
+        if (kind === 'cp' || kind === 'mate') out.score = { type: kind, value };
+      } else if (t === 'pv') {
+        out.pv = tokens.slice(i + 1);
+        break;
+      }
+    }
+    return out.score ? out : null;
+  }
+
+  function toBlackCp(score, sideToMove) {
+    if (!score || !Number.isFinite(Number(score.value))) return null;
+    const sign = sideToMove === 'b' ? 1 : -1;
+    if (score.type === 'mate') {
+      const v = Number(score.value);
+      return (v > 0 ? 1 : -1) * sign * MATE_CP;
+    }
+    return Math.round(Number(score.value) * sign);
+  }
+
+  function winRate(cp) {
+    if (!Number.isFinite(cp)) return null;
+    if (cp >= MATE_CP) return 1;
+    if (cp <= -MATE_CP) return 0;
+    return 1 / (1 + Math.pow(10, -cp / 400));
+  }
+
+  function moverCp(blackCp, ply) {
+    if (!Number.isFinite(blackCp)) return null;
+    return ply % 2 === 1 ? blackCp : -blackCp;
+  }
+
+  function classifyLoss(lossCp) {
+    if (!Number.isFinite(lossCp)) return null;
+    if (lossCp >= 300) return 'blunder';
+    if (lossCp >= 150) return 'mistake';
+    if (lossCp >= 50) return 'inaccuracy';
+    return null;
+  }
+
+  function summarize(positions) {
+    const list = Array.isArray(positions) ? positions : [];
+    const moves = [];
+    let blunders = 0;
+    let mistakes = 0;
+    let inaccuracies = 0;
+    for (let ply = 1; ply < list.length; ply += 1) {
+      const before = list[ply - 1];
+      const after = list[ply];
+      const a = moverCp(before && before.cp, ply);
+      const b = moverCp(after && after.cp, ply);
+      const loss = Number.isFinite(a) && Number.isFinite(b) ? Math.max(0, a - b) : null;
+      const tag = classifyLoss(loss);
+      if (tag === 'blunder') blunders += 1;
+      else if (tag === 'mistake') mistakes += 1;
+      else if (tag === 'inaccuracy') inaccuracies += 1;
+      moves.push({
+        ply,
+        cp: after ? after.cp : null,
+        winRate: after ? winRate(after.cp) : null,
+        loss,
+        tag,
+        bestmove: after ? after.bestmove : null,
+      });
+    }
+    return { blunders, mistakes, inaccuracies, moves };
+  }
+
+  function isSupported() {
+    return typeof Worker !== 'undefined'
+      && typeof SharedArrayBuffer !== 'undefined'
+      && typeof WebAssembly !== 'undefined';
+  }
+
+  function cacheKey(recordId) {
+    return `${CACHE_PREFIX}${recordId}`;
+  }
+
+  function loadCached(recordId) {
+    try {
+      const raw = localStorage.getItem(cacheKey(recordId));
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      return data && Array.isArray(data.positions) ? data : null;
+    } catch (_) { return null; }
+  }
+
+  function saveCached(recordId, data) {
+    try {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(CACHE_PREFIX)) keys.push(k);
+      }
+      // 只保留最近 20 局分析，避免 localStorage 被历史分析撑满
+      while (keys.length >= 20) localStorage.removeItem(keys.shift());
+      localStorage.setItem(cacheKey(recordId), JSON.stringify(data));
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function workerUrl() {
+    const base = (typeof document !== 'undefined' && document.baseURI) || (typeof location !== 'undefined' ? location.href : '');
+    return new URL('analysis-worker.js', base).href;
+  }
+
+  class EngineSession {
+    constructor() {
+      this.worker = null;
+      this.lines = [];
+      this.waiters = [];
+      this.current = null;
+      this.dead = false;
+    }
+
+    start(timeoutMs = 30000) {
+      if (!isSupported()) {
+        return Promise.reject(Object.assign(new Error('当前浏览器不支持本地 WASM 引擎'), { code: 'ENGINE_UNSUPPORTED' }));
+      }
+      try {
+        this.worker = new Worker(workerUrl());
+      } catch (e) {
+        return Promise.reject(Object.assign(new Error('无法启动分析 Worker'), { code: 'ENGINE_UNAVAILABLE' }));
+      }
+      this.worker.onmessage = (e) => this._onMessage(e.data || {});
+      this.worker.onerror = (e) => this._fail(Object.assign(
+        new Error(`本机引擎加载失败${e && e.message ? `：${e.message}` : ''}`),
+        { code: 'ENGINE_UNAVAILABLE' }
+      ));
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(Object.assign(new Error('本机引擎初始化超时'), { code: 'ENGINE_TIMEOUT' })), timeoutMs);
+        this._ready = { resolve, reject, timer };
+      });
+    }
+
+    _onMessage(d) {
+      if (d.t === 'ready') {
+        if (this._ready) {
+          clearTimeout(this._ready.timer);
+          const r = this._ready;
+          this._ready = null;
+          r.resolve(this);
+        }
+        return;
+      }
+      if (d.t === 'error') {
+        this._fail(Object.assign(new Error(d.error || '本机引擎加载失败'), { code: 'ENGINE_UNAVAILABLE' }));
+        return;
+      }
+      if (d.t !== 'line') return;
+      const line = String(d.line || '');
+      if (this.current) {
+        if (line.startsWith('info ')) {
+          const info = parseInfo(line);
+          if (info) this.current.info = info;
+        } else if (line.startsWith('bestmove')) {
+          const cur = this.current;
+          this.current = null;
+          clearTimeout(cur.timer);
+          const bestmove = line.split(/\s+/)[1] || null;
+          cur.resolve({ bestmove, info: cur.info || null });
+          return;
+        }
+      }
+      for (let i = 0; i < this.waiters.length; i += 1) {
+        const w = this.waiters[i];
+        if (w.predicate(line)) {
+          this.waiters.splice(i, 1);
+          clearTimeout(w.timer);
+          w.resolve(line);
+          return;
+        }
+      }
+      // 保留少量未知行，便于调试；不无限增长
+      this.lines.push(line);
+      if (this.lines.length > 200) this.lines.shift();
+    }
+
+    _fail(err) {
+      this.dead = true;
+      if (this._ready) {
+        clearTimeout(this._ready.timer);
+        const r = this._ready;
+        this._ready = null;
+        r.reject(err);
+      }
+      if (this.current) {
+        const c = this.current;
+        this.current = null;
+        clearTimeout(c.timer);
+        c.reject(err);
+      }
+      for (const w of this.waiters) {
+        clearTimeout(w.timer);
+        w.reject(err);
+      }
+      this.waiters = [];
+    }
+
+    send(line) {
+      if (this.worker && !this.dead) this.worker.postMessage({ cmd: 'cmd', line });
+    }
+
+    waitLine(predicate, timeoutMs = 8000) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(Object.assign(new Error('引擎响应超时'), { code: 'ENGINE_TIMEOUT' })), timeoutMs);
+        this.waiters.push({ predicate, resolve, reject, timer });
+      });
+    }
+
+    analyzePosition(startSfen, moves, opts = {}) {
+      const depth = Math.max(1, Math.min(30, Number(opts.depth) || DEFAULT_DEPTH));
+      const movetime = Math.max(50, Math.min(5000, Number(opts.movetime) || DEFAULT_MOVETIME));
+      const position = moves && moves.length
+        ? `position sfen ${startSfen} moves ${moves.join(' ')}`
+        : `position sfen ${startSfen}`;
+      this.send(position);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          if (this.current) this.current = null;
+          this.send('stop');
+          reject(Object.assign(new Error('引擎分析超时'), { code: 'ENGINE_TIMEOUT' }));
+        }, Math.max(2000, movetime * 5 + 2000));
+        this.current = { resolve, reject, timer, info: null };
+        this.send(`go depth ${depth} movetime ${movetime}`);
+      });
+    }
+
+    destroy() {
+      this.dead = true;
+      try { if (this.worker) { this.worker.postMessage({ cmd: 'quit' }); this.worker.terminate(); } } catch (_) {}
+      this.worker = null;
+    }
+  }
+
+  async function analyze(record, opts = {}) {
+    const recordId = record && record.id;
+    const moves = Array.isArray(record && record.moves) ? record.moves : [];
+    if (!recordId) throw Object.assign(new Error('棋谱 id 缺失'), { code: 'BAD_RECORD' });
+    if (moves.length > MAX_PLIES) {
+      throw Object.assign(new Error(`棋谱超过 ${MAX_PLIES} 手，暂不分析`), { code: 'RECORD_TOO_LONG' });
+    }
+    const cached = loadCached(recordId);
+    if (cached && !opts.force) return cached;
+    const session = new EngineSession();
+    try {
+      await session.start();
+      const uciok = session.waitLine((l) => l === 'uciok', 8000);
+      session.send('uci');
+      await uciok;
+      session.send('setoption name UCI_Variant value shogi');
+      const readyok = session.waitLine((l) => l === 'readyok', 8000);
+      session.send('isready');
+      await readyok;
+
+      const startSfen = record.startSfen || DEFAULT_SFEN;
+      const positions = [];
+      for (let ply = 0; ply <= moves.length; ply += 1) {
+        const r = await session.analyzePosition(startSfen, moves.slice(0, ply), {
+          depth: opts.depth || DEFAULT_DEPTH,
+          movetime: opts.movetime || DEFAULT_MOVETIME,
+        });
+        const side = ply % 2 === 0 ? 'b' : 'w';
+        const score = r.info && r.info.score ? r.info.score : null;
+        positions.push({
+          ply,
+          cp: toBlackCp(score, side),
+          score,
+          bestmove: r.bestmove,
+          pv: (r.info && r.info.pv) || [],
+          depth: (r.info && r.info.depth) || null,
+        });
+        if (typeof opts.onProgress === 'function') opts.onProgress(ply + 1, moves.length + 1);
+      }
+      const data = {
+        recordId,
+        engine: 'Fairy-Stockfish WASM',
+        depth: opts.depth || DEFAULT_DEPTH,
+        movetime: opts.movetime || DEFAULT_MOVETIME,
+        positions,
+        summary: summarize(positions),
+        createdAt: Date.now(),
+      };
+      saveCached(recordId, data);
+      return data;
+    } finally {
+      session.destroy();
+    }
+  }
+
+  return {
+    MATE_CP,
+    DEFAULT_DEPTH,
+    DEFAULT_MOVETIME,
+    MAX_PLIES,
+    parseInfo,
+    toBlackCp,
+    winRate,
+    moverCp,
+    classifyLoss,
+    summarize,
+    isSupported,
+    loadCached,
+    saveCached,
+    analyze,
+  };
+});
+
+/* ==== js/pwa.js ==== */
+/**
+ * pwa.js — 1.7 PWA：注册 Service Worker、更新提示、安装入口。
+ * 开关 FEATURE_PWA；不改变普通浏览器行为。
+ */
+(function (global) {
+  'use strict';
+
+  function canInstall() {
+    return typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
+  }
+
+  function addInstallButton(ev) {
+    const actions = document.querySelector('.nav-actions');
+    if (!actions || document.getElementById('pwaInstall')) return;
+    const btn = document.createElement('button');
+    btn.id = 'pwaInstall';
+    btn.className = 'theme-toggle';
+    btn.type = 'button';
+    btn.title = '安装到桌面';
+    btn.textContent = '⬇';
+    btn.addEventListener('click', async () => {
+      try {
+        ev.prompt();
+        await ev.userChoice;
+      } catch (_) {}
+      btn.remove();
+    });
+    actions.appendChild(btn);
+  }
+
+  function init() {
+    if (!global.FEATURES || !global.FEATURES.isOn('pwa') || !canInstall()) return;
+    global.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      addInstallButton(e);
+    });
+    let started = false;
+    async function start() {
+      if (started) return;
+      started = true;
+      try {
+        const reg = await navigator.serviceWorker.register('/sw.js');
+        if (reg.waiting && global.UI && global.UI.toast) global.UI.toast('新版本已就绪，重新打开页面生效');
+        reg.addEventListener('updatefound', () => {
+          const w = reg.installing;
+          if (!w) return;
+          w.addEventListener('statechange', () => {
+            if (w.state === 'installed' && navigator.serviceWorker.controller && global.UI && global.UI.toast) {
+              global.UI.toast('新版本已就绪，重新打开页面生效');
+            }
+          });
+        });
+      } catch (_) { /* 非 HTTPS / 浏览器限制：静默 */ }
+    }
+    // FEATURE 开关是异步拉取的，可能在 window load 之后才 ready；不能再只挂 load 监听。
+    if (document.readyState === 'complete') start();
+    else global.addEventListener('load', start, { once: true });
+  }
+
+  if (global.FEATURES && global.FEATURES.ready) global.FEATURES.ready.then(init).catch(() => {});
+  else init();
+})(window);
+
 /* ==== js/sound.js ==== */
 /**
  * sound.js — 音效与 BGM（Web Audio 合成 + 真实音频文件，PLAN §U4）
@@ -1885,12 +2349,82 @@
       对战: 'Play',
       棋谱: 'Games',
       赛事: 'Tournaments',
+      竞技场: 'Arena',
       个人: 'Profile',
       管理后台: 'Admin console',
       切换主题: 'Toggle theme',
       设置: 'Settings',
       语言: 'Language',
       菜单: 'Menu',
+      通知: 'Notifications',
+      通知中心: 'Notification center',
+      全部已读: 'Mark all read',
+      没有未读通知: 'No unread notifications',
+      暂时没有通知: 'No notifications yet',
+      登录账号后查看通知: 'Sign in to view notifications',
+      '好友与约战': 'Friends & challenges',
+      '登录后可使用好友、关注和约战。': 'Sign in to use friends, follows and challenges.',
+      '加好友': 'Add friend',
+      '关注': 'Follow',
+      '拉黑': 'Block',
+      '好友': 'Friends',
+      '约战': 'Challenges',
+      '关注 / 粉丝': 'Following / followers',
+      '已拉黑': 'Blocked',
+      '账号 ID 或用户名': 'Account ID or username',
+      '暂无好友': 'No friends yet',
+      '异步长局': 'Correspondence',
+      '每步 1/3/7 天，适合跨时区与忙时对局。': '1/3/7 days per move, for cross-timezone play.',
+      '对手账号 ID 或用户名': 'Opponent account ID or username',
+      '邀请对局': 'Invite to a game',
+      '执先': 'Play first',
+      '执后': 'Play second',
+      '返回列表': 'Back to list',
+      '中止对局': 'Abort game',
+      '同意和棋': 'Accept draw',
+      '拒绝和棋': 'Decline draw',
+      '提和': 'Offer draw',
+      '暂无长局。输入对手账号发起一局。': 'No correspondence games yet. Enter an opponent to start one.',
+      '研究收藏': 'Study collections',
+      '开局统计': 'Opening stats',
+      '新建研究': 'New study',
+      '研究标题': 'Study title',
+      '私密': 'Private',
+      '公开': 'Public',
+      '打开': 'Open',
+      '收藏棋谱': 'Add game',
+      '棋谱 ID': 'Game ID',
+      '还没有研究。': 'No studies yet.',
+      '还没有收藏棋谱。': 'No saved games yet.',
+      '暂无公开棋谱数据。': 'No public game data yet.',
+      '创建竞技场': 'Create arena',
+      '名称': 'Name',
+      '{n} 分钟': '{n} min',
+      '每 {n} 分钟配对': 'Pair every {n} min',
+      '{n} 人': '{n} players',
+      '第 {n} 轮': 'Round {n}',
+      '下一轮': 'Next round',
+      '我主办': 'Hosted by me',
+      '10秒快棋': '10 s bullet',
+      '配对间隔': 'Pairing interval',
+      '对局时制': 'Time control',
+      '积分榜': 'Standings',
+      '最近轮次': 'Recent rounds',
+      '全部竞技场': 'All arenas',
+      '详情': 'Details',
+      '退出': 'Leave',
+      '题库': 'Puzzles',
+      '每日诘将棋': 'Daily puzzles',
+      '查看': 'View',
+      '已读': 'Read',
+      '收藏到研究': 'Save to study',
+      '选择研究': 'Choose a study',
+      '备注（可选）': 'Note (optional)',
+      '收藏': 'Save',
+      '棋谱广场': 'Game gallery',
+      '共 {n} 局': '{n} games',
+      '开局 / 战法：': 'Opening',
+      '清除': 'Clear',
       '个人 · 游客': 'Profile · Guest',
       '个人 · 已登录账号': 'Profile · Signed in',
       复制: 'Copy',
@@ -2361,6 +2895,26 @@
 
       // ---- 复盘器 ----
       '复盘 · TDShogi': 'Review · TDShogi',
+      // ---- 引擎分析（1.6）----
+      '引擎分析': 'Engine analysis',
+      '尚未分析': 'Not analyzed yet',
+      '开始分析': 'Analyze',
+      '排队中…': 'Queued…',
+      '分析中…': 'Analyzing…',
+      '已完成': 'Done',
+      '重试': 'Retry',
+      '分析状态读取失败': 'Failed to load analysis status',
+      '分析请求失败': 'Analysis request failed',
+      '当前浏览器不支持本地引擎': 'This browser does not support the local engine',
+      '分析失败：{reason}': 'Analysis failed: {reason}',
+      '共 {n} 手': '{n} moves',
+      '不精确': 'Inaccuracy',
+      '失误': 'Mistake',
+      '恶手': 'Blunder',
+      '深度 {n}': 'Depth {n}',
+      '评估曲线': 'Evaluation graph',
+      '评估在浏览器本地完成；仅分析已结束棋谱，不提供实时支招。':
+        'Analysis runs locally in your browser. Only finished games are analyzed; live hints are never provided.',
       '加载棋谱中…': 'Loading record…',
       返回棋谱列表: 'Back to game list',
       先手: 'Black',
@@ -2603,12 +3157,81 @@
       对战: '対局',
       棋谱: '棋譜',
       赛事: '大会',
+      竞技场: 'アリーナ',
       个人: 'マイページ',
       管理后台: '管理コンソール',
       切换主题: 'テーマ切替',
       设置: '設定',
       语言: '言語',
       菜单: 'メニュー',
+      通知: '通知',
+      通知中心: '通知センター',
+      全部已读: 'すべて既読',
+      没有未读通知: '未読の通知はありません',
+      暂时没有通知: '通知はまだありません',
+      登录账号后查看通知: 'ログインすると通知を確認できます',
+      '好友与约战': '友達と対局申請',
+      '登录后可使用好友、关注和约战。': 'ログインすると友達・フォロー・対局申請が使えます。',
+      '加好友': '友達追加',
+      '关注': 'フォロー',
+      '拉黑': 'ブロック',
+      '好友': '友達',
+      '约战': '対局申請',
+      '关注 / 粉丝': 'フォロー / フォロワー',
+      '已拉黑': 'ブロック中',
+      '账号 ID 或用户名': 'アカウントIDまたはユーザー名',
+      '暂无好友': '友達はまだいません',
+      '异步长局': '非同期対局',
+      '每步 1/3/7 天，适合跨时区与忙时对局。': '1手1/3/7日、時差や忙しい人向けの対局です。',
+      '对手账号 ID 或用户名': '相手のアカウントIDまたはユーザー名',
+      '邀请对局': '対局に招待',
+      '执先': '先手',
+      '执后': '後手',
+      '返回列表': '一覧へ戻る',
+      '中止对局': '対局を中止',
+      '同意和棋': '和棋に同意',
+      '拒绝和棋': '和棋を拒否',
+      '提和': '和棋を提案',
+      '暂无长局。输入对手账号发起一局。': '非同期対局はまだありません。相手を入力して開始してください。',
+      '研究收藏': '研究コレクション',
+      '开局统计': '戦法・囲い統計',
+      '新建研究': '研究を作成',
+      '研究标题': '研究タイトル',
+      '私密': '非公開',
+      '公开': '公開',
+      '打开': '開く',
+      '收藏棋谱': '棋譜を追加',
+      '棋谱 ID': '棋譜ID',
+      '还没有研究。': '研究はまだありません。',
+      '还没有收藏棋谱。': '保存した棋譜はまだありません。',
+      '暂无公开棋谱数据。': '公開棋譜のデータはまだありません。',
+      '创建竞技场': 'アリーナを作成',
+      '名称': '名称',
+      '{n} 分钟': '{n}分',
+      '每 {n} 分钟配对': '{n}分ごとにマッチング',
+      '{n} 人': '{n}人',
+      '第 {n} 轮': '第{n}ラウンド',
+      '下一轮': '次のラウンド',
+      '我主办': '主催',
+      '10秒快棋': '10秒将棋',
+      '配对间隔': 'マッチング間隔',
+      '对局时制': '持ち時間',
+      '积分榜': '順位表',
+      '最近轮次': '最近のラウンド',
+      '全部竞技场': 'すべてのアリーナ',
+      '退出': '退出',
+      '题库': '詰将棋',
+      '每日诘将棋': '毎日の詰将棋',
+      '查看': '表示',
+      '已读': '既読',
+      '收藏到研究': '研究に保存',
+      '选择研究': '研究を選択',
+      '备注（可选）': 'メモ（任意）',
+      '收藏': '保存',
+      '棋谱广场': '棋譜ギャラリー',
+      '共 {n} 局': '{n}局',
+      '开局 / 战法：': '戦法・囲い：',
+      '清除': 'クリア',
       '个人 · 游客': 'マイページ · ゲスト',
       '个人 · 已登录账号': 'マイページ · ログイン中',
       复制: 'コピー',
@@ -2958,6 +3581,26 @@
       '赛事详情 · TDShogi': '大会詳細 · TDShogi',
       '个人 · TDShogi': 'マイページ · TDShogi',
       '复盘 · TDShogi': '検討 · TDShogi',
+      // ---- エンジン分析（1.6）----
+      '引擎分析': 'エンジン分析',
+      '尚未分析': '未分析',
+      '开始分析': '分析開始',
+      '排队中…': '待機中…',
+      '分析中…': '分析中…',
+      '已完成': '完了',
+      '重试': '再試行',
+      '分析状态读取失败': '分析状態の取得に失敗しました',
+      '分析请求失败': '分析リクエストに失敗しました',
+      '当前浏览器不支持本地引擎': 'このブラウザはローカルエンジンに対応していません',
+      '分析失败：{reason}': '分析に失敗しました：{reason}',
+      '共 {n} 手': '全 {n} 手',
+      '不精确': '不正確',
+      '失误': 'ミス',
+      '恶手': '悪手',
+      '深度 {n}': '深さ {n}',
+      '评估曲线': '評価グラフ',
+      '评估在浏览器本地完成；仅分析已结束棋谱，不提供实时支招。':
+        '分析はお使いのブラウザ内で実行されます。終局した棋譜のみを対象とし、対局中の助言は行いません。',
       '棋谱广场 · TDShogi': '棋譜広場 · TDShogi',
       平台实时数据: 'リアルタイム統計',
       三步开始: '3ステップではじめる',
@@ -3692,8 +4335,18 @@
     // 2026-10-04：顶部导航「棋谱」项移除 —— 棋谱检索台已并入个人页「棋谱」标签
     // （history.html 改为跳转）。棋谱广场入口仍在 gallery.html 与个人页棋谱标签。
     { id: 'tournaments', label: '赛事', href: 'tournaments.html' },
+    { id: 'arenas', label: '竞技场', href: 'arenas.html', feature: 'arenas' },
+    { id: 'puzzles', label: '题库', href: 'puzzles.html', feature: 'puzzles' },
+    { id: 'friends', label: '好友', href: 'friends.html', feature: 'social' },
+    { id: 'study', label: '研究', href: 'study.html', feature: 'studies' },
+    { id: 'correspondence', label: '长局', href: 'correspondence.html', feature: 'correspondence' },
     { id: 'profile', label: '个人', href: 'profile.html' },
   ];
+
+  /** 只保留当前启用的功能入口；开关未加载/关闭时这些入口不渲染。 */
+  function visibleNav() {
+    return NAV.filter((n) => !n.feature || !!(global.FEATURES && global.FEATURES.isOn(n.feature)));
+  }
 
   /**
    * 本机是否已登录管理员（localStorage 持有 admin token）。
@@ -3710,6 +4363,38 @@
   function adminEntryHtml() {
     if (!isAdminSession()) return '';
     return `<a class="admin-entry" href="admin.html" title="管理后台">🛡️</a>`;
+  }
+
+  /** 站内通知铃铛；仅在 FEATURE_NOTIFICATIONS 开启时渲染。 */
+  function bellHtml() {
+    if (!(global.FEATURES && global.FEATURES.isOn('notifications'))) return '';
+    const label = tr('通知');
+    return `<a class="nav-bell" id="navBell" href="notifications.html" title="${label}" aria-label="${label}">
+      <span aria-hidden="true">🔔</span><span class="nav-bell-count" id="navBellCount" hidden></span>
+    </a>`;
+  }
+
+  /** 刷新铃铛未读数；游客 / 开关关闭 / 请求失败时安静隐藏。 */
+  function refreshNotifications() {
+    const bell = document.getElementById('navBell');
+    const count = document.getElementById('navBellCount');
+    if (!bell || !count) return;
+    const g = getGuest();
+    const isAccount = typeof g.id === 'string' && g.id.includes('.');
+    if (!isAccount || !(global.FEATURES && global.FEATURES.isOn('notifications'))) {
+      bell.style.display = 'none';
+      return;
+    }
+    bell.style.display = '';
+    fetch('/api/notifications?limit=1', { headers: { 'X-Account-Token': g.id } })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d || d.ok === false) { count.hidden = true; return; }
+        const n = Number(d.unread) || 0;
+        count.textContent = n > 99 ? '99+' : String(n);
+        count.hidden = n <= 0;
+      })
+      .catch(() => { count.hidden = true; });
   }
 
   /**
@@ -3820,11 +4505,12 @@
   }
   try { global.addEventListener('storage', onStorageSync); } catch (_) { /* 极老浏览器没有 storage 事件：忽略 */ }
 
-  function renderNav(current) {
+  function renderNav(current, force) {
     const guest = getGuest();
     // SPA 幂等：导航已渲染过就绝不整块重建（重建会闪烁、丢监听、换掉正在点的按钮）。
     // 只就地更新 active 态与徽章即可；这也让「迁移期某个还没转 View 的页面误调 renderNav」无害化。
-    if (renderedIdentityId != null && document.querySelector('.nav-links')) {
+    // force=true 仅供功能开关加载完成后补挂新入口（正常切页绝不使用）。
+    if (!force && renderedIdentityId != null && document.querySelector('.nav-links')) {
       if (current != null) setActive(current);
       refreshBadge();
       return guest;
@@ -3855,7 +4541,7 @@
         </button>
         <div class="nav-menu" id="navMenu">
           <nav class="nav-links">
-            ${NAV.map((n) => `<a href="${n.href}" class="${n.id === current ? 'active' : ''}" data-nav="${n.id}">${tr(n.label)}</a>`).join('')}
+            ${visibleNav().map((n) => `<a href="${n.href}" class="${n.id === current ? 'active' : ''}" data-nav="${n.id}">${tr(n.label)}</a>`).join('')}
           </nav>
           <div class="nav-actions">
             <button class="theme-toggle" id="langToggle" title="${tr('语言')}">${localeShort()}</button>
@@ -3866,6 +4552,7 @@
           </div>
         </div>
         <!-- 用户徽标留在顶行：手机端不用展开菜单也能看到身份 / 进入个人页 -->
+        ${bellHtml()}
         <a class="nav-user" href="profile.html" title="${isAccount ? tr('个人 · 已登录账号') : tr('个人 · 游客')}">
           <span>${escHtml(displayName)}</span>
           <span class="nav-avatar">${userBadge}</span>
@@ -3882,7 +4569,7 @@
         </button>
         <div class="nav-menu" id="navMenu">
           <nav class="nav-links">
-            ${NAV.map((x) => `<a href="${x.href}" class="${x.id === current ? 'active' : ''}" data-nav="${x.id}">${tr(x.label)}</a>`).join('')}
+            ${visibleNav().map((x) => `<a href="${x.href}" class="${x.id === current ? 'active' : ''}" data-nav="${x.id}">${tr(x.label)}</a>`).join('')}
           </nav>
           <div class="nav-actions">
             <button class="theme-toggle" id="langToggle" title="${tr('语言')}">${localeShort()}</button>
@@ -3892,6 +4579,7 @@
             ${adminEntryHtml()}
           </div>
         </div>
+        ${bellHtml()}
       `;
       document.body.insertBefore(n, document.body.firstChild);
     }
@@ -3914,6 +4602,7 @@
         mb.classList.toggle('music-off', !on);
       }
     }
+    refreshNotifications();
     return guest;
   }
 
@@ -3925,7 +4614,9 @@
   /** 视图名 → 顶部导航项 id（没有对应项则为 null，表示不高亮任何项） */
   const VIEW_TO_NAV = {
     home: 'home', lobby: 'lobby', gallery: null,
-    tournaments: 'tournaments', tournament: 'tournaments',
+    tournaments: 'tournaments', tournament: 'tournaments', arenas: 'arenas',
+    puzzles: 'puzzles', friends: 'friends', study: 'study', correspondence: 'correspondence',
+    notifications: null,
     profile: 'profile', review: null, play: null, admin: null,
   };
 
@@ -3987,9 +4678,10 @@
         e.stopPropagation();
         setMenu(!nav.classList.contains('menu-open'));
       });
-      // 点导航链接后自动收起；点外部 / Esc 也收起，避免下拉面板悬在半空
-      nav.querySelectorAll('.nav-menu a').forEach((a) => {
-        a.addEventListener('click', () => setMenu(false));
+      // 点导航链接后自动收起；点外部 / Esc 也收起，避免下拉面板悬在半空。
+      // 用事件委托而不是逐个 link 绑定：功能开关加载后会补挂入口，新链接也必须生效。
+      nav.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.nav-menu a')) setMenu(false);
       });
       document.addEventListener('click', (e) => {
         if (!nav.contains(e.target)) setMenu(false);
@@ -4026,7 +4718,20 @@
     applyTheme();
   }
 
-  global.NAV = { renderNav, setActive, refreshBadge, applyLocale, toggleLocale, getGuest, saveGuest, updateUserName, updateAvatar, randomName, genId, genKey, GUEST_KEY, THEME_KEY, ADMIN_KEY, isAdminSession, toggleTheme, getTheme, applyTheme };
+  global.NAV = { renderNav, setActive, refreshBadge, refreshNotifications, applyLocale, toggleLocale, getGuest, saveGuest, updateUserName, updateAvatar, randomName, genId, genKey, GUEST_KEY, THEME_KEY, ADMIN_KEY, isAdminSession, toggleTheme, getTheme, applyTheme };
+
+  // 功能开关是异步拉取的：若加载完成后确实有新增入口，补挂一次导航。
+  // 没有启用任何功能时不做任何事，避免无意义的重建。
+  if (global.FEATURES && global.FEATURES.ready) {
+    global.FEATURES.ready.then(() => {
+      try {
+        if (NAV.some((n) => n.feature && global.FEATURES.isOn(n.feature))) {
+          renderNav(global.Router && global.Router.current, true);
+          setActive(global.Router && global.Router.current);
+        }
+      } catch (_) { /* 入口补挂失败不影响主流程 */ }
+    });
+  }
 })(window);
 
 /* ==== js/api.js ==== */
@@ -6147,6 +6852,10 @@
     '/gallery.html': 'gallery',
     '/tournaments': 'tournaments',
     '/tournaments.html': 'tournaments',
+    '/arenas': 'arenas',
+    '/arenas.html': 'arenas',
+    '/arena': 'arenas',
+    '/arena.html': 'arenas',
     '/tournament': 'tournament',
     '/tournament.html': 'tournament',
     '/profile': 'profile',
@@ -6157,6 +6866,18 @@
     '/review.html': 'review',
     '/play': 'play',
     '/play.html': 'play',
+    '/reset': 'reset',
+    '/reset.html': 'reset',
+    '/friends': 'friends',
+    '/friends.html': 'friends',
+    '/notifications': 'notifications',
+    '/notifications.html': 'notifications',
+    '/puzzles': 'puzzles',
+    '/puzzles.html': 'puzzles',
+    '/study': 'study',
+    '/study.html': 'study',
+    '/correspondence': 'correspondence',
+    '/correspondence.html': 'correspondence',
     '/admin': 'admin',
     '/admin.html': 'admin',
     '/app.html': 'home',
@@ -6169,11 +6890,19 @@
     'lobby.html': '/lobby',
     'gallery.html': '/gallery',
     'tournaments.html': '/tournaments',
+    'arenas.html': '/arenas',
+    'arena.html': '/arenas',
     'tournament.html': '/tournament',
     'profile.html': '/profile',
     'history.html': '/profile',
     'review.html': '/review',
     'play.html': '/play',
+    'reset.html': '/reset',
+    'friends.html': '/friends',
+    'notifications.html': '/notifications',
+    'puzzles.html': '/puzzles',
+    'study.html': '/study',
+    'correspondence.html': '/correspondence',
     'admin.html': '/admin',
     'app.html': '/',
   };
@@ -6802,7 +7531,13 @@
       <div class="card lobby-card">
         <h3>⚔️ 快速匹配</h3>
         <p>一键匹配在线对手，两人即开，实时对局。</p>
-        <div style="font-size:12px;color:var(--text-dim);margin:10px 0 14px;">⏱ 10 分钟包干（标准比赛）</div>
+        <div style="font-size:12px;color:var(--text-dim);margin:10px 0 6px;">⏱ 比赛时间</div>
+        <select class="select" id="matchTimeControl" style="width:100%;margin-bottom:14px;">
+          <option value="10:00" selected>10 分钟包干（标准）</option>
+          <option value="15+60">15 分钟 + 60 秒读秒</option>
+          <option value="10+30">10 分钟 + 30 秒读秒</option>
+          <option value="10sec">10 秒快棋</option>
+        </select>
         <div id="matchControls">
           <button class="btn btn-primary btn-lg" id="btnQuickMatch" style="width:100%;">开始匹配</button>
         </div>
@@ -6921,9 +7656,14 @@
       // ---- 快速匹配 ----
       on($('btnQuickMatch'), 'click', () => {
         this._matchActive = true;
-        api.send({ type: 'quick_match' });
+        const sel = $('matchTimeControl');
+        const timeControl = (sel && sel.value) || '10:00';
+        const tcName = sel && sel.selectedOptions && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : timeControl;
+        api.send({ type: 'quick_match', data: { timeControl } });
         $('matchControls').style.display = 'none';
         const wait = $('matchWait');
+        const waitTitle = wait.querySelector('div:nth-child(2)');
+        if (waitTitle) waitTitle.childNodes[0].nodeValue = `正在寻找 ${tcName} 对手…`;
         wait.classList.add('show');
         // ⚠️ 2026-10-02 体验修复：显示已等待时长（此前只有 spinner，用户无法判断是否卡死）
         let tip = $('matchWaitTimer');
@@ -7348,6 +8088,7 @@
       <button class="btn btn-primary btn-sm" id="btnSearch">搜索</button>
       <span id="totalTip" style="color:var(--text-dim);font-size:12px;"></span>
     </div>
+    <div id="openingFilter" style="display:none;font-size:13px;color:var(--text-dim);margin-bottom:12px;"></div>
 
     <div id="list"></div>
 
@@ -7355,13 +8096,15 @@
   </main>`;
     },
 
-    mount(container) {
+    mount(container, params) {
       this._teardown = [];
+      let opening = (params && params.opening) || '';
       const guest = global.NAV.getGuest(); // 替代原 NAV.renderNav('gallery')
       const api = global.API;
       const $ = (id) => UI.$(id);
       const esc = (s) => UI.esc(s);
       const toast = (m) => UI.toast(m);
+      const T = (s, vars) => (global.I18N && global.I18N.t ? global.I18N.t(s, vars) : s);
 
       const PAGE_SIZE = 20;
       let page = 1;
@@ -7370,12 +8113,29 @@
       const qEl = $('q');
       const tagEl = $('tagSel');
 
+      function renderOpeningFilter() {
+        const el = $('openingFilter');
+        if (!el) return;
+        if (!opening) { el.style.display = 'none'; el.innerHTML = ''; return; }
+        el.style.display = '';
+        el.innerHTML = `${T('开局 / 战法：')}<b style="color:var(--gold-light);">${esc(opening)}</b>
+          <button class="btn btn-ghost btn-sm" id="btnClearOpening" type="button" style="margin-left:8px;">${T('清除')}</button>`;
+        const btn = $('btnClearOpening');
+        if (btn) btn.addEventListener('click', () => {
+          opening = '';
+          try { history.replaceState({}, '', '/gallery'); } catch (_) {}
+          renderOpeningFilter();
+          page = 1;
+          load();
+        }, { once: true });
+      }
+
       async function load() {
         const q = (qEl.value || '').trim();
         const tag = tagEl.value || '';
         try {
           const data = await global.ApiUtils.get(
-            `/api/gallery?q=${encodeURIComponent(q)}&tag=${encodeURIComponent(tag)}&page=${page}&limit=${PAGE_SIZE}`
+            `/api/gallery?q=${encodeURIComponent(q)}&tag=${encodeURIComponent(tag)}&opening=${encodeURIComponent(opening)}&page=${page}&limit=${PAGE_SIZE}`
           );
           total = data.total || 0;
           renderList(data.records || []);
@@ -7386,7 +8146,7 @@
       }
 
       function renderList(records) {
-        $('totalTip').textContent = `共 ${total} 局`;
+        $('totalTip').textContent = T('共 {n} 局', { n: total });
         const el = $('list');
         if (!el) return;
         if (!records.length) {
@@ -7488,6 +8248,9 @@
         e.preventDefault();
         if (qEl) qEl.value = '';
         if (tagEl) tagEl.value = '';
+        opening = '';
+        try { history.replaceState({}, '', '/gallery'); } catch (_) {}
+        renderOpeningFilter();
         page = 1;
         load();
       };
@@ -7496,6 +8259,7 @@
         this._teardown.push(() => listEl.removeEventListener('click', onListClick));
       }
 
+      renderOpeningFilter();
       load();
     },
 
@@ -7614,7 +8378,7 @@
           <select class="select" id="tFormat" style="width:100%;">
             <option value="single-elimination" selected>单败淘汰</option>
             <option value="swiss">瑞士制（积分编排）</option>
-            <option value="round-robin" disabled>循环赛（待实装）</option>
+            <option value="round-robin">循环赛（两两交手）</option>
           </select>
         </div>
         <!-- 轮数（仅瑞士制）：不填则按人数自动给建议值 -->
@@ -8518,7 +9282,7 @@
                 主办：<span data-player-id="${esc(T.ownerId || '')}">${esc(T.ownerName || '未知')}</span
                 > · ${esc(T.formatLabel || '单败淘汰')} · ${joinedCount(T)}/${T.size} 人${
       // 瑞士制的"打到哪了"光看状态看不出来，把轮次一并显示
-      (T.format === 'swiss' && T.totalRounds) ? ` · 第 ${T.currentRound || 0}/${T.totalRounds} 轮` : ''}
+      (['swiss', 'round-robin'].includes(T.format) && T.totalRounds) ? ` · 第 ${T.currentRound || 0}/${T.totalRounds} 轮` : ''}
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px;">
@@ -8874,7 +9638,7 @@
           ['报名审核', T.requireApproval ? '需主办人审核' : '免审核（报名即参赛）'],
           ['提交时间', fmtTime(T.createdAt)],
         ];
-        if (T.format === 'swiss' && T.totalRounds) {
+        if (['swiss', 'round-robin'].includes(T.format) && T.totalRounds) {
           rows.splice(1, 0, ['轮次', `共 ${T.totalRounds} 轮${T.currentRound ? `（已进行到第 ${T.currentRound} 轮）` : ''}`]);
         }
         const reason = T.reason
@@ -9002,7 +9766,7 @@
       function renderBracketCard() {
         const card = el('tnBracketCard');
         // T8：瑞士制没有淘汰树，用"轮次列表 + 名次表"呈现
-        if (T.format === 'swiss') { renderSwissCard(card); return; }
+        if (['swiss', 'round-robin'].includes(T.format)) { renderSwissCard(card); return; }
         if (!(T.bracket || []).length) {
           card.style.display = 'none';
           return;
@@ -9052,7 +9816,7 @@
           card.innerHTML = `
             <div class="section-title" style="margin-bottom:10px;">赛程（${esc(T.formatLabel || '瑞士制')}）</div>
             <div style="color:var(--text-dim);font-size:13px;">
-              尚未开赛。共 ${T.totalRounds || 0} 轮，开赛后每轮按积分重新配对。
+              尚未开赛。共 ${T.totalRounds || 0} 轮，${T.format === 'round-robin' ? '开赛后按固定轮转进行。' : '开赛后每轮按积分重新配对。'}
             </div>`;
           return;
         }
@@ -9060,7 +9824,6 @@
 
         const roundsHtml = rounds.map((r) => {
           const isCur = r.round === T.currentRound && T.status === 'playing';
-          let failedN = 0;
           const rows = (r.pairs || []).map(([a, b], i) => {
             const w = (r.results || {})[pairKey(a, b)];
             const mine = !!myPlayerId && (a === myPlayerId || b === myPlayerId);
@@ -9079,10 +9842,8 @@
                 ? `<a class="btn btn-primary btn-sm" href="play.html?room=${encodeURIComponent(roomId)}&join=1">进入对局</a>`
                 : `<a class="btn btn-ghost btn-sm" href="play.html?room=${encodeURIComponent(roomId)}&spectate=1">观战</a>`;
             } else {
-              // ⚠️ 问题 8：既无结果、又没有房间 id = 建房失败（startSwissRound 建房失败时 matchIds[i]=null）。
-              // 原实现只显示「—」，把「这轮有一场根本没打起来」静默掉了。
-              failedN++;
-              tag = '<span style="color:var(--red-light);" title="该场未能创建房间，需主办人 / 管理员重试或安排重赛">⚠️ 未能开局</span>';
+              // 约战制下 matchIds 为空表示“双方尚未自行开局”，不是建房失败。
+              tag = '<span style="color:var(--text-dim);">待开始</span>';
             }
             const voided = (r.voided || []).some((v) => v === a || v === b);
             return `
@@ -9097,7 +9858,6 @@
           // ⚠️ 问题 8：轮次级告警（退让原因 / 建房失败）显式呈现，避免「静默卡住一轮」。
           const roundWarn = [];
           if (r.degraded) roundWarn.push(`配对经过退让${r.reason ? `：${esc(r.reason)}` : ''}，可能有重复对阵`);
-          if (failedN) roundWarn.push(`有 ${failedN} 场未能创建房间，需主办人 / 管理员处理`);
           return `
             <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;${isCur ? 'border-color:var(--gold);' : ''}">
               <div style="font-size:13px;font-weight:700;margin-bottom:6px;">
@@ -9121,7 +9881,7 @@
         card.innerHTML = `
           <div class="section-title" style="margin-bottom:4px;">赛程（${esc(T.formatLabel || '瑞士制')} · 共 ${T.totalRounds} 轮）</div>
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
-            每轮按积分重新配对：强者遇强者、不重复对阵（没有淘汰，输一两场仍有机会）。
+            ${T.format === 'round-robin' ? '循环赛：固定轮转，所有人两两交手；每轮所有对局结束后进入下一轮。' : '每轮按积分重新配对：强者遇强者、不重复对阵（没有淘汰，输一两场仍有机会）。'}
             当前第 ${T.currentRound || 0} 轮${T.status === 'playing' ? '' : '（已结束）'}。
           </div>
           ${roundsHtml}
@@ -9390,6 +10150,340 @@
   global.Views.tournament = View;
 })(window);
 
+/* ==== js/arenas.js ==== */
+'use strict';
+
+/**
+ * arenas.js — Arena-lite 竞技场（1.8）。
+ * 时间窗口内自由加入，服务端按积分每 N 分钟配对；页面只做列表 / 详情 / 加入退出。
+ */
+(function (global) {
+  'use strict';
+  const UI = global.UI;
+
+  function accountToken() {
+    const g = global.NAV && global.NAV.getGuest ? global.NAV.getGuest() : null;
+    return g && typeof g.id === 'string' && g.id.includes('.') ? g.id : '';
+  }
+
+  const statusClass = (s) => (s === 'running' ? 'live' : s === 'open' ? 'open' : s === 'finished' ? 'done' : 'cancelled');
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+
+  /** 时间戳 → datetime-local 需要的本地字符串 */
+  function localInput(ts) {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function fmt(ts) {
+    if (!ts) return '—';
+    return global.I18N && global.I18N.fmt ? global.I18N.fmt(ts) : new Date(ts).toLocaleString();
+  }
+
+  function T(s, vars) {
+    return global.I18N && global.I18N.t ? global.I18N.t(s, vars) : s;
+  }
+
+
+  const View = {
+    title: '竞技场 · TDShogi',
+
+    render() {
+      return `
+  <main class="container">
+    <div class="card arena-hero">
+      <div class="arena-hero-head">
+        <div>
+          <div class="section-title" style="margin-bottom:6px;">竞技场</div>
+          <div class="arena-sub">时间窗口内自由加入，按积分自动配对 · 时制由主办人选择 · 不计 ELO</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="arenaRefresh" type="button">刷新</button>
+      </div>
+
+      <div id="arenaGuest" class="arena-guest" style="display:none;">登录正式账号后可以创建 / 加入竞技场。</div>
+
+      <div id="arenaCreate" class="arena-create" style="display:none;">
+        <div class="arena-form">
+          <label class="arena-field"><span>名称</span><input class="input" id="arenaName" maxlength="20" placeholder="如：周末快棋竞技场"></label>
+          <label class="arena-field"><span>开始</span><input class="input" id="arenaStart" type="datetime-local"></label>
+          <label class="arena-field"><span>结束</span><input class="input" id="arenaEnd" type="datetime-local"></label>
+          <label class="arena-field"><span>配对间隔</span>
+            <select class="input" id="arenaEvery">
+              <option value="3">3 分钟</option><option value="5" selected>5 分钟</option>
+              <option value="10">10 分钟</option><option value="15">15 分钟</option>
+            </select>
+          </label>
+          <label class="arena-field"><span>对局时制</span>
+            <select class="input" id="arenaTc">
+              <option value="10:00" selected>10 分钟包干</option>
+              <option value="10+30">10 分 + 30 秒</option>
+              <option value="15+60">15 分 + 60 秒</option>
+              <option value="10sec">10 秒快棋</option>
+            </select>
+          </label>
+          <button class="btn btn-primary btn-sm" id="arenaCreateBtn" type="button">创建竞技场</button>
+        </div>
+        <div class="arena-hint">到开始时间自动开赛、到结束时间停止配对。对局中退出需先完成或认输。</div>
+      </div>
+    </div>
+
+    <div id="arenaDetail"></div>
+    <div class="section-title" style="margin-top:22px;">全部竞技场</div>
+    <div id="arenaList"><div class="pz-placeholder">加载中…</div></div>
+  </main>`;
+    },
+
+    mount(container, params) {
+      this._teardown = [];
+      let alive = true;
+      const teardown = this._teardown;
+      const $ = (id) => UI.$(id);
+      const esc = (s) => UI.esc(s);
+      const toast = (m) => UI.toast(m);
+      const token = accountToken();
+      const isAccount = !!token;
+      let listTimer = null;
+      let detailTimer = null;
+      let lastListJson = '';
+      let lastDetailJson = '';
+      const selectedId = (params && params.id) || '';
+
+      teardown.push(() => {
+        alive = false;
+        if (listTimer) clearInterval(listTimer);
+        if (detailTimer) clearInterval(detailTimer);
+      });
+
+      async function api(path, opts = {}) {
+        const headers = Object.assign({}, opts.headers || {});
+        if (token) headers['X-Account-Token'] = token;
+        if (opts.body) headers['Content-Type'] = 'application/json';
+        const r = await fetch(path, Object.assign({}, opts, { headers }));
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) throw new Error(d.error || `请求失败（HTTP ${r.status}）`);
+        return d;
+      }
+
+      function defaultTimes() {
+        const now = Date.now();
+        const start = Math.ceil((now + 5 * 60 * 1000) / (5 * 60 * 1000)) * 5 * 60 * 1000;
+        $('arenaStart').value = localInput(start);
+        $('arenaEnd').value = localInput(start + 2 * 60 * 60 * 1000);
+      }
+
+      function joinButton(a) {
+        if (!isAccount || a.status === 'finished' || a.status === 'cancelled') return '';
+        if (a.joined) return `<button class="btn btn-ghost btn-sm" type="button" data-arena-leave="${esc(a.id)}">退出</button>`;
+        return `<button class="btn btn-primary btn-sm" type="button" data-arena-join="${esc(a.id)}">加入</button>`;
+      }
+
+      function cardHtml(a) {
+        const top = (a.top || []).map((x, i) => `${i + 1}. ${esc(x.name)} ${x.score}`).join(' · ');
+        return `
+          <div class="card arena-card">
+            <div class="arena-card-head">
+              <div style="min-width:0;">
+                <div class="arena-name">
+                  <a href="/arenas?id=${encodeURIComponent(a.id)}">${esc(a.name)}</a>
+                  <span class="arena-status ${statusClass(a.status)}">${esc(T(a.statusLabel))}</span>
+                  ${a.mine ? `<span class="arena-status mine">${T('我主办')}</span>` : ''}
+                </div>
+                <div class="arena-meta">${fmt(a.startsAt)} → ${fmt(a.endsAt)} · ${T('每 {n} 分钟配对', { n: a.roundMinutes })} · ${esc(T(a.timeControlName || ''))} · ${T('{n} 人', { n: a.entryCount })}${a.currentRound ? ` · ${T('第 {n} 轮', { n: a.currentRound })}` : ''}${a.status === 'running' && a.nextRoundAt ? ` · ${T('下一轮')} ${fmt(a.nextRoundAt)}` : ''}</div>
+                ${top ? `<div class="arena-top">${top}</div>` : ''}
+              </div>
+              <div class="arena-card-actions">
+                <a class="btn btn-ghost btn-sm" href="/arenas?id=${encodeURIComponent(a.id)}">详情</a>
+                ${joinButton(a)}
+              </div>
+            </div>
+          </div>`;
+      }
+
+      async function loadList() {
+        try {
+          const d = await api('/api/arenas');
+          if (!alive) return;
+          const list = d.arenas || [];
+          const json = JSON.stringify(list);
+          if (json === lastListJson) return;
+          lastListJson = json;
+          $('arenaList').innerHTML = list.length
+            ? list.map(cardHtml).join('')
+            : '<div class="pz-placeholder">还没有竞技场。登录后可以创建第一个。</div>';
+        } catch (e) {
+          if (alive) $('arenaList').innerHTML = `<div class="pz-placeholder">${esc(e.message)}</div>`;
+        }
+      }
+
+      function standingsHtml(d) {
+        const rows = (d.entries || []).map((e) => `
+          <tr class="${d.me && d.me.id === e.id ? 'me' : ''}">
+            <td>${e.rank}</td>
+            <td class="name">${esc(e.name)}</td>
+            <td><b>${e.score}</b></td>
+            <td>${e.wins}</td><td>${e.draws}</td><td>${e.losses}</td>
+          </tr>`).join('');
+        return `
+          <div class="arena-table-wrap">
+            <table class="arena-table">
+              <thead><tr><th>#</th><th>棋手</th><th>积分</th><th>胜</th><th>和</th><th>负</th></tr></thead>
+              <tbody>${rows || '<tr><td colspan="6" style="text-align:center;color:var(--text-dim);">还没有参赛者</td></tr>'}</tbody>
+            </table>
+          </div>`;
+      }
+
+      function roundsHtml(d) {
+        const rounds = (d.rounds || []).slice().reverse();
+        if (!rounds.length) return '<div class="pz-placeholder">还没有开始配对。</div>';
+        return rounds.map((r) => `
+          <div class="arena-round">
+            <div class="arena-round-head">第 ${r.round} 轮 <span>${fmt(r.at)}</span></div>
+            ${r.pairs.map((p) => {
+              const result = p.scored ? (p.winner === '-' ? '和棋' : `${esc(p.winnerName || '')} 胜`) : (p.roomId ? '对局中' : '未开局');
+              return `<div class="arena-pair"><span>${esc(p.a)} vs ${esc(p.b)}</span><b class="${p.scored ? 'done' : ''}">${result}</b></div>`;
+            }).join('')}
+            ${r.bye ? `<div class="arena-pair bye"><span>轮空：${esc(r.bye)}</span><b>—</b></div>` : ''}
+          </div>`).join('');
+      }
+
+      function detailHtml(d) {
+        const mine = d.me && !d.me.withdrawnAt;
+        const rank = mine ? (d.entries.find((e) => e.id === d.me.id) || {}).rank : null;
+        return `
+          <div class="card arena-detail">
+            <div class="arena-detail-head">
+              <div>
+                <div class="arena-name" style="font-size:20px;">${esc(d.name)}
+                  <span class="arena-status ${statusClass(d.status)}">${esc(T(d.statusLabel))}</span>
+                </div>
+                <div class="arena-meta">${T('主办')}：${esc(d.ownerName || '—')} · ${fmt(d.startsAt)} → ${fmt(d.endsAt)} · ${T('每 {n} 分钟配对', { n: d.roundMinutes })} · ${T('{n} 人', { n: d.entryCount })}${d.currentRound ? ` · ${T('第 {n} 轮', { n: d.currentRound })}` : ''}${d.status === 'running' && d.nextRoundAt ? ` · ${T('下一轮')} ${fmt(d.nextRoundAt)}` : ''}</div>
+                <div class="arena-meta">${T('对局时制')}：${esc(T(d.timeControlName || ''))} · 不计 ELO${rank ? ` · 我的排名：第 ${rank} 名` : ''}</div>
+              </div>
+              <div class="arena-card-actions">
+                ${joinButton({ ...d, joined: mine })}
+                ${d.canManage && (d.status === 'open' || d.status === 'running') ? `<button class="btn btn-ghost btn-sm" type="button" data-arena-cancel="${esc(d.id)}" style="color:var(--red-light);">取消竞技场</button>` : ''}
+              </div>
+            </div>
+            ${d.champion ? `<div class="arena-champion">🏆 冠军：${esc(d.champion.name)}</div>` : ''}
+            <div class="arena-detail-grid">
+              <div>
+                <div class="arena-section-title">积分榜</div>
+                ${standingsHtml(d)}
+              </div>
+              <div>
+                <div class="arena-section-title">最近轮次</div>
+                <div class="arena-rounds">${roundsHtml(d)}</div>
+              </div>
+            </div>
+          </div>`;
+      }
+
+      async function loadDetail() {
+        if (!selectedId) { $('arenaDetail').innerHTML = ''; return; }
+        try {
+          const d = await api(`/api/arenas/${encodeURIComponent(selectedId)}`);
+          if (!alive) return;
+          const json = JSON.stringify(d.arena);
+          if (json === lastDetailJson) return;
+          lastDetailJson = json;
+          $('arenaDetail').innerHTML = detailHtml(d.arena);
+        } catch (e) {
+          if (alive) $('arenaDetail').innerHTML = `<div class="card arena-detail"><div class="pz-placeholder">${esc(e.message)}</div></div>`;
+        }
+      }
+
+      async function act(path, okMsg) {
+        try {
+          await api(path, { method: 'POST', body: '{}' });
+          if (okMsg) toast(okMsg);
+          await Promise.all([loadList(), loadDetail()]);
+        } catch (e) { toast(e.message); }
+      }
+
+      const onClick = (ev) => {
+        const join = ev.target.closest('[data-arena-join]');
+        if (join) { act(`/api/arenas/${encodeURIComponent(join.getAttribute('data-arena-join'))}/join`, '已加入竞技场'); return; }
+        const leave = ev.target.closest('[data-arena-leave]');
+        if (leave) { act(`/api/arenas/${encodeURIComponent(leave.getAttribute('data-arena-leave'))}/leave`, '已退出竞技场'); return; }
+        const cancel = ev.target.closest('[data-arena-cancel]');
+        if (cancel && global.confirm('确定取消该竞技场？')) {
+          act(`/api/arenas/${encodeURIComponent(cancel.getAttribute('data-arena-cancel'))}/cancel`, '竞技场已取消');
+        }
+      };
+      $('arenaList').addEventListener('click', onClick);
+      $('arenaDetail').addEventListener('click', onClick);
+      teardown.push(() => {
+        $('arenaList').removeEventListener('click', onClick);
+        $('arenaDetail').removeEventListener('click', onClick);
+      });
+
+      if (!isAccount) {
+        $('arenaGuest').style.display = '';
+      } else {
+        $('arenaCreate').style.display = '';
+        defaultTimes();
+        const create = async () => {
+          const startsAt = new Date($('arenaStart').value).getTime();
+          const endsAt = new Date($('arenaEnd').value).getTime();
+          if (!Number.isFinite(startsAt) || !Number.isFinite(endsAt)) { toast('请选择开始与结束时间'); return; }
+          try {
+            const d = await api('/api/arenas', {
+              method: 'POST',
+              body: JSON.stringify({
+                name: $('arenaName').value,
+                startsAt,
+                endsAt,
+                roundMinutes: Number($('arenaEvery').value),
+                timeControl: $('arenaTc').value,
+              }),
+            });
+            toast('竞技场已创建');
+            if (global.Router && global.Router.navigate) global.Router.navigate(`/arenas?id=${encodeURIComponent(d.arena.id)}`);
+            else location.href = `/arenas?id=${encodeURIComponent(d.arena.id)}`;
+          } catch (e) { toast(e.message); }
+        };
+        $('arenaCreateBtn').addEventListener('click', create);
+        teardown.push(() => $('arenaCreateBtn').removeEventListener('click', create));
+
+        // 等级特权与赛事同一门槛（Lv.5）：服务端仍会再校验，这里只负责把按钮状态说清楚。
+        const applyPrivilege = (p, level) => {
+          if (!p) return;
+          const btn = $('arenaCreateBtn');
+          if (p.ok) { btn.disabled = false; return; }
+          btn.disabled = true;
+          const hint = document.querySelector('.arena-hint');
+          if (hint) hint.textContent = `创建竞技场需要 Lv.${p.need}（你当前 Lv.${level == null ? 0 : level}）。`;
+        };
+        if (global.API) applyPrivilege(global.API.privileges && global.API.privileges.create_tournament, global.API.level);
+        if (global.API && global.API.on) {
+          const off = global.API.on('hello', (d) => {
+            if (d && d.privileges) applyPrivilege(d.privileges.create_tournament, d.level);
+          });
+          teardown.push(off);
+        }
+      }
+
+      const refresh = () => { loadList(); if (selectedId) loadDetail(); };
+      $('arenaRefresh').addEventListener('click', refresh);
+      teardown.push(() => $('arenaRefresh').removeEventListener('click', refresh));
+
+      loadList();
+      loadDetail();
+      listTimer = setInterval(loadList, 15000);
+      if (selectedId) detailTimer = setInterval(loadDetail, 15000);
+    },
+
+    unmount() {
+      (this._teardown || []).forEach((fn) => { try { fn(); } catch (_) {} });
+      this._teardown = [];
+    },
+  };
+
+  global.Views = global.Views || {};
+  global.Views.arenas = View;
+})(window);
+
 /* ==== js/profile.js ==== */
 /**
  * profile.js — 个人页 View：账号注册/登录、改名、评级与战绩统计、ELO 走势、最近对局
@@ -9474,6 +10568,24 @@
             </div>
             <button class="btn btn-ghost btn-sm" id="btnLogout">退出登录</button>
           </div>
+          <div id="accountEmailRow" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">邮箱找回 <span id="emailStatus" style="color:var(--gold-light);"></span></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <input class="input" id="emailInput" type="email" placeholder="name@example.com" style="max-width:240px;">
+              <button class="btn btn-ghost btn-sm" id="btnEmailSave" type="button">绑定并发送验证</button>
+              <a href="reset.html" style="font-size:12px;color:var(--gold-light);">忘记密码？</a>
+            </div>
+          </div>
+          <div id="accountSecurityRow" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">修改密码</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <input class="input" id="pwCurrent" type="password" placeholder="当前密码" style="max-width:160px;">
+              <input class="input" id="pwNew" type="password" placeholder="新密码（至少 8 位）" style="max-width:190px;">
+              <input class="input" id="pwConfirm" type="password" placeholder="确认新密码" style="max-width:160px;">
+              <button class="btn btn-ghost btn-sm" id="btnChangePassword" type="button">更新密码</button>
+              <button class="btn btn-ghost btn-sm" id="btnLogoutAll" type="button" style="color:var(--red-light);">退出所有设备</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -9506,6 +10618,7 @@
           <div style="color:var(--text-dim);font-size:13px;">ELO 积分</div>
           <div style="margin-top:6px;font-size:14px;font-weight:700;color:var(--gold-light);" id="pLevel">Lv.0</div>
           <div style="color:var(--text-dim);font-size:12px;" id="pExp">经验 0</div>
+          <div id="pCategoryRatings" style="margin-top:8px;font-size:11px;color:var(--text-dim);line-height:1.7;"></div>
         </div>
       </div>
 
@@ -9552,6 +10665,12 @@
         <div class="section-title">🏆 赛事荣誉</div>
         <div id="honorsStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:10px;"></div>
         <div id="honorsList" style="margin-top:6px;"></div>
+      </div>
+
+      <!-- 赛季快照（1.8）：关闭后展示总榜前 3；进行中展示时间窗口 -->
+      <div class="card" id="seasonsCard" style="display:none;padding:22px;margin-bottom:28px;">
+        <div class="section-title">🏁 赛季</div>
+        <div id="seasonsList"></div>
       </div>
 
       <!-- ELO 走势 -->
@@ -9769,6 +10888,10 @@
           if (!$('editPhone')) return; // SPA：已切页，回调回来时 DOM 已销毁 → 放弃写入
           $('editPhone').value = a.profile.phone || '';
           $('editStyle').value = a.profile.style || '不设定';
+          const emailRow = $('accountEmailRow');
+          if (emailRow) emailRow.style.display = (global.FEATURES && global.FEATURES.isOn('mail')) ? '' : 'none';
+          if ($('emailInput')) $('emailInput').value = a.email || '';
+          if ($('emailStatus')) $('emailStatus').textContent = a.email ? (a.emailVerified ? '已验证' : '未验证') : '未绑定';
           $('createdAtLabel').textContent = I18N.fmtDate(a.createdAt);
           // 身份卡补充棋风与注册日期
           const role = $('pRoleLabel');
@@ -9784,6 +10907,32 @@
               ` · 📅 注册于 ${I18N.fmtDate(a.createdAt)}`;
           }
         } catch (_) { /* 令牌失效等情况静默 */ }
+      }
+
+      const emailSaveBtn = $('btnEmailSave');
+      if (emailSaveBtn) on(emailSaveBtn, 'click', async () => {
+        const email = ($('emailInput') && $('emailInput').value || '').trim();
+        if (!email) return UI.alert('绑定邮箱', '请输入邮箱');
+        try {
+          const res = await global.ApiUtils.post('/api/account/email', { token: sessionToken(), email });
+          toast('验证邮件已发送，请查收');
+          if (res && res.email && $('emailInput')) $('emailInput').value = res.email;
+          if ($('emailStatus')) $('emailStatus').textContent = '未验证';
+        } catch (e) {
+          UI.alert('发送失败', (e && e.message) || '邮件服务不可用，请联系管理员');
+        }
+      });
+
+      // 邮箱验证链接：/profile?emailToken=...
+      const verifyToken = new URLSearchParams(location.search).get('emailToken');
+      if (verifyToken) {
+        fetch('/api/account/email/verify', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: verifyToken }),
+        }).then((r) => r.json()).then((d) => {
+          if (d && d.ok) { toast('邮箱已验证'); loadMyProfile(); }
+          else UI.alert('邮箱验证失败', (d && d.error) || '链接无效或已过期');
+        }).catch(() => {});
       }
 
       on($('btnSaveProfile'), 'click', async () => {
@@ -9896,6 +11045,38 @@
         global.Router.reload();
       });
 
+      // ---- 修改密码 / 退出所有设备 ----
+      on($('btnChangePassword'), 'click', async () => {
+        const currentPassword = $('pwCurrent').value;
+        const newPassword = $('pwNew').value;
+        if (!currentPassword || !newPassword) return UI.alert('修改密码', '请填写当前密码和新密码');
+        if (newPassword !== $('pwConfirm').value) return UI.alert('修改密码', '两次输入的新密码不一致');
+        try {
+          const res = await global.ApiUtils.post('/api/account/password/change', {
+            token: sessionToken(), currentPassword, newPassword,
+          });
+          if (!res.ok) return UI.alert('修改密码失败', res.error || '未知原因');
+          applySession(res.token, guest.name, '密码已更新，其他设备已下线');
+        } catch (e) { UI.alert('修改密码失败', (e && e.message) || '请稍后再试'); }
+      });
+
+      on($('btnLogoutAll'), 'click', async () => {
+        if (!global.confirm('确定退出所有设备？当前设备也会退出。')) return;
+        try {
+          await global.ApiUtils.post('/api/account/logout-all', { token: sessionToken() });
+        } catch (e) {
+          return UI.alert('退出失败', (e && e.message) || '请稍后再试');
+        }
+        localStorage.removeItem(SESSION_KEY);
+        const fresh = { id: global.NAV.genId(), name: global.NAV.randomName() };
+        global.NAV.saveGuest(fresh);
+        window.sessionStorage.setItem('tdshogi_flash', '已退出所有设备');
+        guest = fresh;
+        if (api.reconnectAs) api.reconnectAs(fresh.id);
+        if (global.NAV.refreshBadge) global.NAV.refreshBadge();
+        global.Router.reload();
+      });
+
       $('pName').textContent = guest.name;
       $('pId').textContent = isLoggedIn(guest.id) ? guest.id.split('.')[0] : guest.id;
 
@@ -9957,6 +11138,34 @@
 
       // 放在头像块之后：`renderAccountUI()` 会经 `renderAvatars()` 读 `myAvatar`
       renderAccountUI();
+
+      // 赛季快照（1.8）：只在开关开启时展示，失败静默
+      (async function loadSeasons() {
+        if (!global.FEATURES) return;
+        try { await global.FEATURES.ready; } catch (_) {}
+        if (!global.FEATURES.isOn('seasons')) return;
+        try {
+          const d = await global.ApiUtils.get('/api/seasons');
+          const list = (d.seasons || []).slice(0, 3);
+          if (!list.length) return;
+          const card = $('seasonsCard');
+          const box = $('seasonsList');
+          if (!card || !box) return;
+          card.style.display = '';
+          box.innerHTML = list.map((s) => {
+            const top = s.data && s.data.categories && s.data.categories.overall
+              ? s.data.categories.overall.slice(0, 3) : [];
+            return `<div style="padding:7px 0;border-bottom:1px dashed var(--border);">
+              <div style="font-size:13px;font-weight:700;">${UI.esc(s.name)}
+                <span style="font-size:11px;color:var(--text-dim);">${s.status === 'closed' ? '已结算' : '进行中'}</span>
+              </div>
+              <div style="font-size:12px;color:var(--text-dim);">${top.length
+                ? top.map((x, i) => `${i + 1}. ${UI.esc(x.name)}（${x.rating}）`).join(' · ')
+                : '结算后展示总榜前 3'}</div>
+            </div>`;
+          }).join('');
+        } catch (_) { /* 赛季未开放 / 网络失败不影响个人页 */ }
+      })();
 
       // 游客改名（免费，WS rename）
       on($('btnRename'), 'click', () => {
@@ -10034,6 +11243,12 @@
           if (expEl) {
             const need = Math.pow(2, Math.min((p.level || 0) + 1, 64) + 1) - 2;
             expEl.textContent = p.level >= 64 ? `满级 · 经验 ${p.exp}` : `经验 ${p.exp} / ${need}`;
+          }
+          const catBox = $('pCategoryRatings');
+          if (catBox) {
+            catBox.innerHTML = Object.entries(p.categories || {}).map(([, c]) =>
+              `<span style="display:inline-block;margin-right:8px;">${esc(c.label || '')} <b style="color:var(--gold-light);">${c.unrated ? '未定级' : c.rating}</b>${c.games ? ` <span>(${c.games}局)</span>` : ''}</span>`
+            ).join('');
           }
           $('sGames').textContent = p.games;
           $('sWins').textContent = p.wins;
@@ -10336,7 +11551,7 @@
           const unlocked = unlockHint(it);
           const audioSrc = it.asset && it.asset.kind === 'audio' && it.asset.value ? it.asset.value : null;
           const previewBtn = audioSrc
-            ? `<button class="btn btn-ghost btn-sm shop-preview" data-preview="${esc(audioSrc)}" type="button" title="试听">▶ 试听</button>`
+            ? `<button class="btn btn-ghost btn-sm shop-preview" data-preview="${esc(audioSrc)}" type="button" title="试听" aria-label="试听">▶</button>`
             : '';
           let action;
           if (equippedSlot) {
@@ -10451,7 +11666,9 @@
           if (previewEl) { try { previewEl.pause(); } catch (_) {} previewEl = null; }
           container.querySelectorAll('.shop-preview.playing').forEach((b) => {
             b.classList.remove('playing');
-            b.textContent = '▶ 试听';
+            b.textContent = '▶';
+            b.title = '试听';
+            b.setAttribute('aria-label', '试听');
           });
           // 试听结束 → 恢复 BGM（2026-10-08：试听时停 BGM）
           if (window.Sound && window.Sound.bgmResumeFromPreview) window.Sound.bgmResumeFromPreview();
@@ -10473,7 +11690,9 @@
             if (p && p.catch) p.catch(() => { stopPreview(); note('试听被浏览器拦截，请再点一次', true); });
             previewEl = a;
             btn.classList.add('playing');
-            btn.textContent = '■ 停止';
+            btn.textContent = '■';
+            btn.title = '停止试听';
+            btn.setAttribute('aria-label', '停止试听');
           } catch (_) { note('试听失败', true); stopPreview(); }
         }
         // SPA：切页时停掉试听、恢复 BGM（否则音频会跟到别的页面继续响）
@@ -10602,6 +11821,1357 @@
   };
 
   global.Views.profile = View;
+})(window);
+
+/* ==== js/friends.js ==== */
+'use strict';
+
+/**
+ * friends.js — 好友 / 关注 / 拉黑 / 约战（1.7）。
+ *
+ * 所有写操作走 REST；WS 事件只用于提示和约战接受后的跳转。
+ * 只有登录账号可使用；游客显示登录引导。
+ */
+(function (global) {
+  'use strict';
+
+  const UI = global.UI;
+  const TC = [
+    ['10:00', '10 分包干'],
+    ['10+30', '10 分 + 30 秒'],
+    ['15+60', '15 分 + 60 秒'],
+    ['10sec', '10 秒快棋'],
+  ];
+
+  const View = {
+    title: '好友与约战 · TDShogi',
+
+    render() {
+      return `
+  <main class="container">
+    <div class="card fr-card">
+      <div class="fr-head">
+        <div>
+          <div class="fr-title">好友与约战</div>
+          <div class="fr-sub" id="frStats">登录后可使用好友、关注和约战。</div>
+        </div>
+        <a class="btn btn-ghost btn-sm" href="profile.html">个人页</a>
+      </div>
+
+      <div id="frGuest" class="fr-placeholder" style="display:none;">
+        好友功能需要正式账号。请先到个人页注册或登录。
+      </div>
+
+      <div id="frBody" style="display:none;">
+        <div class="fr-toolbar">
+          <input class="input" id="frTarget" placeholder="账号 ID 或用户名" style="max-width:240px;">
+          <button class="btn btn-primary btn-sm" id="frAdd">加好友</button>
+          <button class="btn btn-ghost btn-sm" id="frFollow">关注</button>
+          <button class="btn btn-ghost btn-sm" id="frBlock" style="color:var(--red-light);">拉黑</button>
+          <span style="margin-left:auto;font-size:12px;color:var(--text-dim);">约战时制</span>
+          <select class="input" id="frTimeControl" style="max-width:150px;">
+            ${TC.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}
+          </select>
+        </div>
+
+        <div class="fr-section">
+          <div class="fr-section-title">好友</div>
+          <div id="frFriends" class="fr-list"></div>
+        </div>
+
+        <div class="fr-section">
+          <div class="fr-section-title">约战</div>
+          <div id="frChallenges" class="fr-list"></div>
+        </div>
+
+        <div class="fr-section">
+          <div class="fr-section-title">关注 / 粉丝</div>
+          <div id="frFollows" class="fr-list"></div>
+        </div>
+
+        <div class="fr-section">
+          <div class="fr-section-title">已拉黑</div>
+          <div id="frBlocked" class="fr-list"></div>
+        </div>
+      </div>
+    </div>
+  </main>`;
+    },
+
+    mount() {
+      this._teardown = [];
+      let alive = true;
+      const teardown = this._teardown;
+      let timer = null;
+      let data = null;
+      teardown.push(() => { alive = false; if (timer) clearInterval(timer); });
+      const $ = (id) => UI.$(id);
+      const esc = (s) => UI.esc(s);
+      const toast = (m) => UI.toast(m);
+      const guest = global.NAV.getGuest();
+      const isAccount = typeof guest.id === 'string' && guest.id.includes('.');
+      const token = guest.id;
+      const q = `token=${encodeURIComponent(token)}`;
+
+      if (!isAccount) {
+        $('frGuest').style.display = '';
+        $('frBody').style.display = 'none';
+        $('frStats').textContent = '当前为游客身份';
+        return;
+      }
+      $('frGuest').style.display = 'none';
+      $('frBody').style.display = '';
+
+      async function apiGet(path) {
+        const r = await fetch(`${path}${path.includes('?') ? '&' : '?'}${q}`);
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) throw new Error((d && d.error) || `请求失败（HTTP ${r.status}）`);
+        return d;
+      }
+      async function apiPost(path, body) {
+        const r = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.assign({ token }, body || {})),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) throw new Error((d && d.error) || `请求失败（HTTP ${r.status}）`);
+        return d;
+      }
+
+      const avatar = (p) => {
+        if (UI.avatarHtml) return UI.avatarHtml({ avatar: p && p.avatar, name: (p && p.name) || '?', size: 30 });
+        return esc(((p && p.name) || '?').slice(0, 1));
+      };
+      const nameOf = (p) => esc((p && p.name) || (p && p.id) || '未知');
+      const tcLabel = (id) => (TC.find((x) => x[0] === id) || [id, id])[1];
+
+      function stats() {
+        if (!data) return;
+        const friends = data.friends.filter((f) => f.status === 'accepted');
+        const online = friends.filter((f) => f.online).length;
+        const pending = data.friends.filter((f) => f.status === 'pending' && f.incoming).length;
+        $('frStats').textContent = `好友 ${friends.length} · 在线 ${online}${pending ? ` · 待处理申请 ${pending}` : ''}`;
+      }
+
+      function friendRow(f) {
+        const p = f.profile || { id: f.id, name: f.id };
+        const pending = f.status === 'pending';
+        if (pending && f.incoming) {
+          return `<div class="fr-row">
+            ${avatar(p)}<div class="fr-who"><b>${nameOf(p)}</b><span>请求加你为好友</span></div>
+            <button class="btn btn-primary btn-sm" data-fr-act="accept" data-id="${esc(f.id)}">接受</button>
+            <button class="btn btn-ghost btn-sm" data-fr-act="reject" data-id="${esc(f.id)}">拒绝</button>
+          </div>`;
+        }
+        if (pending) {
+          return `<div class="fr-row">${avatar(p)}<div class="fr-who"><b>${nameOf(p)}</b><span>等待对方接受</span></div>
+            <button class="btn btn-ghost btn-sm" data-fr-act="remove" data-id="${esc(f.id)}">取消</button></div>`;
+        }
+        return `<div class="fr-row">
+          ${avatar(p)}<div class="fr-who"><b>${nameOf(p)}</b><span class="${f.online ? 'on' : ''}">${f.online ? '在线' : '离线'}</span></div>
+          <button class="btn btn-primary btn-sm" data-fr-act="challenge" data-id="${esc(f.id)}" ${f.online ? '' : 'disabled'}>约战</button>
+          <button class="btn btn-ghost btn-sm" data-fr-act="remove" data-id="${esc(f.id)}">移除</button>
+          <button class="btn btn-ghost btn-sm" data-fr-act="block" data-id="${esc(f.id)}" style="color:var(--red-light);">拉黑</button>
+        </div>`;
+      }
+
+      function renderFriends() {
+        const list = (data && data.friends) || [];
+        $('frFriends').innerHTML = list.length
+          ? list.map(friendRow).join('')
+          : '<div class="fr-empty">还没有好友。输入账号 ID 或用户名添加。</div>';
+      }
+
+      function renderChallenges() {
+        const list = (data && data.challenges) || [];
+        if (!list.length) { $('frChallenges').innerHTML = '<div class="fr-empty">暂无约战。</div>'; return; }
+        $('frChallenges').innerHTML = list.map((c) => {
+          const other = c.incoming ? c.from : c.to;
+          const p = other || { id: c.fromId };
+          const state = c.status === 'accepted'
+            ? `<button class="btn btn-primary btn-sm" data-fr-act="enter" data-room="${esc(c.roomId || '')}">进入房间 ${esc(c.code || '')}</button>`
+            : (c.incoming
+              ? `<button class="btn btn-primary btn-sm" data-fr-act="ch-accept" data-id="${esc(c.id)}">接受</button>
+                 <button class="btn btn-ghost btn-sm" data-fr-act="ch-decline" data-id="${esc(c.id)}">拒绝</button>`
+              : '<span class="fr-wait">等待对方接受</span>');
+          return `<div class="fr-row">
+            ${avatar(p)}<div class="fr-who"><b>${nameOf(p)}</b><span>${c.status === 'accepted' ? '已接受' : (c.incoming ? '向你发起约战' : '你发起约战')} · ${esc(tcLabel(c.timeControl))}</span></div>
+            ${state}
+          </div>`;
+        }).join('');
+      }
+
+      function renderFollows() {
+        const box = $('frFollows');
+        const follow = (data && data.following) || [];
+        const fans = (data && data.followers) || [];
+        const row = (x, mode) => {
+          const p = x.profile || { id: x.id };
+          return `<div class="fr-row">${avatar(p)}<div class="fr-who"><b>${nameOf(p)}</b><span>${x.online ? '在线' : '离线'}</span></div>
+            <button class="btn btn-ghost btn-sm" data-fr-act="${mode === 'following' ? 'unfollow' : 'follow'}" data-id="${esc(x.id)}">${mode === 'following' ? '取消关注' : '回关'}</button>
+            <button class="btn btn-ghost btn-sm" data-fr-act="block" data-id="${esc(x.id)}" style="color:var(--red-light);">拉黑</button>
+          </div>`;
+        };
+        box.innerHTML = (follow.length || fans.length)
+          ? `<div class="fr-subtitle">关注 ${follow.length}</div>${follow.map((x) => row(x, 'following')).join('')}
+             <div class="fr-subtitle">粉丝 ${fans.length}</div>${fans.map((x) => row(x, 'follower')).join('')}`
+          : '<div class="fr-empty">暂无关注。</div>';
+      }
+
+      function renderBlocked() {
+        const list = (data && data.blocked) || [];
+        $('frBlocked').innerHTML = list.length
+          ? list.map((x) => {
+            const p = x.profile || { id: x.id };
+            return `<div class="fr-row">${avatar(p)}<div class="fr-who"><b>${nameOf(p)}</b></div>
+              <button class="btn btn-ghost btn-sm" data-fr-act="unblock" data-id="${esc(x.id)}">解除拉黑</button></div>`;
+          }).join('')
+          : '<div class="fr-empty">没有拉黑任何人。</div>';
+      }
+
+      function renderAll() {
+        if (!data) return;
+        stats();
+        renderFriends();
+        renderChallenges();
+        renderFollows();
+        renderBlocked();
+      }
+
+      async function load() {
+        try {
+          data = await apiGet('/api/social/overview');
+          if (!alive) return;
+          renderAll();
+        } catch (e) {
+          if (!alive) return;
+          $('frStats').textContent = e.message || '加载失败';
+        }
+      }
+
+      async function act(fn, okMsg) {
+        try {
+          const r = await fn();
+          if (!alive) return;
+          if (okMsg) toast(okMsg);
+          await load();
+          return r;
+        } catch (e) {
+          if (!alive) return;
+          toast(e.message || '操作失败');
+          return null;
+        }
+      }
+
+      function target() {
+        const el = $('frTarget');
+        return el ? el.value.trim() : '';
+      }
+
+      async function onAction(e) {
+        const btn = e.target.closest && e.target.closest('[data-fr-act]');
+        if (!btn) return;
+        const what = btn.getAttribute('data-fr-act');
+        const id = btn.getAttribute('data-id');
+        if (what === 'accept') return act(() => apiPost('/api/social/friends/respond', { from: id, accept: true }), '已添加好友');
+        if (what === 'reject') return act(() => apiPost('/api/social/friends/respond', { from: id, accept: false }), '已拒绝');
+        if (what === 'remove') return act(() => apiPost('/api/social/friends/remove', { target: id }), '已移除');
+        if (what === 'block') return act(() => apiPost('/api/social/block', { target: id }), '已拉黑');
+        if (what === 'unblock') return act(() => apiPost('/api/social/block', { target: id, off: true }), '已解除拉黑');
+        if (what === 'follow') return act(() => apiPost('/api/social/follow', { target: id }), '已关注');
+        if (what === 'unfollow') return act(() => apiPost('/api/social/follow', { target: id, off: true }), '已取消关注');
+        if (what === 'challenge') {
+          const tc = $('frTimeControl') ? $('frTimeControl').value : '10:00';
+          return act(() => apiPost('/api/social/challenges', { target: id, timeControl: tc }), '约战已发送');
+        }
+        if (what === 'ch-accept') {
+          const r = await act(() => apiPost(`/api/social/challenges/${encodeURIComponent(id)}/respond`, { accept: true }), '已接受约战');
+          if (r && r.roomId && global.Router) global.Router.navigate(`play.html?room=${encodeURIComponent(r.roomId)}`);
+          return;
+        }
+        if (what === 'ch-decline') return act(() => apiPost(`/api/social/challenges/${encodeURIComponent(id)}/respond`, { accept: false }), '已拒绝约战');
+        if (what === 'enter' && btn.getAttribute('data-room')) {
+          global.Router.navigate(`play.html?room=${encodeURIComponent(btn.getAttribute('data-room'))}`);
+        }
+      }
+
+      function bind(id, ev, fn) {
+        const el = $(id);
+        if (!el) return;
+        el.addEventListener(ev, fn);
+        teardown.push(() => el.removeEventListener(ev, fn));
+      }
+      bind('frAdd', 'click', () => { if (!target()) return toast('请输入账号 ID 或用户名'); act(() => apiPost('/api/social/friends/request', { target: target() }), '好友申请已发送'); });
+      bind('frFollow', 'click', () => { if (!target()) return toast('请输入账号 ID 或用户名'); act(() => apiPost('/api/social/follow', { target: target() }), '已关注'); });
+      bind('frBlock', 'click', () => { if (!target()) return toast('请输入账号 ID 或用户名'); act(() => apiPost('/api/social/block', { target: target() }), '已拉黑'); });
+      const body = $('frBody');
+      if (body) {
+        body.addEventListener('click', onAction);
+        teardown.push(() => body.removeEventListener('click', onAction));
+      }
+
+      const subs = [];
+      if (global.API && global.API.on) {
+        subs.push(global.API.on('friend_request', () => { toast('收到好友申请'); load(); }));
+        subs.push(global.API.on('friend_accepted', () => { toast('好友申请已通过'); load(); }));
+        subs.push(global.API.on('challenge_created', (d) => {
+          const from = d && d.from ? d.from.name : '';
+          toast(from ? `${from} 向你发起约战` : '收到约战');
+          load();
+        }));
+        subs.push(global.API.on('challenge_answered', (d) => {
+          // 接受约战的跳转由 boot 的全局处理器负责；这里只在被拒绝时刷新列表。
+          if (!(d && d.accepted)) load();
+        }));
+        subs.forEach((fn) => teardown.push(fn));
+      }
+
+      load();
+      timer = setInterval(() => { if (alive) load(); }, 12000);
+    },
+
+    unmount() {
+      (this._teardown || []).forEach((fn) => { try { fn(); } catch (_) {} });
+      this._teardown = [];
+    },
+  };
+
+  global.Views = global.Views || {};
+  global.Views.friends = View;
+})(window);
+
+/* ==== js/notifications.js ==== */
+'use strict';
+
+/**
+ * notifications.js — 站内通知中心（1.7）。
+ * 好友申请、约战、异步长局轮次与结果在这里补课；实时事件仍走 WS。
+ */
+(function (global) {
+  'use strict';
+  const UI = global.UI;
+
+  const ICONS = {
+    friend_request: '👥',
+    friend_accepted: '🤝',
+    challenge_created: '⚔️',
+    challenge_answered: '⚔️',
+    corr_created: '📮',
+    corr_move: '⏳',
+    corr_finished: '🏁',
+    tournament_match_started: '🏆',
+  };
+
+  function accountToken() {
+    const g = global.NAV && global.NAV.getGuest ? global.NAV.getGuest() : null;
+    return g && typeof g.id === 'string' && g.id.includes('.') ? g.id : '';
+  }
+
+  async function api(path, opts = {}) {
+    const headers = Object.assign({}, opts.headers || {});
+    const token = accountToken();
+    if (token) headers['X-Account-Token'] = token;
+    const r = await fetch(path, Object.assign({}, opts, { headers }));
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.ok === false) throw new Error(d.error || `请求失败（HTTP ${r.status}）`);
+    return d;
+  }
+
+  const View = {
+    title: '通知 · TDShogi',
+    render() {
+      return `
+  <main class="container">
+    <div class="card pz-card">
+      <div class="pz-head">
+        <div>
+          <div class="pz-title">通知中心</div>
+          <div class="pz-sub" id="notifStats">加载中…</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="notifReadAll" type="button">全部已读</button>
+      </div>
+      <div id="notifList"><div class="pz-placeholder">加载中…</div></div>
+      <div style="text-align:center;margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" id="notifMore" type="button" style="display:none;">加载更多</button>
+      </div>
+      <div class="pz-hint">好友申请、约战和异步长局轮次会保留在这里；每人只保留最近 200 条。</div>
+    </div>
+  </main>`;
+    },
+    mount() {
+      this._teardown = [];
+      const $ = (id) => UI.$(id);
+      const esc = (s) => UI.esc(s);
+      const toast = (m) => UI.toast(m);
+      let alive = true;
+      const PAGE = 30;
+      let offset = 0;
+      const token = accountToken();
+
+      if (!token) {
+        $('notifStats').textContent = '登录账号后查看通知。';
+        $('notifList').innerHTML = '<div class="pz-placeholder">游客不会收到好友 / 约战 / 异步长局通知。</div>';
+        $('notifReadAll').style.display = 'none';
+        return;
+      }
+
+      const fmt = (ts) => (global.I18N && global.I18N.fmt ? global.I18N.fmt(ts) : new Date(ts).toLocaleString());
+
+      function rowHtml(n) {
+        const link = typeof (n.data && n.data.link) === 'string' && n.data.link.startsWith('/') ? n.data.link : '';
+        return `
+          <div class="notif-item${n.read ? '' : ' unread'}">
+            <div class="notif-icon" aria-hidden="true">${ICONS[n.type] || '🔔'}</div>
+            <div class="notif-main">
+              <div class="notif-title">${esc(n.title || '通知')}</div>
+              <div class="notif-body">${esc(n.body || '')}</div>
+              <div class="notif-time">${fmt(n.createdAt)}</div>
+            </div>
+            <div class="notif-actions">
+              ${link ? `<a class="btn btn-ghost btn-sm" href="${esc(link)}" data-notif-link="${esc(n.id)}">查看</a>` : ''}
+              ${n.read ? '' : `<button class="btn btn-ghost btn-sm" type="button" data-notif-read="${esc(n.id)}">已读</button>`}
+            </div>
+          </div>`;
+      }
+
+      async function load(reset = true) {
+        try {
+          if (reset) offset = 0;
+          const d = await api(`/api/notifications?limit=${PAGE}&offset=${offset}`);
+          if (!alive) return;
+          const items = d.items || [];
+          $('notifStats').textContent = d.unread ? `${d.unread} 条未读` : '没有未读通知';
+          $('notifReadAll').disabled = !d.unread;
+          if (reset) {
+            $('notifList').innerHTML = items.length
+              ? items.map(rowHtml).join('')
+              : '<div class="pz-placeholder">暂时没有通知。</div>';
+          } else if (items.length) {
+            $('notifList').insertAdjacentHTML('beforeend', items.map(rowHtml).join(''));
+          }
+          offset += items.length;
+          const more = $('notifMore');
+          if (more) more.style.display = items.length === PAGE ? '' : 'none';
+          if (global.NAV && global.NAV.refreshNotifications) global.NAV.refreshNotifications();
+        } catch (e) {
+          if (!alive) return;
+          if (reset) $('notifList').innerHTML = `<div class="pz-placeholder">${esc(e.message)}</div>`;
+          else toast(e.message);
+        }
+      }
+
+      async function markRead(id) {
+        try {
+          await api('/api/notifications/read', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id }),
+          });
+        } catch (_) { /* 标记失败不拦跳转 */ }
+      }
+
+      const onClick = async (ev) => {
+        const readBtn = ev.target.closest('[data-notif-read]');
+        if (readBtn) {
+          ev.preventDefault();
+          await markRead(readBtn.getAttribute('data-notif-read'));
+          load(true);
+          return;
+        }
+        const link = ev.target.closest('[data-notif-link]');
+        if (!link) return;
+        ev.preventDefault();
+        await markRead(link.getAttribute('data-notif-link'));
+        const href = link.getAttribute('href');
+        if (global.Router && global.Router.navigate) global.Router.navigate(href);
+        else location.href = href;
+      };
+      $('notifList').addEventListener('click', onClick);
+      this._teardown.push(() => $('notifList') && $('notifList').removeEventListener('click', onClick));
+
+      const readAll = async () => {
+        try {
+          await api('/api/notifications/read-all', { method: 'POST' });
+          toast('已全部标记为已读');
+          load(true);
+        } catch (e) { toast(e.message); }
+      };
+      $('notifReadAll').addEventListener('click', readAll);
+      this._teardown.push(() => $('notifReadAll') && $('notifReadAll').removeEventListener('click', readAll));
+
+      const loadMore = () => load(false);
+      $('notifMore').addEventListener('click', loadMore);
+      this._teardown.push(() => $('notifMore') && $('notifMore').removeEventListener('click', loadMore));
+
+      const EVENT_TYPES = [
+        'friend_request', 'friend_accepted', 'challenge_created', 'challenge_answered',
+        'corr_created', 'corr_move', 'corr_finished', 'tournament_match_started',
+      ];
+      const offs = global.API && global.API.on
+        ? EVENT_TYPES.map((type) => global.API.on(type, () => load()))
+        : [];
+      this._teardown.push(...offs);
+
+      load();
+      this._alive = () => { alive = false; };
+    },
+    unmount() {
+      if (this._alive) this._alive();
+      (this._teardown || []).forEach((fn) => { try { fn(); } catch (_) {} });
+      this._teardown = [];
+    },
+  };
+
+  global.Views = global.Views || {};
+  global.Views.notifications = View;
+})(window);
+
+/* ==== js/reset.js ==== */
+'use strict';
+
+/**
+ * reset.js — 密码找回 / 重置页（1.7）。
+ * 无 token：输入用户名或已验证邮箱申请重置；带 token：设置新密码。
+ */
+(function (global) {
+  'use strict';
+
+  const View = {
+    title: '找回密码 · TDShogi',
+    render() {
+      const token = new URLSearchParams(location.search).get('token') || '';
+      return `
+  <main class="container">
+    <div class="card" style="padding:22px;max-width:480px;margin:32px auto;">
+      <div style="font-size:18px;font-weight:800;color:var(--gold-light);margin-bottom:8px;">找回密码</div>
+      <div id="resetNoToken" style="display:${token ? 'none' : 'block'};">
+        <div style="font-size:12px;color:var(--text-dim);line-height:1.8;margin-bottom:12px;">
+          输入账号用户名或已验证邮箱。若账号存在且邮箱已验证，会收到重置链接。
+        </div>
+        <input class="input" id="resetIdentifier" placeholder="用户名或邮箱" style="margin-bottom:10px;">
+        <button class="btn btn-primary" id="btnForgot" style="width:100%;">发送重置邮件</button>
+      </div>
+      <div id="resetWithToken" style="display:${token ? 'block' : 'none'};">
+        <div style="font-size:12px;color:var(--text-dim);line-height:1.8;margin-bottom:12px;">
+          设置新密码。提交后该账号所有旧会话会立即失效。
+        </div>
+        <input type="password" class="input" id="resetPassword" placeholder="新密码（至少 8 位）" style="margin-bottom:10px;">
+        <input type="password" class="input" id="resetPassword2" placeholder="确认新密码" style="margin-bottom:10px;">
+        <button class="btn btn-primary" id="btnReset" style="width:100%;">设置新密码</button>
+      </div>
+      <div id="resetMsg" role="status" aria-live="polite" style="margin-top:12px;font-size:12px;color:var(--gold-light);line-height:1.7;"></div>
+      <div style="margin-top:16px;"><a class="btn btn-ghost btn-sm" href="index.html">返回首页</a></div>
+    </div>
+  </main>`;
+    },
+    mount() {
+      this._teardown = [];
+      const $ = (id) => global.UI.$(id);
+      const toast = (m) => global.UI.toast(m);
+      const token = new URLSearchParams(location.search).get('token') || '';
+      const teardown = this._teardown;
+      const msg = (text, err) => {
+        const el = $('resetMsg');
+        if (!el) return;
+        el.textContent = text;
+        el.style.color = err ? 'var(--red-light)' : 'var(--gold-light)';
+      };
+      const on = (id, fn) => {
+        const el = $(id);
+        if (!el) return;
+        el.addEventListener('click', fn);
+        teardown.push(() => el.removeEventListener('click', fn));
+      };
+
+      on('btnForgot', async () => {
+        const identifier = (($('resetIdentifier') && $('resetIdentifier').value) || '').trim();
+        if (!identifier) return msg('请输入用户名或邮箱', true);
+        msg('正在发送…');
+        try {
+          const r = await fetch('/api/account/password/forgot', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identifier }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) return msg(d.error || '发送失败', true);
+          msg(d.message || '如果该账号存在，重置邮件会很快送达');
+        } catch (_) { msg('发送失败，请稍后重试', true); }
+      });
+
+      on('btnReset', async () => {
+        const p1 = (($('resetPassword') && $('resetPassword').value) || '');
+        const p2 = (($('resetPassword2') && $('resetPassword2').value) || '');
+        if (!p1 || p1 !== p2) return msg('两次密码不一致', true);
+        msg('正在重置…');
+        try {
+          const r = await fetch('/api/account/password/reset', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token, password: p1 }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) return msg(d.error || '重置失败', true);
+          toast('密码已重置，请重新登录');
+          msg('密码已重置。旧会话已失效，请用新密码登录。');
+          setTimeout(() => global.Router.navigate('profile.html'), 800);
+        } catch (_) { msg('重置失败，请稍后重试', true); }
+      });
+    },
+    unmount() {
+      (this._teardown || []).forEach((fn) => { try { fn(); } catch (_) {} });
+      this._teardown = [];
+    },
+  };
+
+  global.Views = global.Views || {};
+  global.Views.reset = View;
+})(window);
+
+/* ==== js/correspondence.js ==== */
+'use strict';
+
+/**
+ * correspondence.js — 异步长局页面（1.8）。
+ * 列表/创建/棋盘都走 REST；每步按天计时，WS 只做提醒和刷新。
+ */
+(function (global) {
+  'use strict';
+
+  const UI = global.UI;
+  const DAY = 24 * 60 * 60 * 1000;
+
+  function fmtDeadline(ts) {
+    if (!ts) return '—';
+    const ms = ts - Date.now();
+    if (ms <= 0) return '已超时';
+    const h = Math.floor(ms / 3600000);
+    if (h >= 24) return `${Math.floor(h / 24)} 天 ${h % 24} 小时`;
+    return `${h} 小时 ${Math.floor((ms % 3600000) / 60000)} 分`;
+  }
+
+  const View = {
+    title: '异步长局 · TDShogi',
+    render() {
+      return `
+  <main class="container">
+    <div class="card pz-card">
+      <div class="pz-head">
+        <div>
+          <div class="pz-title">异步长局</div>
+          <div class="pz-sub" id="corrStats">每步 1/3/7 天，适合跨时区与忙时对局。</div>
+        </div>
+        <a class="btn btn-ghost btn-sm" href="index.html">返回首页</a>
+      </div>
+      <div id="corrGuest" class="pz-placeholder" style="display:none;">异步长局需要正式账号，请先登录。</div>
+      <div id="corrList" style="display:none;">
+        <div class="fr-toolbar" style="margin-bottom:12px;">
+          <input class="input" id="corrTarget" placeholder="对手账号 ID 或用户名" style="max-width:230px;">
+          <select class="input" id="corrDays" style="max-width:130px;"><option value="1">每步 1 天</option><option value="3">每步 3 天</option><option value="7">每步 7 天</option></select>
+          <select class="input" id="corrSide" style="max-width:110px;"><option value="b">执先</option><option value="w">执后</option></select>
+          <button class="btn btn-primary btn-sm" id="corrCreate">邀请对局</button>
+        </div>
+        <div id="corrGames"></div>
+      </div>
+      <div id="corrGameView" style="display:none;">
+        <div id="corrGameInfo" style="font-size:12px;color:var(--text-dim);margin-bottom:8px;"></div>
+        <div class="pz-board-area play-main">
+          <div class="board-area">
+            <div class="hand-row" id="corrOppHand"><span class="hand-label">持驹</span><div class="hand-pieces" id="corrOppHandPieces"></div></div>
+            <div class="board-wrap" id="corrBoard"></div>
+            <div class="hand-row" id="corrMyHand"><span class="hand-label">持驹</span><div class="hand-pieces" id="corrMyHandPieces"></div></div>
+          </div>
+        </div>
+        <div class="pz-msg" id="corrMsg" role="status" aria-live="polite"></div>
+        <div class="pz-actions">
+          <button class="btn btn-ghost btn-sm" id="corrBack" type="button">返回列表</button>
+          <button class="btn btn-ghost btn-sm" id="corrOfferDraw" type="button">提和</button>
+          <button class="btn btn-primary btn-sm" id="corrAcceptDraw" type="button" style="display:none;">同意和棋</button>
+          <button class="btn btn-ghost btn-sm" id="corrDeclineDraw" type="button" style="display:none;">拒绝和棋</button>
+          <button class="btn btn-ghost btn-sm" id="corrAbort" type="button" style="display:none;">中止对局</button>
+          <button class="btn btn-ghost btn-sm" id="corrResign" type="button" style="color:var(--red-light);">认输</button>
+        </div>
+      </div>
+    </div>
+  </main>`;
+    },
+    mount(container, params) {
+      this._teardown = [];
+      let alive = true;
+      let timer = null;
+      const teardown = this._teardown;
+      const $ = (id) => UI.$(id);
+      const esc = (s) => UI.esc(s);
+      const toast = (m) => UI.toast(m);
+      const guest = global.NAV.getGuest();
+      const isAccount = typeof guest.id === 'string' && guest.id.includes('.');
+      const token = guest.id;
+      const q = `token=${encodeURIComponent(token)}`;
+      const id = (params && params.id) || new URLSearchParams(location.search).get('id') || '';
+      let fb = null;
+      let board = null;
+      let current = null;
+      let viewpoint = 'b';
+
+      if (!isAccount) { $('corrGuest').style.display = ''; return; }
+      $('corrList').style.display = '';
+
+      async function apiGet(path) {
+        const r = await fetch(`${path}${path.includes('?') ? '&' : '?'}${q}`);
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) throw new Error(d.error || `请求失败（HTTP ${r.status}）`);
+        return d;
+      }
+      async function apiPost(path, body) {
+        const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ token }, body || {})) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) throw new Error(d.error || `请求失败（HTTP ${r.status}）`);
+        return d;
+      }
+
+      function statusText(g) {
+        if (g.status !== 'playing') return g.resultDetail || '已结束';
+        return g.myTurn ? '轮到你走' : `等待 ${g.opponent ? g.opponent.name : '对手'}`;
+      }
+
+      function renderList(d) {
+        const games = d.games || [];
+        $('corrStats').textContent = `共 ${games.length} 局 · 每步 1/3/7 天 · 不计 ELO`;
+        $('corrGames').innerHTML = games.length ? games.map((g) => `
+          <div class="fr-row">
+            <div class="fr-who"><b>${esc(g.opponent ? g.opponent.name : g.opponentId)}</b>
+              <span>${esc(statusText(g))} · 每步 ${Math.round(g.timePerMoveMs / DAY)} 天 · ${g.moves} 手${g.status === 'playing' ? ` · ${esc(fmtDeadline(g.deadline))}` : ''}</span></div>
+            <button class="btn ${g.myTurn ? 'btn-primary' : 'btn-ghost'} btn-sm" data-corr-open="${esc(g.id)}" type="button">打开</button>
+          </div>`).join('') : '<div class="fr-empty">暂无长局。输入对手账号发起一局。</div>';
+        $('corrGames').onclick = (e) => {
+          const b = e.target.closest && e.target.closest('[data-corr-open]');
+          if (b) global.Router.navigate(`correspondence.html?id=${encodeURIComponent(b.getAttribute('data-corr-open'))}`);
+        };
+      }
+
+      async function loadList() {
+        try {
+          const d = await apiGet('/api/correspondence');
+          if (alive) renderList(d);
+        } catch (e) { if (alive) $('corrStats').textContent = e.message; }
+      }
+
+      function ensureBoard(st, g) {
+        if (fb) return;
+        board = new global.ShogiBoard($('corrBoard'), {});
+        viewpoint = g.seat === 'w' ? 'w' : 'b';
+        fb = new global.FreeBoard({
+          board, viewpoint, interactive: false, mode: 'play',
+          hands: { my: $('corrMyHandPieces'), myColor: viewpoint, opp: $('corrOppHandPieces'), oppColor: viewpoint === 'b' ? 'w' : 'b' },
+          onMove: (usi) => submitMove(usi),
+          onPromoteChoice: ({ usiMove, usiPromote }) => submitMove(global.confirm(`升变吗？\n不成：${usiMove}\n升变：${usiPromote}`) ? usiPromote : usiMove),
+        });
+        fb.attach();
+        fb.bindHands($('corrMyHandPieces'), viewpoint, $('corrOppHandPieces'), viewpoint === 'b' ? 'w' : 'b');
+      }
+
+      function applyState(st, g) {
+        if (!fb) ensureBoard(st, g);
+        const vp = g.seat === 'w' ? 'w' : 'b';
+        if (vp !== viewpoint) { viewpoint = vp; fb.setViewpoint(vp); }
+        fb.setModel({ board: st.board, hands: st.hands || { b: [], w: [] } }, st.lastMove || null);
+        fb.setLegalTargets(st.legalTargetsBySq || {});
+        const playing = g.status === 'playing';
+        const myTurn = playing && g.seat === st.turn;
+        fb.setInteractive(myTurn);
+        $('corrGameInfo').textContent = `${g.opponent ? g.opponent.name : ''} · 每步 ${Math.round(g.timePerMoveMs / DAY)} 天 · ${g.moves} 手 · ${statusText({ ...g, myTurn })} · ${fmtDeadline(g.deadline)}`;
+        const opponentOffer = playing && !!g.drawOfferBy && !g.drawOfferByMe;
+        let msg = g.status === 'playing' ? (myTurn ? '轮到你走。' : '等待对手走子。') : `对局结束：${g.resultDetail || g.result || ''}`;
+        if (opponentOffer) msg = '对方提议和棋，请选择同意或拒绝。';
+        else if (playing && g.drawOfferByMe) msg = '已提议和棋，等待对方回应。';
+        $('corrMsg').textContent = msg;
+        $('corrResign').style.display = playing ? '' : 'none';
+        $('corrOfferDraw').style.display = playing && !g.drawOfferBy ? '' : 'none';
+        $('corrAcceptDraw').style.display = opponentOffer ? '' : 'none';
+        $('corrDeclineDraw').style.display = opponentOffer ? '' : 'none';
+        $('corrAbort').style.display = playing && g.canAbort ? '' : 'none';
+      }
+
+      async function loadGame() {
+        if (!id) { $('corrGameView').style.display = 'none'; return; }
+        $('corrList').style.display = 'none';
+        $('corrGameView').style.display = '';
+        try {
+          const d = await apiGet(`/api/correspondence/${encodeURIComponent(id)}`);
+          if (!alive) return;
+          current = d.game;
+          applyState(d.game.state, d.game);
+        } catch (e) { if (alive) $('corrMsg').textContent = e.message; }
+      }
+
+      async function submitMove(usi) {
+        if (!current || current.status !== 'playing' || !id) return;
+        try {
+          const d = await apiPost(`/api/correspondence/${encodeURIComponent(id)}/move`, { usi });
+          if (!alive) return;
+          current = d.game;
+          applyState(d.game.state, d.game);
+          if (d.finished) toast('对局结束');
+        } catch (e) { if (alive) $('corrMsg').textContent = e.message; }
+      }
+
+      async function createGame() {
+        const target = ($('corrTarget') && $('corrTarget').value || '').trim();
+        if (!target) return toast('请输入对手账号 ID 或用户名');
+        try {
+          const d = await apiPost('/api/correspondence', {
+            target,
+            timePerMoveDays: Number($('corrDays').value),
+            side: $('corrSide').value,
+          });
+          toast('邀请已发出，对方可在长局列表中看到');
+          global.Router.navigate(`correspondence.html?id=${encodeURIComponent(d.game.id)}`);
+        } catch (e) { toast(e.message); }
+      }
+
+      async function resign() {
+        if (!id || !current) return;
+        if (!global.confirm('确认认输？')) return;
+        try { await apiPost(`/api/correspondence/${encodeURIComponent(id)}/resign`, {}); await loadGame(); } catch (e) { toast(e.message); }
+      }
+
+      async function offerDraw() {
+        if (!id || !current) return;
+        try { await apiPost(`/api/correspondence/${encodeURIComponent(id)}/draw-offer`, {}); toast('已提出和棋'); await loadGame(); } catch (e) { toast(e.message); }
+      }
+
+      async function respondDraw(accept) {
+        if (!id || !current) return;
+        if (!accept && !global.confirm('确认拒绝和棋？')) return;
+        try {
+          await apiPost(`/api/correspondence/${encodeURIComponent(id)}/draw-respond`, { accept });
+          toast(accept ? '已和棋' : '已拒绝');
+          await loadGame();
+        } catch (e) { toast(e.message); }
+      }
+
+      async function abortGame() {
+        if (!id || !current) return;
+        if (!global.confirm('确认中止这局？中止不计胜负。')) return;
+        try { await apiPost(`/api/correspondence/${encodeURIComponent(id)}/abort`, {}); await loadGame(); } catch (e) { toast(e.message); }
+      }
+
+      function bind(id, ev, fn) { const el = $(id); if (!el) return; el.addEventListener(ev, fn); teardown.push(() => el.removeEventListener(ev, fn)); }
+      bind('corrCreate', 'click', createGame);
+      bind('corrResign', 'click', resign);
+      bind('corrOfferDraw', 'click', offerDraw);
+      bind('corrAcceptDraw', 'click', () => respondDraw(true));
+      bind('corrDeclineDraw', 'click', () => respondDraw(false));
+      bind('corrAbort', 'click', abortGame);
+      bind('corrBack', 'click', () => global.Router.navigate('correspondence.html'));
+
+      const subs = [];
+      if (global.API && global.API.on) {
+        subs.push(global.API.on('corr_created', () => { if (!id) loadList(); }));
+        subs.push(global.API.on('corr_move', () => { if (id) loadGame(); else loadList(); }));
+        subs.push(global.API.on('corr_draw_offered', () => { if (id) loadGame(); }));
+        subs.push(global.API.on('corr_finished', () => { toast('长局已结束'); if (id) loadGame(); else loadList(); }));
+        subs.forEach((fn) => teardown.push(fn));
+      }
+
+      teardown.push(() => { if (fb) { try { fb.destroy(); } catch (_) {} fb = null; } });
+      if (id) loadGame(); else loadList();
+      timer = setInterval(() => { if (!alive) return; if (id) loadGame(); else loadList(); }, 15000);
+      teardown.push(() => { if (timer) clearInterval(timer); });
+    },
+    unmount() {
+      (this._teardown || []).forEach((fn) => { try { fn(); } catch (_) {} });
+      this._teardown = [];
+    },
+  };
+
+  global.Views = global.Views || {};
+  global.Views.correspondence = View;
+})(window);
+
+/* ==== js/study.js ==== */
+'use strict';
+
+/**
+ * study.js — 开局统计 + 研究收藏（1.9）。
+ * 开局统计只读公开棋谱摘要列；研究收藏按账号私有/公开保存棋谱链接。
+ */
+(function (global) {
+  'use strict';
+  const UI = global.UI;
+
+  const View = {
+    title: '研究 · TDShogi',
+    render() {
+      return `
+  <main class="container">
+    <div class="card pz-card">
+      <div class="pz-head">
+        <div>
+          <div class="pz-title">开局统计</div>
+          <div class="pz-sub" id="studyStats">按战法 / 围玉标签统计公开棋谱。</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <span style="font-size:12px;color:var(--text-dim);">按战法 / 围玉聚合</span>
+          <a class="btn btn-ghost btn-sm" href="gallery.html">棋谱广场</a>
+        </div>
+      </div>
+      <div id="studyList"><div class="pz-placeholder">加载中…</div></div>
+      <div class="pz-hint">统计只包含公开棋谱中带有「开局 / 战法 / 围玉」标签的对局；未标注棋谱归入未分类，不参与榜单。</div>
+    </div>
+
+    <div class="card pz-card" style="margin-top:16px;">
+      <div class="pz-head">
+        <div>
+          <div class="pz-title">研究收藏</div>
+          <div class="pz-sub">把棋谱整理成研究；公开研究所有人可看，私密研究仅自己可见。</div>
+        </div>
+      </div>
+      <div id="studyGuest" class="pz-placeholder" style="display:none;">登录账号后可创建研究；游客可以浏览公开研究。</div>
+      <div id="studyCollection">
+        <div class="fr-toolbar" id="studyCreateRow">
+          <input class="input" id="studyTitle" placeholder="研究标题" style="max-width:220px;">
+          <select class="input" id="studyVisibility" style="max-width:120px;"><option value="private">私密</option><option value="public">公开</option></select>
+          <button class="btn btn-primary btn-sm" id="studyCreate">新建研究</button>
+        </div>
+        <div id="studyStudies"><div class="fr-empty">加载中…</div></div>
+        <div id="studyDetail" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:10px;"></div>
+      </div>
+    </div>
+  </main>`;
+    },
+    mount() {
+      this._teardown = [];
+      let alive = true;
+      const teardown = this._teardown;
+      const $ = (id) => UI.$(id);
+      const esc = (s) => UI.esc(s);
+      const toast = (m) => UI.toast(m);
+      const guest = global.NAV.getGuest();
+      const isAccount = typeof guest.id === 'string' && guest.id.includes('.');
+      const token = isAccount ? guest.id : '';
+      const q = token ? `token=${encodeURIComponent(token)}` : '';
+      let openId = null;
+
+      async function apiGet(path) {
+        const r = await fetch(`${path}${path.includes('?') ? '&' : '?'}${q}`);
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) throw new Error(d.error || `请求失败（HTTP ${r.status}）`);
+        return d;
+      }
+      async function apiPost(path, body) {
+        const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ token }, body || {})) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) throw new Error(d.error || `请求失败（HTTP ${r.status}）`);
+        return d;
+      }
+      async function apiDelete(path) {
+        const r = await fetch(path, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) throw new Error(d.error || `请求失败（HTTP ${r.status}）`);
+        return d;
+      }
+
+      async function loadOpenings() {
+        try {
+          const r = await fetch('/api/studies/openings?limit=20');
+          const d = await r.json().catch(() => ({}));
+          if (!alive) return;
+          if (!r.ok || d.ok === false) {
+            $('studyList').innerHTML = `<div class="pz-placeholder">${esc(d.error || '加载失败')}</div>`;
+            return;
+          }
+          $('studyStats').textContent = `公开棋谱 · 已标注 ${d.total || 0} 局 / 共 ${d.publicTotal || 0} 局${d.untagged ? ` · 未分类 ${d.untagged}` : ''}`;
+          const list = d.list || [];
+          $('studyList').innerHTML = list.length ? `
+            <div style="display:grid;grid-template-columns:56px 1fr 70px 90px;gap:8px;font-size:11px;color:var(--text-dim);padding:6px 0;border-bottom:1px solid var(--border);">
+              <span>#</span><span>战法 / 围玉</span><span>局数</span><span>先手胜率</span>
+            </div>
+            ${list.map((x, i) => `
+              <div style="display:grid;grid-template-columns:56px 1fr 70px 90px;gap:8px;align-items:center;font-size:13px;padding:8px 0;border-bottom:1px dashed var(--border);">
+                <span style="color:var(--gold-light);">${i + 1}</span>
+                <a href="/gallery?opening=${encodeURIComponent(x.tag)}" style="font-size:13px;color:var(--text);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="查看该战法的公开棋谱：${esc(x.tag)}">${esc(x.tag)}</a>
+                <span>${x.count}</span>
+                <span><b style="color:var(--gold-light);">${x.blackRate === null ? '—' : `${x.blackRate}%`}</b> <span style="font-size:11px;color:var(--text-dim);">(先 ${x.blackWins} / 后 ${x.whiteWins}${x.draws ? ` / 和 ${x.draws}` : ''})</span></span>
+              </div>`).join('')}` : '<div class="pz-placeholder">暂无公开棋谱数据。</div>';
+        } catch (_) {
+          if (alive) $('studyList').innerHTML = '<div class="pz-placeholder">加载失败，请稍后重试。</div>';
+        }
+      }
+
+      async function loadStudies() {
+        if (!isAccount) $('studyCreateRow').style.display = 'none';
+        try {
+          const d = await apiGet('/api/studies');
+          if (!alive) return;
+          const list = d.studies || [];
+          $('studyStudies').innerHTML = list.length ? list.map((st) => `
+            <div class="fr-row">
+              <div class="fr-who"><b>${esc(st.title)}</b><span>${st.visibility === 'public' ? '公开' : '私密'} · ${st.itemCount || 0} 条${st.mine ? ' · 我的' : ''}</span></div>
+              <button class="btn btn-ghost btn-sm" data-study-open="${esc(st.id)}" type="button">打开</button>
+              ${st.mine ? `<button class="btn btn-ghost btn-sm" data-study-del="${esc(st.id)}" type="button" style="color:var(--red-light);">删除</button>` : ''}
+            </div>`).join('') : '<div class="fr-empty">还没有研究。</div>';
+        } catch (e) {
+          if (alive) $('studyStudies').innerHTML = `<div class="fr-empty">${esc(e.message)}</div>`;
+        }
+      }
+
+      async function openStudy(id) {
+        openId = id;
+        try {
+          const d = await apiGet(`/api/studies/${encodeURIComponent(id)}`);
+          if (!alive) return;
+          const st = d.study;
+          const items = d.items || [];
+          $('studyDetail').style.display = '';
+          $('studyDetail').innerHTML = `
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+              <div style="flex:1;font-size:14px;font-weight:800;color:var(--gold-light);">${esc(st.title)} <span style="font-size:11px;color:var(--text-dim);font-weight:400;">${st.visibility === 'public' ? '公开' : '私密'}</span></div>
+              <button class="btn btn-ghost btn-sm" data-study-close type="button">收起</button>
+            </div>
+            ${items.length ? items.map((it) => {
+              const r = it.record;
+              const label = r ? `${(r.names || []).join(' vs ')} · ${r.moveCount} 手` : it.recordId;
+              return `<div class="fr-row"><div class="fr-who"><b>${esc(label)}</b><span>${esc(it.note || '')}${it.ply ? ` · 第 ${it.ply} 手` : ''}</span></div>
+                ${r ? `<a class="btn btn-ghost btn-sm" href="review.html?id=${encodeURIComponent(r.id)}">复盘</a>` : ''}
+                ${d.mine ? `<button class="btn btn-ghost btn-sm" data-study-item-del="${esc(it.recordId)}" data-ply="${it.ply}" type="button" style="color:var(--red-light);">移除</button>` : ''}</div>`;
+            }).join('') : '<div class="fr-empty">还没有收藏棋谱。</div>'}
+            ${d.mine ? `<div class="fr-toolbar" style="margin-top:10px;">
+              <input class="input" id="studyRecordId" placeholder="棋谱 ID" style="max-width:200px;">
+              <input class="input" id="studyPly" placeholder="手数（可选）" style="max-width:110px;">
+              <input class="input" id="studyNote" placeholder="备注（可选）" style="max-width:200px;">
+              <button class="btn btn-primary btn-sm" id="studyAddItem" type="button">收藏棋谱</button>
+            </div>` : ''}`;
+        } catch (e) { toast(e.message); }
+      }
+
+      async function createStudy() {
+        const title = ($('studyTitle') && $('studyTitle').value || '').trim();
+        if (!title) return toast('请输入研究标题');
+        try {
+          const d = await apiPost('/api/studies', { title, visibility: $('studyVisibility').value });
+          toast('研究已创建');
+          await loadStudies();
+          if (d.study) openStudy(d.study.id);
+        } catch (e) { toast(e.message); }
+      }
+
+      async function addItem() {
+        if (!openId) return;
+        const recordId = ($('studyRecordId') && $('studyRecordId').value || '').trim();
+        if (!recordId) return toast('请输入棋谱 ID');
+        try {
+          await apiPost(`/api/studies/${encodeURIComponent(openId)}/items`, {
+            recordId,
+            ply: Number(($('studyPly') && $('studyPly').value) || 0),
+            note: ($('studyNote') && $('studyNote').value) || '',
+          });
+          toast('已收藏');
+          await openStudy(openId);
+          await loadStudies();
+        } catch (e) { toast(e.message); }
+      }
+
+      const on = (el, ev, fn) => { if (!el) return; el.addEventListener(ev, fn); teardown.push(() => el.removeEventListener(ev, fn)); };
+      on($('studyCreate'), 'click', createStudy);
+      const collection = $('studyCollection');
+      if (collection) {
+        const onClick = async (e) => {
+          const open = e.target.closest && e.target.closest('[data-study-open]');
+          if (open) return openStudy(open.getAttribute('data-study-open'));
+          const del = e.target.closest && e.target.closest('[data-study-del]');
+          if (del) {
+            if (!global.confirm('确认删除这个研究？')) return;
+            try { await apiDelete(`/api/studies/${encodeURIComponent(del.getAttribute('data-study-del'))}`); toast('已删除'); openId = null; $('studyDetail').style.display = 'none'; await loadStudies(); } catch (err) { toast(err.message); }
+            return;
+          }
+          const close = e.target.closest && e.target.closest('[data-study-close]');
+          if (close) { $('studyDetail').style.display = 'none'; openId = null; return; }
+          const itemDel = e.target.closest && e.target.closest('[data-study-item-del]');
+          if (itemDel && openId) {
+            try {
+              await apiDelete(`/api/studies/${encodeURIComponent(openId)}/items/${encodeURIComponent(itemDel.getAttribute('data-study-item-del'))}?ply=${itemDel.getAttribute('data-ply')}`);
+              toast('已移除'); await openStudy(openId); await loadStudies();
+            } catch (err) { toast(err.message); }
+            return;
+          }
+          const add = e.target.closest && e.target.closest('#studyAddItem');
+          if (add) addItem();
+        };
+        collection.addEventListener('click', onClick);
+        teardown.push(() => collection.removeEventListener('click', onClick));
+      }
+
+      teardown.push(() => { alive = false; });
+      loadOpenings();
+      loadStudies();
+    },
+    unmount() {
+      (this._teardown || []).forEach((fn) => { try { fn(); } catch (_) {} });
+      this._teardown = [];
+    },
+  };
+
+  global.Views = global.Views || {};
+  global.Views.study = View;
+})(window);
+
+/* ==== js/puzzles.js ==== */
+'use strict';
+
+/**
+ * puzzles.js — 每日诘将棋 / 下一手（1.6）。
+ *
+ * 棋盘复用 FreeBoard 的对局交互模式；题型/解法由服务端校验，客户端只拿局面与合法走法。
+ * 数据接口受 FEATURE_PUZZLES 保护；引擎不参与（题库是预先校验好的题目）。
+ */
+(function (global) {
+  'use strict';
+
+  const UI = global.UI;
+
+  const View = {
+    title: '每日诘将棋 · TDShogi',
+
+    render() {
+      return `
+  <main class="container">
+    <div class="card pz-card">
+      <div class="pz-head">
+        <div>
+          <div class="pz-title">每日诘将棋 / 下一手</div>
+          <div class="pz-sub" id="pzMeta">正在加载…</div>
+        </div>
+        <div class="pz-stat">
+          <span id="pzStreak">连续 0 天</span>
+          <span id="pzSolved">今日未完成</span>
+        </div>
+      </div>
+
+      <div id="pzLoading" class="pz-placeholder">加载今日题目…</div>
+      <div id="pzEmpty" class="pz-placeholder" style="display:none;"></div>
+
+      <div id="pzGame" style="display:none;">
+        <div class="pz-board-area play-main">
+          <div class="board-area">
+            <div class="hand-row" id="pzOppHand">
+              <span class="hand-label">持驹</span>
+              <div class="hand-pieces" id="pzOppHandPieces"></div>
+            </div>
+            <div class="board-wrap" id="pzBoard"></div>
+            <div class="hand-row" id="pzMyHand">
+              <span class="hand-label">持驹</span>
+              <div class="hand-pieces" id="pzMyHandPieces"></div>
+            </div>
+          </div>
+        </div>
+        <div class="pz-msg" id="pzMsg" role="status" aria-live="polite"></div>
+        <div class="pz-actions">
+          <button class="btn btn-ghost btn-sm" id="pzReset" type="button">重新开始</button>
+          <button class="btn btn-ghost btn-sm" id="pzShowSolution" type="button" style="display:none;">查看解法</button>
+          <a class="btn btn-ghost btn-sm" href="index.html">返回首页</a>
+        </div>
+        <div class="pz-hint">提示：先找王手与必至；答错不会泄露答案。每日题按日本时间零点切换。</div>
+      </div>
+    </div>
+  </main>`;
+    },
+
+    mount(container) {
+      this._teardown = [];
+      let alive = true;
+      this._teardown.push(() => { alive = false; });
+      const $ = (id) => UI.$(id);
+      const teardown = this._teardown;
+      const guest = global.NAV.getGuest();
+      const baseQ = `guest=${encodeURIComponent(guest.id)}`;
+
+      let puzzle = null;
+      let state = null;
+      let moves = [];
+      let solved = false;
+      let solutionList = null;
+      let board = null;
+      let fb = null;
+      let viewpoint = 'b';
+      let initial = null;
+
+      function setMsg(text, isErr) {
+        const el = $('pzMsg');
+        if (!el) return;
+        el.textContent = text || '';
+        el.className = 'pz-msg' + (isErr ? ' err' : '');
+      }
+
+      function setMeta() {
+        const el = $('pzMeta');
+        if (!el || !puzzle) return;
+        el.textContent = `${puzzle.type === 'tsume' ? '诘将棋' : '下一手'} · 难度 ${puzzle.difficulty || 1}/5`
+          + (puzzle.tags && puzzle.tags.length ? ` · ${puzzle.tags.join(' / ')}` : '');
+      }
+
+      function updateStats(data) {
+        if ($('pzStreak')) $('pzStreak').textContent = `连续 ${data && data.streak ? data.streak : 0} 天`;
+        if ($('pzSolved')) $('pzSolved').textContent = data && data.solvedToday ? '今日已完成' : '今日未完成';
+      }
+
+      async function loadStats() {
+        try {
+          const r = await fetch(`/api/puzzles/me?${baseQ}`);
+          const d = await r.json().catch(() => ({}));
+          if (alive && r.ok) updateStats(d);
+        } catch (_) { /* 统计失败不影响做题 */ }
+      }
+
+      function ensureBoard(st) {
+        if (fb) return;
+        board = new global.ShogiBoard($('pzBoard'), {});
+        viewpoint = st.turn === 'w' ? 'w' : 'b';
+        fb = new global.FreeBoard({
+          board,
+          viewpoint,
+          interactive: false,
+          mode: 'play',
+          hands: {
+            my: $('pzMyHandPieces'), myColor: viewpoint,
+            opp: $('pzOppHandPieces'), oppColor: viewpoint === 'b' ? 'w' : 'b',
+          },
+          onMove: (usi) => submitMove(usi),
+          onPromoteChoice: ({ usiMove, usiPromote }) => {
+            submitMove(global.confirm(`这手可以升变，升变吗？\n不成：${usiMove}\n升变：${usiPromote}`) ? usiPromote : usiMove);
+          },
+        });
+        fb.attach();
+        fb.bindHands($('pzMyHandPieces'), viewpoint, $('pzOppHandPieces'), viewpoint === 'b' ? 'w' : 'b');
+      }
+
+      function applyState(st) {
+        state = st;
+        if (!fb) ensureBoard(st);
+        const vp = st.turn === 'w' ? 'w' : 'b';
+        if (vp !== viewpoint) { viewpoint = vp; fb.setViewpoint(vp); }
+        fb.setModel({ board: st.board, hands: st.hands || { b: [], w: [] } }, st.lastMove || null);
+        fb.setLegalTargets(st.legalTargetsBySq || {});
+        fb.setInteractive(!solved);
+      }
+
+      function showGame() {
+        $('pzLoading').style.display = 'none';
+        $('pzEmpty').style.display = 'none';
+        $('pzGame').style.display = '';
+        setMeta();
+        applyState(initial);
+        setMsg(solved ? '今日已完成；可以重新走一遍看手顺。' : '轮到你走。');
+        const solBtn = $('pzShowSolution');
+        if (solBtn) {
+          solBtn.style.display = solved && solutionList ? '' : 'none';
+          if (solutionList) solBtn.dataset.solution = JSON.stringify(solutionList);
+        }
+      }
+
+      function showEmpty(text) {
+        $('pzLoading').style.display = 'none';
+        $('pzGame').style.display = 'none';
+        $('pzEmpty').style.display = '';
+        $('pzEmpty').textContent = text;
+      }
+
+      async function loadDaily() {
+        $('pzLoading').style.display = '';
+        $('pzEmpty').style.display = 'none';
+        $('pzGame').style.display = 'none';
+        try {
+          const r = await fetch(`/api/puzzles/daily?${baseQ}`);
+          const d = await r.json().catch(() => ({}));
+          if (!alive) return;
+          if (!r.ok) { showEmpty(d.error || '每日题暂不可用'); return; }
+          if (!d.puzzle) { showEmpty('题库尚未配置，请稍后再来。'); return; }
+          puzzle = d.puzzle;
+          initial = d.state;
+          moves = [];
+          solved = !!d.solved;
+          solutionList = d.solution || null;
+          showGame();
+          loadStats();
+        } catch (_) {
+          if (alive) showEmpty('每日题加载失败，请刷新重试。');
+        }
+      }
+
+      async function submitMove(usi) {
+        if (!puzzle || !alive || solved) return;
+        const next = moves.concat(usi);
+        setMsg('校验中…');
+        try {
+          const r = await fetch(`/api/puzzles/${encodeURIComponent(puzzle.id)}/attempt`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ guest: guest.id, key: guest.key, moves: next }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!alive) return;
+          if (!r.ok) {
+            setMsg(d.error || '这手不对，再试试。', true);
+            return;
+          }
+          moves = d.reply ? next.concat(d.reply) : next;
+          applyState(d.state || state);
+          if (d.complete) {
+            solved = true;
+            fb.setInteractive(false);
+            setMsg('完成！今天这题解出来了。');
+            const solBtn = $('pzShowSolution');
+            solutionList = d.solution || [];
+            if (solBtn) { solBtn.style.display = ''; solBtn.dataset.solution = JSON.stringify(solutionList); }
+            loadStats();
+          } else {
+            setMsg(d.reply ? `正确，对手应手 ${d.reply}。继续。` : '正确，继续下一手。');
+          }
+        } catch (_) {
+          if (alive) setMsg('提交失败，请稍后重试。', true);
+        }
+      }
+
+      function reset() {
+        if (!puzzle || !initial) return;
+        moves = [];
+        solved = false;
+        applyState(initial);
+        setMsg('已重新开始。');
+        solutionList = null;
+        const solBtn = $('pzShowSolution');
+        if (solBtn) { solBtn.style.display = 'none'; delete solBtn.dataset.solution; }
+      }
+
+      function showSolution() {
+        const btn = $('pzShowSolution');
+        if (!btn || !btn.dataset.solution) return;
+        try {
+          const sol = JSON.parse(btn.dataset.solution);
+          setMsg(`解法：${sol.join(' → ')}`);
+        } catch (_) { setMsg('解法读取失败。'); }
+      }
+
+      function on(el, ev, fn) {
+        if (!el) return;
+        el.addEventListener(ev, fn);
+        teardown.push(() => el.removeEventListener(ev, fn));
+      }
+      on($('pzReset'), 'click', reset);
+      on($('pzShowSolution'), 'click', showSolution);
+
+      loadDaily();
+
+      teardown.push(() => { if (fb) { try { fb.destroy(); } catch (_) {} fb = null; } });
+    },
+
+    unmount() {
+      (this._teardown || []).forEach((fn) => { try { fn(); } catch (_) {} });
+      this._teardown = [];
+    },
+  };
+
+  global.Views = global.Views || {};
+  global.Views.puzzles = View;
 })(window);
 
 /* ==== js/records-console.js ==== */
@@ -10906,6 +13476,7 @@
                所以不能写 inline 的 display/gap——inline 会盖掉媒体查询） -->
           <div class="rv-meta-actions">
             <button class="btn btn-ghost btn-sm" id="btnFlipView" title="切换先手 / 后手视角">🔄 翻转视角</button>
+            <button class="btn btn-ghost btn-sm" id="btnSaveStudy" style="display:none;">📚 收藏到研究</button>
             <button class="btn btn-ghost btn-sm" id="btnExportKif">导出 KIF</button>
             <button class="btn btn-ghost btn-sm" id="btnExportCsa">导出 CSA</button>
             <button class="btn btn-ghost btn-sm" data-href="profile.html#records">返回</button>
@@ -10927,6 +13498,15 @@
             <input class="input" id="adPlayedOn" maxlength="40" placeholder="2026-09-06" style="width:130px;"></div>
           <div><div style="font-size:11px;color:var(--text-dim);">标签（逗号分隔）</div>
             <input class="input" id="adTags" style="width:180px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">开局 / 战法 / 围玉</div>
+            <input class="input" id="adOpening" list="adOpeningList" maxlength="40" placeholder="如：矢仓 / 美浓 / 雁木" style="width:180px;">
+            <datalist id="adOpeningList">
+              <option value="矢仓"></option><option value="美浓"></option><option value="穴熊"></option>
+              <option value="雁木"></option><option value="银冠"></option><option value="舟围"></option>
+              <option value="四间飞车"></option><option value="三间飞车"></option><option value="向飞车"></option>
+              <option value="石田流"></option><option value="相挂"></option><option value="横步"></option>
+              <option value="角交换"></option><option value="相居飞车"></option><option value="相振飞车"></option>
+            </datalist></div>
           <div><div style="font-size:11px;color:var(--text-dim);">先手展示名</div>
             <input class="input" id="adNameB" maxlength="120" style="width:130px;"></div>
           <div><div style="font-size:11px;color:var(--text-dim);">後手展示名</div>
@@ -10949,6 +13529,22 @@
           </select>
           <button class="btn btn-ghost btn-sm" id="btnSaveVisibility">应用可见性</button>
           <span id="adTip" style="font-size:12px;color:var(--text-dim);"></span>
+        </div>
+      </div>
+
+      <!-- 1.6 引擎复盘：开关 FEATURE_ANALYSIS 打开时才显示 -->
+      <div class="card rv-analysis-card" id="rvAnalysisCard" style="display:none;">
+        <div class="rv-analysis-head">
+          <div>
+            <div class="rv-analysis-title">引擎分析</div>
+            <div class="rv-analysis-state" id="rvAnalysisState">尚未分析</div>
+          </div>
+          <button class="btn btn-primary btn-sm" id="btnAnalyze" type="button">开始分析</button>
+        </div>
+        <div id="rvAnalysisBody" style="display:none;">
+          <canvas class="rv-analysis-chart" id="rvEvalChart" aria-label="评估曲线"></canvas>
+          <div class="rv-analysis-summary" id="rvAnalysisSummary"></div>
+          <div class="rv-analysis-hint">评估在浏览器本地完成；仅分析已结束棋谱，不提供实时支招。</div>
         </div>
       </div>
 
@@ -11049,6 +13645,21 @@
         </div>
       </div>
     </div>
+    <!-- 收藏到研究（1.9）：从复盘页直接选研究，不再要求用户手输棋谱 ID -->
+    <div class="modal-overlay" id="studySaveModal" role="dialog" aria-modal="true" aria-label="收藏到研究" style="display:none;">
+      <div class="card" style="width:420px;max-width:94vw;padding:22px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div style="font-size:17px;font-weight:800;">📚 收藏到研究</div>
+          <button class="btn btn-ghost btn-sm" id="studySaveClose" type="button">关闭</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">选择研究</div>
+        <select class="input" id="studySaveSelect" style="width:100%;"></select>
+        <div style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">备注（可选）</div>
+        <input class="input" id="studySaveNote" maxlength="200" style="width:100%;" placeholder="这一手为什么值得研究">
+        <div style="font-size:12px;color:var(--text-dim);margin-top:10px;">收藏当前第 <span id="studySavePly">0</span> 手</div>
+        <button class="btn btn-primary" id="studySaveConfirm" type="button" style="width:100%;margin-top:14px;">收藏</button>
+      </div>
+    </div>
   </main>`;
     },
 
@@ -11080,6 +13691,7 @@
       const $ = (id) => UI.$(id);
       const esc = (s) => UI.esc(s);
       const toast = (m) => UI.toast(m);
+      const tr = (text, vars) => (global.I18N && global.I18N.t ? global.I18N.t(text, vars) : text);
 
       // 元素事件统一登记（元素虽随 DOM 销毁，仍一并记录，双保险）
       const on = (el, ev, fn) => {
@@ -11113,6 +13725,144 @@
       // 复盘视角（PLAN §S6）：默认先手，可翻转。与对局页观战视角共用 FreeBoard.setViewpoint
       let viewpoint = 'b';
 
+      // ---- 1.6 引擎分析（FEATURE_ANALYSIS + 浏览器本地 WASM）----
+      let analysisData = null;
+      let analysisInit = false;
+
+      function setAnalysisState(text, isErr) {
+        const el = $('rvAnalysisState');
+        if (!el) return;
+        el.textContent = text;
+        el.classList.toggle('err', !!isErr);
+      }
+
+      function evalRate(cp) {
+        if (!Number.isFinite(cp)) return 0.5;
+        return 1 / (1 + Math.pow(10, -cp / 400));
+      }
+
+      function applyAnalysis(data) {
+        analysisData = data;
+        const body = $('rvAnalysisBody');
+        if (body) body.style.display = '';
+        const btn = $('btnAnalyze');
+        if (btn) { btn.disabled = true; btn.textContent = tr('已完成'); }
+        setAnalysisState(tr('已完成'));
+        renderAnalysisSummary();
+        drawAnalysisChart();
+        renderMoveList();
+      }
+
+      function renderAnalysisSummary() {
+        const box = $('rvAnalysisSummary');
+        if (!box) return;
+        if (!analysisData) { box.textContent = ''; return; }
+        const s = analysisData.summary || {};
+        const total = Math.max(0, (analysisData.positions || []).length - 1);
+        box.innerHTML = `<span>${tr('共 {n} 手', { n: total })}</span>`
+          + `<span>${tr('不精确')} <b>${s.inaccuracies || 0}</b></span>`
+          + `<span>${tr('失误')} <b>${s.mistakes || 0}</b></span>`
+          + `<span>${tr('恶手')} <b>${s.blunders || 0}</b></span>`
+          + `<span style="margin-left:auto;">${tr('深度 {n}', { n: esc(String(analysisData.depth || '—')) })}</span>`;
+      }
+
+      function drawAnalysisChart() {
+        const canvas = $('rvEvalChart');
+        const positions = analysisData && analysisData.positions;
+        if (!canvas || !positions || positions.length < 2) return;
+        const cssW = canvas.clientWidth || 640;
+        const cssH = canvas.clientHeight || 120;
+        const dpr = global.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.round(cssW * dpr));
+        canvas.height = Math.max(1, Math.round(cssH * dpr));
+        const ctx = canvas.getContext && canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, cssW, cssH);
+        ctx.fillStyle = 'rgba(128,128,128,0.10)';
+        ctx.fillRect(0, 0, cssW, cssH);
+        ctx.strokeStyle = 'rgba(128,128,128,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, cssH / 2);
+        ctx.lineTo(cssW, cssH / 2);
+        ctx.stroke();
+        const pts = [];
+        positions.forEach((p, i) => {
+          const v = evalRate(p && p.cp);
+          pts.push({ x: (i / (positions.length - 1)) * cssW, y: cssH - v * cssH });
+        });
+        if (!pts.length) return;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, cssH);
+        pts.forEach((pt) => ctx.lineTo(pt.x, pt.y));
+        ctx.lineTo(pts[pts.length - 1].x, cssH);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(201,162,39,0.12)';
+        ctx.fill();
+        ctx.beginPath();
+        pts.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
+        ctx.strokeStyle = 'rgba(232,196,106,0.95)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (cursor >= 0 && cursor < pts.length) {
+          const pt = pts[cursor];
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = '#e8c46a';
+          ctx.fill();
+        }
+      }
+
+      function loadCachedAnalysis() {
+        const cached = global.AnalysisEngine && global.AnalysisEngine.loadCached
+          ? global.AnalysisEngine.loadCached(recordId) : null;
+        if (cached) { applyAnalysis(cached); return; }
+        setAnalysisState(tr('尚未分析'));
+        const btn = $('btnAnalyze');
+        if (btn) { btn.disabled = false; btn.textContent = tr('开始分析'); }
+      }
+
+      async function runAnalysis() {
+        const btn = $('btnAnalyze');
+        if (!global.AnalysisEngine || !global.AnalysisEngine.isSupported || !global.AnalysisEngine.isSupported()) {
+          setAnalysisState(tr('当前浏览器不支持本地引擎'), true);
+          if (btn) { btn.disabled = false; btn.textContent = tr('重试'); }
+          return;
+        }
+        if (!review) return;
+        if (btn) { btn.disabled = true; btn.textContent = tr('分析中…'); }
+        setAnalysisState(tr('分析中…'));
+        try {
+          const data = await global.AnalysisEngine.analyze(review, {
+            onProgress: (done, total) => { if (alive) setAnalysisState(tr('分析中…') + ` ${done}/${total}`); },
+          });
+          if (alive) applyAnalysis(data);
+        } catch (e) {
+          if (!alive) return;
+          setAnalysisState((e && e.message) || tr('分析请求失败'), true);
+          if (btn) { btn.disabled = false; btn.textContent = tr('重试'); }
+        }
+      }
+
+      function setupAnalysis() {
+        if (!review || !alive) return;
+        const card = $('rvAnalysisCard');
+        if (!global.FEATURES || !global.FEATURES.isOn('analysis')) {
+          if (card) card.style.display = 'none';
+          return;
+        }
+        if (card) card.style.display = '';
+        if (analysisInit) return;
+        analysisInit = true;
+        on($('btnAnalyze'), 'click', runAnalysis);
+        loadCachedAnalysis();
+      }
+
+      if (global.FEATURES && global.FEATURES.ready) {
+        global.FEATURES.ready.then(() => setupAnalysis()).catch(() => {});
+      }
+
       async function load() {
         const authQ = `guest=${encodeURIComponent(guest.id)}${adminToken ? `&token=${encodeURIComponent(adminToken)}` : ''}`;
         const url = `/api/records/${recordId}/review?${authQ}`;
@@ -11138,6 +13888,7 @@
         cursor = 0;
         render();
         initPermissionUI();
+        setupAnalysis();
         $('loading').style.display = 'none';
         $('review').style.display = 'block';
       }
@@ -11231,6 +13982,7 @@
         $('adRound').value = m.round || '';
         $('adPlayedOn').value = m.playedOn || '';
         $('adTags').value = (m.tags || []).join(', ');
+        if ($('adOpening')) $('adOpening').value = m.opening || '';
         $('adNameB').value = (m.nameOverrides && m.nameOverrides.b) || '';
         $('adNameW').value = (m.nameOverrides && m.nameOverrides.w) || '';
         $('adResultNote').value = m.resultNote || '';
@@ -11248,6 +14000,7 @@
           round: val('adRound'),
           playedOn: val('adPlayedOn'),
           tags: val('adTags').split(/[,，\s]+/).map((t) => t.trim()).filter(Boolean),
+          opening: val('adOpening'),
           description: val('adDesc'),
           nameOverrides: { b: val('adNameB'), w: val('adNameW') },
           resultNote: val('adResultNote'),
@@ -11361,6 +14114,7 @@
         renderMoveList();
         renderAnnotations();
         renderVariations();
+        if (analysisData) drawAnalysisChart();
       }
 
       function renderMoveList() {
@@ -11378,9 +14132,16 @@
           const spent = Number(times[no - 1]) || 0;
           cum += spent;
           const timeTxt = spent ? ` <span style="color:var(--text-dim);font-size:11px;">(${Math.floor(spent / 60)}:${String(spent % 60).padStart(2, '0')}/${Math.floor(cum / 3600)}:${String(Math.floor((cum % 3600) / 60)).padStart(2, '0')}:${String(cum % 60).padStart(2, '0')})</span>` : '';
+          const ana = analysisData && analysisData.summary && analysisData.summary.moves
+            ? analysisData.summary.moves[no - 1] : null;
+          const anaTxt = ana && Number.isFinite(ana.cp)
+            ? `<span class="rv-eval-num">${(ana.cp / 100).toFixed(1)}</span>` + (ana.tag
+              ? `<span class="rv-eval-tag ${ana.tag}" title="${ana.tag === 'blunder' ? '恶手' : ana.tag === 'mistake' ? '失误' : '不精确'}">${ana.tag === 'blunder' ? '???' : ana.tag === 'mistake' ? '??' : '?'}</span>`
+              : '')
+            : '';
           html.push(`<div class="rv-move-row${cursor === no ? ' current' : ''}">
         <span class="rv-no">${no}</span>
-        <span class="rv-mv${cursor === no ? ' cursor' : ''}${isBookmarked(no) ? ' bookmark' : ''}${hasComment(no) ? ' has-comment' : ''}${hasVariation(no) ? ' has-var' : ''}" data-no="${no}">${mark} ${text}${timeTxt}</span>
+        <span class="rv-mv${cursor === no ? ' cursor' : ''}${isBookmarked(no) ? ' bookmark' : ''}${hasComment(no) ? ' has-comment' : ''}${hasVariation(no) ? ' has-var' : ''}" data-no="${no}">${mark} ${text}${timeTxt}${anaTxt}</span>
       </div>`);
           // §L：评论直接展示在手数下方（旧格式位置），管理员可就地编辑/删除
           const cs = (review.comments && review.comments[no]) || [];
@@ -12052,6 +14813,54 @@
           if (alive) toast('网络错误，导出失败');
         }
       }
+      // ---- 收藏到研究（1.9）：复盘页直接选研究，不再要求手输棋谱 ID ----
+      const accountToken = typeof guest.id === 'string' && guest.id.includes('.') ? guest.id : '';
+      const saveStudyBtn = $('btnSaveStudy');
+      if (saveStudyBtn && accountToken) {
+        saveStudyBtn.style.display = '';
+        if (global.FEATURES && global.FEATURES.ready) {
+          global.FEATURES.ready.then(() => {
+            if (saveStudyBtn && !global.FEATURES.isOn('studies')) saveStudyBtn.style.display = 'none';
+          });
+        }
+      }
+      async function openStudySave() {
+        try {
+          const r = await fetch('/api/studies', { headers: { 'X-Account-Token': accountToken } });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || d.ok === false) throw new Error(d.error || '加载研究失败');
+          const mine = (d.studies || []).filter((s) => s.mine);
+          if (!mine.length) return toast('请先在研究页创建研究');
+          $('studySaveSelect').innerHTML = mine
+            .map((s) => `<option value="${UI.esc(s.id)}">${UI.esc(s.title)}（${s.itemCount || 0} 条）</option>`)
+            .join('');
+          $('studySavePly').textContent = String(cursor);
+          $('studySaveNote').value = '';
+          $('studySaveModal').style.display = 'flex';
+        } catch (e) { toast(e.message); }
+      }
+      async function confirmStudySave() {
+        const studyId = $('studySaveSelect') && $('studySaveSelect').value;
+        if (!studyId) return;
+        try {
+          const r = await fetch(`/api/studies/${encodeURIComponent(studyId)}/items`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Account-Token': accountToken },
+            body: JSON.stringify({ recordId, ply: cursor, note: $('studySaveNote').value || '' }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || d.ok === false) throw new Error(d.error || '收藏失败');
+          $('studySaveModal').style.display = 'none';
+          toast('已收藏到研究');
+        } catch (e) { toast(e.message); }
+      }
+      on($('btnSaveStudy'), 'click', openStudySave);
+      on($('studySaveConfirm'), 'click', confirmStudySave);
+      on($('studySaveClose'), 'click', () => { $('studySaveModal').style.display = 'none'; });
+      on($('studySaveModal'), 'click', (e) => {
+        if (e.target === $('studySaveModal')) $('studySaveModal').style.display = 'none';
+      });
+
       on($('btnExportKif'), 'click', () => doExport('kif'));
       on($('btnExportCsa'), 'click', () => doExport('csa'));
 
@@ -14436,7 +17245,7 @@ function showResult(st) {
           b.classList.toggle('btn-ghost', b !== btn);
         });
         // ⚠️ 2026-10-02 审查 P1-7：必须含 'rooms'/'reports'，否则这两页（初始 display:none）永不被置为 block。
-        ['overview', 'records', 'users', 'tournaments', 'rooms', 'reports', 'announcements', 'audit', 'ipbans', 'shop', 'items'].forEach((t) => {
+        ['overview', 'records', 'users', 'tournaments', 'seasons', 'rooms', 'reports', 'announcements', 'audit', 'ipbans', 'shop', 'items', 'puzzles'].forEach((t) => {
           const el = $('tab-' + t);
           if (el) el.style.display = t === btn.dataset.tab ? 'block' : 'none';
         });
@@ -14453,11 +17262,13 @@ function showResult(st) {
         else if (tab === 'records' && hub.loadRecords) hub.loadRecords();
         else if (tab === 'users' && hub.loadUsers) hub.loadUsers();
         else if (tab === 'tournaments' && hub.loadTournaments) hub.loadTournaments();
+        else if (tab === 'seasons' && hub.loadSeasonsAdmin) hub.loadSeasonsAdmin();
         else if (tab === 'audit' && hub.loadAudit) hub.loadAudit();
         else if (tab === 'reports' && hub.loadReports) hub.loadReports();
         // 商城 / 道具发放（2026-10-21 拆分）：各自拉自己需要的数据
         else if (tab === 'shop' && hub.loadShopAdmin) hub.loadShopAdmin();
         else if (tab === 'items' && hub.loadItemsAdmin) hub.loadItemsAdmin();
+        else if (tab === 'puzzles' && hub.loadPuzzlesAdmin) hub.loadPuzzlesAdmin();
       });
     });
 
@@ -15517,9 +18328,9 @@ function showResult(st) {
         const pendingN = (t.entrants || []).filter((e) => e.status === 'pending').length;
         const meta = [
           // 赛制要显示出来：T8 起有瑞士制，审核与排障时"这是哪种赛制"是首要信息
-          t.formatLabel || (t.format === 'swiss' ? '瑞士制' : '单败淘汰'),
+          t.formatLabel || ({ swiss: '瑞士制', 'round-robin': '循环赛' }[t.format] || '单败淘汰'),
           `${approved}/${t.size} 人${pendingN ? `（待批准 ${pendingN}）` : ''}`,
-          (t.format === 'swiss' && t.totalRounds)
+          (['swiss', 'round-robin'].includes(t.format) && t.totalRounds)
             ? `第 ${t.currentRound || 0}/${t.totalRounds} 轮` : '',
           t.ownerName ? `主办 ${esc(t.ownerName)}` : '',
           global.I18N.fmt(t.createdAt),
@@ -15625,6 +18436,148 @@ function showResult(st) {
   global.AdminParts = global.AdminParts || {};
   global.AdminParts.tournaments = { mount, unmount };
 })(typeof window !== 'undefined' ? window : globalThis);
+
+/* ==== js/admin-seasons.js ==== */
+/**
+ * admin-seasons.js — 管理后台「赛季 / 竞技场」tab（1.8）
+ * 赛季：创建 → 关闭并结算（快照 overall/standard/ultra 前 10，按名次发积分）。
+ * 竞技场：管理员直接取消主办人失联 / 违规场次。
+ */
+(function (global) {
+  'use strict';
+
+  let _td = [];
+
+  function mount(ctx) {
+    const { $, esc, getToken, toast, hub } = ctx;
+    const on = ctx.on;
+    const alive = () => ctx.isAlive();
+
+    async function adminApi(path, opts = {}) {
+      const headers = Object.assign({ 'x-admin-token': getToken() }, opts.headers || {});
+      if (opts.body) headers['Content-Type'] = 'application/json';
+      const res = await fetch(path, Object.assign({}, opts, { headers }));
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.ok === false) throw new Error(d.error || `请求失败（HTTP ${res.status}）`);
+      return d;
+    }
+
+    const fmtDay = (ts) => (ts ? new Date(ts).toLocaleDateString('zh-CN') : '—');
+
+    function seasonRow(s) {
+      const top = s.data && s.data.categories && s.data.categories.overall ? s.data.categories.overall[0] : null;
+      return `
+        <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;padding:9px 0;border-bottom:1px dashed var(--border);">
+          <div style="min-width:220px;">
+            <div style="font-size:14px;font-weight:700;">${esc(s.name)}
+              <span style="font-size:11px;color:${s.status === 'closed' ? 'var(--text-dim)' : 'var(--gold-light)'};">${s.status === 'closed' ? '已结算' : '进行中'}</span>
+            </div>
+            <div style="font-size:12px;color:var(--text-dim);">${fmtDay(s.startsAt)} → ${fmtDay(s.endsAt)}${s.closedAt ? ` · 结算于 ${fmtDay(s.closedAt)}` : ''}</div>
+            ${top ? `<div style="font-size:12px;color:var(--gold-light);">总榜第一：${esc(top.name)}（${top.rating}）</div>` : ''}
+          </div>
+          <div>
+            ${s.status === 'open' ? `<button class="btn btn-primary btn-sm" type="button" data-season-close="${esc(s.id)}">关闭并结算</button>` : ''}
+          </div>
+        </div>`;
+    }
+
+    async function loadSeasons() {
+      const box = $('seasonAdminList');
+      if (box) box.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">加载中…</div>';
+      try {
+        const d = await adminApi('/api/admin/seasons');
+        if (!alive() || !box) return;
+        const list = d.seasons || [];
+        box.innerHTML = list.length ? list.map(seasonRow).join('') : '<div style="color:var(--text-dim);font-size:13px;">还没有赛季。</div>';
+      } catch (e) {
+        if (alive() && box) box.innerHTML = `<div style="color:var(--red-light);font-size:13px;">${esc(e.message)}</div>`;
+      }
+    }
+
+    function arenaRow(a) {
+      const active = a.status === 'open' || a.status === 'running';
+      return `
+        <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;padding:9px 0;border-bottom:1px dashed var(--border);">
+          <div style="min-width:240px;">
+            <div style="font-size:14px;font-weight:700;">${esc(a.name)}
+              <span style="font-size:11px;color:var(--text-dim);">${esc(a.statusLabel || a.status)}</span>
+            </div>
+            <div style="font-size:12px;color:var(--text-dim);">主办：${esc(a.ownerName || '—')} · ${fmtDay(a.startsAt)} → ${fmtDay(a.endsAt)} · ${a.entryCount} 人${a.currentRound ? ` · 第 ${a.currentRound} 轮` : ''}</div>
+          </div>
+          <div>
+            ${active ? `<button class="btn btn-ghost btn-sm" type="button" data-arena-cancel="${esc(a.id)}" style="color:var(--red-light);">取消竞技场</button>` : ''}
+          </div>
+        </div>`;
+    }
+
+    async function loadArenas() {
+      const box = $('arenaAdminList');
+      if (box) box.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">加载中…</div>';
+      try {
+        const d = await adminApi('/api/admin/arenas');
+        if (!alive() || !box) return;
+        const list = d.arenas || [];
+        box.innerHTML = list.length ? list.map(arenaRow).join('') : '<div style="color:var(--text-dim);font-size:13px;">还没有竞技场。</div>';
+      } catch (e) {
+        if (alive() && box) box.innerHTML = `<div style="color:var(--red-light);font-size:13px;">${esc(e.message)}</div>`;
+      }
+    }
+
+    async function createSeason() {
+      const name = ($('seasonName') && $('seasonName').value || '').trim();
+      if (!name) return toast('请填写赛季名称');
+      const start = $('seasonStart').value ? new Date($('seasonStart').value).getTime() : null;
+      const end = $('seasonEnd').value ? new Date($('seasonEnd').value).getTime() : null;
+      try {
+        await adminApi('/api/admin/seasons', { method: 'POST', body: JSON.stringify({ name, startsAt: start, endsAt: end }) });
+        toast('赛季已创建');
+        if ($('seasonName')) $('seasonName').value = '';
+        await loadSeasons();
+      } catch (e) { toast(e.message); }
+    }
+
+    async function closeSeason(id) {
+      if (!global.confirm('关闭并结算该赛季？会立即给榜单前 10 发积分，且不可重复结算。')) return;
+      try {
+        await adminApi(`/api/admin/seasons/${encodeURIComponent(id)}/close`, { method: 'POST', body: '{}' });
+        toast('赛季已结算');
+        await loadSeasons();
+      } catch (e) { toast(e.message); }
+    }
+
+    async function cancelArena(id) {
+      if (!global.confirm('确定取消该竞技场？')) return;
+      try {
+        await adminApi(`/api/admin/arenas/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' });
+        toast('竞技场已取消');
+        await loadArenas();
+      } catch (e) { toast(e.message); }
+    }
+
+    on($('btnSeasonCreate'), 'click', createSeason);
+
+    const seasonClick = (ev) => {
+      const btn = ev.target.closest && ev.target.closest('[data-season-close]');
+      if (btn) closeSeason(btn.getAttribute('data-season-close'));
+    };
+    const arenaClick = (ev) => {
+      const btn = ev.target.closest && ev.target.closest('[data-arena-cancel]');
+      if (btn) cancelArena(btn.getAttribute('data-arena-cancel'));
+    };
+    on($('seasonAdminList'), 'click', seasonClick);
+    on($('arenaAdminList'), 'click', arenaClick);
+
+    hub.loadSeasonsAdmin = () => { loadSeasons(); loadArenas(); };
+  }
+
+  function unmount() {
+    _td.forEach((fn) => { try { fn(); } catch (_) {} });
+    _td = [];
+  }
+
+  global.AdminParts = global.AdminParts || {};
+  global.AdminParts.seasons = { mount, unmount };
+})(window);
 
 /* ==== js/admin-moderation.js ==== */
 /**
@@ -16572,6 +19525,18 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
       return p === null || p === undefined ? '免费' : `${p} 币`;
     }
 
+    /** 版本号统一显示为 vX.Y.Z（作者可能自带 v 前缀） */
+    function versionText(v) {
+      const s = String(v || '1.0.0').trim() || '1.0.0';
+      return /^v/i.test(s) ? s : `v${s}`;
+    }
+
+    /** 每个扩展包/读秒包都需要重新确认授权，避免沿用上一次的勾选 */
+    function resetRightsConfirmation() {
+      const el = $('packRights');
+      if (el) el.checked = false;
+    }
+
     /** 包内商品预览：图片缩略图 / BGM 试听 / 读秒包 manifest 链接 */
     function packItemArt(it) {
       const a = (it && it.asset) || {};
@@ -16615,7 +19580,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
           <div style="font-size:13px;">
             <b style="color:var(--green);">✅ 校验通过</b> ·
             <b>${esc(report.pack.name)}</b>
-            <span style="color:var(--text-dim);font-size:11px;">${esc(report.pack.id)} · v${esc(report.pack.versionName)} · ${report.items.length} 件</span>
+            <span style="color:var(--text-dim);font-size:11px;">${esc(report.pack.id)} · ${esc(versionText(report.pack.versionName))} · ${report.items.length} 件</span>
           </div>
           <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
             ${report.pack.author ? '作者：' + esc(report.pack.author) + ' · ' : ''}
@@ -16693,6 +19658,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         });
         if (!alive()) return;
         PACK_TOKEN = null;
+        resetRightsConfirmation();
         renderPackReport(null, r.pack || { name: '扩展包', itemCount: (r.items || []).length });
         if ($('packFile')) $('packFile').value = '';
         await fetchCatalog();
@@ -16729,9 +19695,11 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         if (!alive()) return;
         if (out) {
           out.innerHTML = `<span style="color:var(--green);">✅ 已导入为草稿：${esc((r.pack && r.pack.name) || name || '读秒语音包')}</span>`
+            + '<div style="color:var(--text-dim);margin-top:2px;">请在「已安装扩展包」中预览并发布。</div>'
             + ((r.warnings || []).length ? `<div style="color:var(--gold-light);margin-top:4px;">${r.warnings.map(esc).join('；')}</div>` : '');
         }
         if (input) input.value = '';
+        resetRightsConfirmation();
         await fetchCatalog();
         await loadAssets();
         await loadPacks();
@@ -16786,7 +19754,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
             </div>
             <div style="flex:1;min-width:220px;">
               <div style="font-size:13px;font-weight:700;">${esc(p.name || p.id)} ${badge}
-                <span style="font-weight:400;color:var(--text-dim);font-size:11px;">${esc(p.id)} · v${esc(p.versionName || '1.0.0')} · ${p.itemCount || 0} 件${p.kind === 'byoyomi' ? ' · 读秒包' : ''}</span>
+                <span style="font-weight:400;color:var(--text-dim);font-size:11px;">${esc(p.id)} · ${esc(versionText(p.versionName))} · ${p.itemCount || 0} 件${p.kind === 'byoyomi' ? ' · 读秒包' : ''}</span>
               </div>
               <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
                 ${p.author ? '作者：' + esc(p.author) + ' · ' : ''}授权：${esc(p.license || '未填写')}
@@ -17208,6 +20176,19 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
     bind('btnPackRefresh', () => loadPacks());
     bind('btnByoyomiZip', () => uploadByoyomiZip());
 
+    // 重新选文件后，旧的上传令牌/校验报告立即失效——否则会误装上一个包
+    const packFileEl = $('packFile');
+    if (packFileEl) on(packFileEl, 'change', () => {
+      PACK_TOKEN = null;
+      const out = $('packReport');
+      if (out) out.innerHTML = '';
+    });
+    const byoyomiFileEl = $('byoyomiZip');
+    if (byoyomiFileEl) on(byoyomiFileEl, 'change', () => {
+      const out = $('byoyomiZipResult');
+      if (out) out.innerHTML = '';
+    });
+
     // 素材类型筛选（纯前端过滤，不再多打一次接口）
     const assetKindEl = $('shopAssetKind');
     if (assetKindEl) on(assetKindEl, 'change', () => renderAssets());
@@ -17232,6 +20213,135 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
   global.AdminParts = global.AdminParts || {};
   global.AdminParts.items = { mount, unmount };
 })(typeof window !== 'undefined' ? window : globalThis);
+
+/* ==== js/admin-puzzles.js ==== */
+'use strict';
+
+/**
+ * admin-puzzles.js — 管理后台「题库」tab（1.6）。
+ *
+ * 只负责 UI：JSON 导入 / 列表 / 上下架；校验和每日题逻辑在 src/puzzles/。
+ */
+(function (global) {
+  'use strict';
+
+  function mount(ctx) {
+    const { $, esc, toast, getToken, hub } = ctx;
+    const on = ctx.on;
+    const alive = () => ctx.isAlive();
+    let PUZZLES = [];
+
+    const authHeaders = () => ({ 'Content-Type': 'application/json', 'x-admin-token': getToken() || '' });
+
+    async function apiGet(path) {
+      const res = await fetch(`${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(getToken() || '')}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || `请求失败（HTTP ${res.status}）`);
+      return data;
+    }
+    async function apiPost(path, body) {
+      const res = await fetch(path, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body || {}) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || `请求失败（HTTP ${res.status}）`);
+      return data;
+    }
+
+    function report(text, isErr) {
+      const el = $('puzzleImportReport');
+      if (!el) return;
+      el.innerHTML = '';
+      const span = document.createElement('span');
+      span.style.color = isErr ? 'var(--red-light)' : 'var(--green)';
+      span.textContent = text;
+      el.appendChild(span);
+    }
+
+    function render() {
+      const box = $('puzzleList');
+      const cnt = $('puzzleCount');
+      if (cnt) cnt.textContent = String(PUZZLES.length);
+      if (!box) return;
+      if (!PUZZLES.length) {
+        box.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:12px 0;">题库为空。导入 JSON 后才会生成每日题。</div>';
+        return;
+      }
+      box.innerHTML = PUZZLES.map((p) => {
+        const active = p.status !== 'disabled';
+        return `<div class="record-item" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 0;">
+          <div style="flex:1;min-width:180px;font-size:13px;">
+            <b>${esc(p.id)}</b>
+            <span style="font-size:11px;color:var(--text-dim);"> · ${esc(p.type)} · 难度 ${esc(String(p.difficulty || 1))}/5${p.tags && p.tags.length ? ' · ' + esc(p.tags.join(' / ')) : ''}</span>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:3px;">SFEN: ${esc(String(p.sfen || '').slice(0, 70))}${String(p.sfen || '').length > 70 ? '…' : ''}</div>
+          </div>
+          <span style="font-size:11px;color:${active ? 'var(--green)' : 'var(--text-dim)'};">${active ? '启用' : '停用'}</span>
+          <button class="btn btn-ghost btn-sm" data-puzzle-toggle="${esc(p.id)}" data-puzzle-status="${active ? 'disabled' : 'active'}" type="button">${active ? '停用' : '启用'}</button>
+        </div>`;
+      }).join('');
+      box.onclick = (e) => {
+        const btn = e.target.closest && e.target.closest('[data-puzzle-toggle]');
+        if (!btn) return;
+        toggleStatus(btn.getAttribute('data-puzzle-toggle'), btn.getAttribute('data-puzzle-status'));
+      };
+    }
+
+    async function load() {
+      const box = $('puzzleList');
+      if (box) box.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:12px 0;">加载题库…</div>';
+      try {
+        const d = await apiGet('/api/admin/puzzles');
+        if (!alive()) return;
+        PUZZLES = d.puzzles || [];
+        render();
+      } catch (e) {
+        if (!alive()) return;
+        if (box) box.innerHTML = `<div style="font-size:12px;color:var(--red-light);padding:12px 0;">${esc(e.message)}</div>`;
+      }
+    }
+
+    async function importJson() {
+      const ta = $('puzzleImportText');
+      const raw = ta ? ta.value.trim() : '';
+      if (!raw) return report('请先粘贴题库 JSON', true);
+      let parsed;
+      try { parsed = JSON.parse(raw); } catch (e) { return report(`JSON 解析失败：${e.message}`, true); }
+      const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.puzzles) ? parsed.puzzles : null);
+      if (!list) return report('JSON 必须是数组，或 { "puzzles": [...] }', true);
+      try {
+        const r = await apiPost('/api/admin/puzzles/import', { puzzles: list });
+        if (!alive()) return;
+        report(`已导入 ${r.imported} 题`, false);
+        toast(`题库已导入 ${r.imported} 题`);
+        await load();
+      } catch (e) {
+        if (!alive()) return;
+        report(e.message, true);
+      }
+    }
+
+    async function toggleStatus(id, status) {
+      try {
+        await apiPost(`/api/admin/puzzles/${encodeURIComponent(id)}/status`, { status });
+        if (!alive()) return;
+        toast(status === 'active' ? '已启用' : '已停用');
+        await load();
+      } catch (e) {
+        if (!alive()) return;
+        toast(e.message);
+      }
+    }
+
+    const onEl = (id, ev, fn) => { on($(id), ev, fn); };
+    onEl('btnPuzzleRefresh', 'click', load);
+    onEl('btnPuzzleImport', 'click', importJson);
+
+    hub.loadPuzzlesAdmin = load;
+  }
+
+  function unmount() {}
+
+  global.AdminParts = global.AdminParts || {};
+  global.AdminParts.puzzles = { mount, unmount };
+})(window);
 
 /* ==== js/admin.js ==== */
 /**
@@ -17334,6 +20444,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="records">全部棋谱</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="users">全部用户</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="tournaments">赛事管理</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="seasons">🏁 赛季 / 竞技场</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="announcements">📢 公告</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="rooms">🕹 对局干预</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="audit">操作审计</button>
@@ -17341,6 +20452,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="reports">🚩 举报</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="shop">🛒 商城</button>
         <button class="btn btn-ghost btn-sm tab-btn" data-tab="items">🎒 发放</button>
+        <button class="btn btn-ghost btn-sm tab-btn" data-tab="puzzles">📚 题库</button>
       </div>
 
       <!-- 总览仪表盘（§C1）：进后台第一眼看到全局 -->
@@ -17418,6 +20530,25 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         </div>
       </div>
 
+      <!-- 赛季快照与竞技场管理（1.8） -->
+      <div class="card" id="tab-seasons" style="padding:20px;display:none;">
+        <div class="section-title">🏁 赛季快照</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin:10px 0 14px;">
+          <div><div style="font-size:11px;color:var(--text-dim);">赛季名称</div>
+            <input class="input" id="seasonName" maxlength="20" placeholder="如：2026 秋季赛" style="width:180px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">开始（可选）</div>
+            <input class="input" id="seasonStart" type="datetime-local" style="width:190px;"></div>
+          <div><div style="font-size:11px;color:var(--text-dim);">结束（可选）</div>
+            <input class="input" id="seasonEnd" type="datetime-local" style="width:190px;"></div>
+          <button class="btn btn-primary btn-sm" id="btnSeasonCreate" type="button">创建赛季</button>
+        </div>
+        <div id="seasonAdminList"><div style="color:var(--text-dim);font-size:13px;">加载中…</div></div>
+
+        <div class="section-title" style="margin-top:24px;">⚔️ 竞技场管理</div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">主办人失联或违规时，管理员可在这里直接取消。</div>
+        <div id="arenaAdminList"><div style="color:var(--text-dim);font-size:13px;">加载中…</div></div>
+      </div>
+
       <!-- 商城管理（2026-10-21 商城化）：素材上传 / 商品目录 / BGM 三轨 -->
       <div class="card" id="tab-shop" style="padding:20px;display:none;">
         <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
@@ -17426,7 +20557,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         </div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.7;">
           先上传素材，再新建商品。BGM / 头像 / 立绘 / 棋子 / 棋盘 / 读秒音**默认全部为空**：
-          玩家装备后才生效，代码仓库不再自带音乐或头像素材。<br>
+          玩家装备后才生效，代码仓库不再自带 BGM 或头像素材。<br>
           推荐把整套装扮打成 <b>.tdpack</b> 扩展包上传：先校验 → 安装为草稿 → 在下方预览 → 确认后发布。
         </div>
 
@@ -17440,7 +20571,6 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
             <input type="file" id="packFile" accept=".tdpack,.zip,application/zip" style="font-size:12px;" aria-label="选择 .tdpack 扩展包文件">
             <button class="btn btn-primary btn-sm" id="btnPackUpload">上传并校验</button>
             <button class="btn btn-ghost btn-sm" id="btnPackTemplate" type="button" title="下载可直接上传测试的 .tdpack 示例包">⬇ 下载模板</button>
-            <button class="btn btn-ghost btn-sm" id="btnPackRefresh">刷新扩展包</button>
           </div>
           <div style="font-size:11px;color:var(--text-dim);margin-top:5px;">
             模板是<b>完整可上传</b>的示例包（纯色占位图 + 10 秒静音 BGM + 提示音读秒），
@@ -17477,7 +20607,8 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
               <button class="btn btn-primary btn-sm" id="btnByoyomiZip">导入为草稿</button>
             </div>
             <div style="font-size:11px;color:var(--text-dim);margin-top:5px;">
-              ZIP 内放 1–10（或 count_01–count_10）即可；缺 60/30/20 节点音时自动用「十」顶替。
+              ZIP 内放 1–10（或 count_01–count_10）即可；缺 60/30/20 节点音时自动用「十」顶替。<br>
+              导入前需勾选上方「拥有版权/合法授权」确认。
             </div>
             <div id="byoyomiZipResult" role="status" aria-live="polite" style="margin-top:6px;font-size:12px;"></div>
           </div>
@@ -17487,7 +20618,10 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
             <div style="font-size:12px;font-weight:700;">📚 已安装扩展包（<span id="packCount">0</span>）</div>
-            <span style="font-size:11px;color:var(--text-dim);">草稿仅管理端可见；发布后玩家才能购买/装备</span>
+            <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span style="font-size:11px;color:var(--text-dim);">草稿仅管理端可见；发布后玩家才能购买/装备</span>
+              <button class="btn btn-ghost btn-sm" id="btnPackRefresh" type="button">刷新列表</button>
+            </span>
           </div>
           <div id="packList"></div>
         </div>
@@ -17599,6 +20733,27 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         <!-- E. 商品目录 -->
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">商品目录（点「编辑」回填上方表单；可删除任意商品）</div>
         <div id="itemsCatalogList" style="max-height:42vh;overflow-y:auto;"></div>
+      </div>
+
+      <!-- 题库（1.6 每日诘将棋） -->
+      <div class="card" id="tab-puzzles" style="padding:20px;display:none;">
+        <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>📚 题库（<span id="puzzleCount">0</span>）</span>
+          <button class="btn btn-ghost btn-sm" id="btnPuzzleRefresh">刷新题库</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);line-height:1.7;margin-bottom:10px;">
+          每日诘将棋 / 下一手题库。导入 JSON 数组（全量校验通过才写入）；type 为 tsume 或 next，
+          solution 是 USI 手顺，tsume 最后必须是詰み。不内置版权题目，请只导入自有/授权内容。
+        </div>
+        <textarea class="input" id="puzzleImportText" rows="7" spellcheck="false"
+          style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12px;"
+          placeholder='[{"id":"sample-1","type":"next","sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","solution":["7g7f"],"difficulty":1,"tags":["demo"]}]'></textarea>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;">
+          <button class="btn btn-primary btn-sm" id="btnPuzzleImport">导入 / 覆盖</button>
+          <span id="puzzleImportReport" role="status" aria-live="polite" style="font-size:12px;"></span>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin:10px 0 6px;">题库列表（停用后不会出现在每日题中）</div>
+        <div id="puzzleList" style="max-height:46vh;overflow-y:auto;"></div>
       </div>
 
       <!-- 道具发放（2026-10-03 新功能：道具系统） -->
@@ -17927,7 +21082,7 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
         isAlive: () => alive,
         on,
       };
-      const PARTS = ['shell', 'records', 'users', 'audit', 'tournaments', 'moderation', 'console', 'items'];
+      const PARTS = ['shell', 'records', 'users', 'audit', 'tournaments', 'seasons', 'moderation', 'console', 'items', 'puzzles'];
       for (const name of PARTS) {
         const part = global.AdminParts && global.AdminParts[name];
         if (!part || typeof part.mount !== 'function') {
@@ -17994,6 +21149,15 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
     // 5) 全局开局兜底：用户停在没有 game_start 处理器的页面（首页/个人/棋谱/复盘等）时，
     //    服务端开局仍要把人带回对局，否则对手面对的是一个“在线但看不见棋盘”的玩家。
     //    大厅/赛事/播放页各自有处理器（赛事页还要带 join=1），这里不抢它们的活。
+    // 通知铃铛：连接/身份就绪与相关实时事件到达时刷新未读数。
+    if (api && api.on && nav && nav.refreshNotifications) {
+      ['open', 'hello'].forEach((t) => api.on(t, () => nav.refreshNotifications()));
+      [
+        'friend_request', 'friend_accepted', 'challenge_created', 'challenge_answered',
+        'corr_created', 'corr_move', 'corr_finished', 'tournament_match_started',
+      ].forEach((t) => api.on(t, () => nav.refreshNotifications()));
+    }
+
     const R = global.Router;
     // 只有“页面确实挂载成功”时才算它自己会处理；渲染失败的 View 没有 mount，
     // 不能因为 currentName 是 lobby/tournament 就吞掉全局兜底。
@@ -18011,6 +21175,12 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
       api.on('tournament_match_started', (d) => {
         if (!d || !d.roomId || R.current === 'play') return;
         R.navigate(`play.html?room=${encodeURIComponent(d.roomId)}&join=1`);
+      });
+      // 好友约战被接受：发起者（房主）自动进入房间；接受者由好友页直接带 join=1 跳转。
+      api.on('challenge_answered', (d) => {
+        const roomId = d && d.accepted && d.challenge && d.challenge.roomId;
+        if (!roomId || R.current === 'play') return;
+        R.navigate(`play.html?room=${encodeURIComponent(roomId)}`);
       });
     }
 

@@ -103,7 +103,7 @@
           <select class="select" id="tFormat" style="width:100%;">
             <option value="single-elimination" selected>单败淘汰</option>
             <option value="swiss">瑞士制（积分编排）</option>
-            <option value="round-robin" disabled>循环赛（待实装）</option>
+            <option value="round-robin">循环赛（两两交手）</option>
           </select>
         </div>
         <!-- 轮数（仅瑞士制）：不填则按人数自动给建议值 -->

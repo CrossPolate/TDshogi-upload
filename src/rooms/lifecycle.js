@@ -26,7 +26,15 @@ const handicap = require('../handicap'); // 駒落ち（让子）手合割表与
 const { genId } = require('../auth');
 const roomPassword = require('../room-password');
 const log = require('../logger');
+const ratings = require('../ratings');
 const { TIME_CONTROLS, DEFAULT_TIME_CONTROL, initClockState } = require('./config');
+
+// 快速匹配分数带：先 ±150，每等 5 秒放宽 50，最多 ±600；超过 60 秒不再限制。
+const MATCH_BASE_GAP = 150;
+const MATCH_GAP_STEP = 50;
+const MATCH_GAP_STEP_MS = 5000;
+const MATCH_MAX_GAP = 600;
+const MATCH_ANY_AFTER_MS = 60000;
 
 module.exports = function applyLifecycle(X) {
   Object.assign(X.prototype, {
@@ -273,7 +281,10 @@ module.exports = function applyLifecycle(X) {
     /**
      * 快速匹配：将玩家放入队列，两人即配对。
      */
-    quickMatch(player) {
+    quickMatch(player, data) {
+      const tcId = String((data && data.timeControl) || DEFAULT_TIME_CONTROL);
+      const tc = TIME_CONTROLS[tcId];
+      if (!tc) return { ok: false, error: '不支持该时制' };
       // ========== ① 非破坏性校验（P1-1：双击/对局中点匹配 = no-op，绝不把当前对局判负） ==========
       // ⚠️ **只拦 PLAYING**：不能写成"状态不是 WAITING 就拒绝"——那会把既有的
       // 「对局结束后不退出、直接再匹配」也挡掉（FINISHED 房靠 _autoLeaveFinished 解绑）。
@@ -314,47 +325,71 @@ module.exports = function applyLifecycle(X) {
           this._unbindClient(player.clientId);
         }
       }
-      // ========== ③ 入队与配对 ==========
+      // ========== ③ 入队与按「时制 + 分数带」配对 ==========
       // 先清理**失效的队列残留**：身份切换（游客→账号）后旧连接可能已消失或换了 id，
       // 死条目若留着会一直占位、毒化后续配对。队列只保留「仍在 playerRegistry 里的连接」。
-      this.matchQueue = this.matchQueue.filter((cid) => this.playerRegistry(cid));
-      // 同一身份已在队列 → 拒绝（防止同浏览器双窗口/双标签自己和自己配对，占两个位置）。
-      // Bug4：守卫此前只认 playerId 相等，而注册后 playerId 变了（guest id → account id），
-      // 旧队列项（旧 id）与新连接（新 id）被当成两个「不同身份」→ 自己和自己配对。
-      // 现改用**身份组**判定：账号与其来源 guestId 视为同一人。
-      if (this.matchQueue.some((cid) => {
-        const p = this.playerRegistry(cid);
-        return p && this._shareIdentity(p.playerId, player.playerId);
-      })) {
+      this.matchQueue = this.matchQueue.filter((e) => this.playerRegistry(e.clientId));
+      // 同一身份已在队列 → 拒绝（账号 + 来源 guestId 都算同一人，防止自己打自己）。
+      if (this.matchQueue.some((e) => this._shareIdentity(e.playerId, player.playerId))) {
         return { ok: false, error: '同一身份已在匹配队列中——不能自己和自己对弈' };
       }
-      if (this.matchQueue.includes(player.clientId)) return { ok: false, error: '已在匹配队列中' };
-      this.matchQueue.push(player.clientId);
-      // 配对
-      if (this.matchQueue.length >= 2) {
-        const c1 = this.matchQueue.shift();
-        const c2 = this.matchQueue.shift();
-        // 从广播器/玩家表取会话信息（由 protocol 层注入 player registry）
-        const p1 = this.playerRegistry ? this.playerRegistry(c1) : null;
-        const p2 = this.playerRegistry ? this.playerRegistry(c2) : null;
-        // 配对安全网：同一身份（含游客升级来源的旧 id）永远不配到一起
-        if (p1 && p2 && this._shareIdentity(p1.playerId, p2.playerId)) {
-          this.matchQueue.unshift(c1);
-          return { ok: false, error: '同一身份不能自己和自己对弈' };
-        }
-        if (p1 && p2) {
-          this._startQuickMatch(p1, p2);
-        } else {
-          // 无法配对则回退到创建房间
-          const p = p1 || p2;
-          if (p) this.createRoom(p);
-        }
-      }
+      if (this.matchQueue.some((e) => e.clientId === player.clientId)) return { ok: false, error: '已在匹配队列中' };
+
+      const rating = (ratings.getCache()[player.playerId] || {}).rating || ratings.START_RATING;
+      this.matchQueue.push({
+        clientId: player.clientId, playerId: player.playerId, name: player.name,
+        timeControl: tcId, rating, since: Date.now(),
+      });
+      this._sweepMatchQueue();
       return { ok: true };
     },
 
+    /** 等待越久分数带越宽；用双方等待时间的较大值，老玩家不会被新玩家卡住。 */
+    _matchGapFor(entry, now) {
+      const waited = Math.max(0, now - (entry.since || now));
+      if (waited >= MATCH_ANY_AFTER_MS) return Infinity;
+      return Math.min(MATCH_MAX_GAP, MATCH_BASE_GAP + Math.floor(waited / MATCH_GAP_STEP_MS) * MATCH_GAP_STEP);
+    },
+
+    /**
+     * 在队列里找当前最合适的一对（同时制、非同一身份、分差在允许范围内），配到就继续找。
+     * 由 quickMatch 入队时调用，也由 2 秒一次的定时器调用——否则两个分差过大的玩家
+     * 会一直挂在队列里，等待时间变长也不会重新评估。
+     */
+    _sweepMatchQueue(now = Date.now()) {
+      this.matchQueue = this.matchQueue.filter((e) => this.playerRegistry(e.clientId));
+      let paired = true;
+      while (paired && this.matchQueue.length >= 2) {
+        paired = false;
+        let best = null;
+        for (let i = 0; i < this.matchQueue.length; i += 1) {
+          const a = this.matchQueue[i];
+          for (let j = i + 1; j < this.matchQueue.length; j += 1) {
+            const b = this.matchQueue[j];
+            if (a.timeControl !== b.timeControl) continue;
+            if (this._shareIdentity(a.playerId, b.playerId)) continue;
+            const diff = Math.abs((a.rating || ratings.START_RATING) - (b.rating || ratings.START_RATING));
+            const allowed = Math.max(this._matchGapFor(a, now), this._matchGapFor(b, now));
+            if (diff > allowed) continue;
+            if (!best || diff < best.diff) best = { i, j, diff };
+          }
+        }
+        if (!best) break;
+        const a = this.matchQueue[best.i];
+        const b = this.matchQueue[best.j];
+        this.matchQueue.splice(best.j, 1);
+        this.matchQueue.splice(best.i, 1);
+        const p1 = this.playerRegistry(a.clientId);
+        const p2 = this.playerRegistry(b.clientId);
+        if (p1 && p2) {
+          this._startQuickMatch(p1, p2, a.timeControl);
+          paired = true;
+        }
+      }
+    },
+
     cancelMatch(clientId) {
-      const idx = this.matchQueue.indexOf(clientId);
+      const idx = this.matchQueue.findIndex((e) => e.clientId === clientId);
       if (idx >= 0) this.matchQueue.splice(idx, 1);
       return { ok: true };
     },
@@ -436,9 +471,8 @@ module.exports = function applyLifecycle(X) {
     _cancelAllMatchesFor(playerId) {
       if (!playerId || !this.matchQueue || !this.matchQueue.length) return;
       const removed = [];
-      this.matchQueue = this.matchQueue.filter((cid) => {
-        const p = this.playerRegistry ? this.playerRegistry(cid) : null;
-        if (p && this._shareIdentity(p.playerId, playerId)) { removed.push(cid); return false; }
+      this.matchQueue = this.matchQueue.filter((e) => {
+        if (this._shareIdentity(e.playerId, playerId)) { removed.push(e.clientId); return false; }
         return true;
       });
       for (const cid of removed) {
@@ -478,10 +512,10 @@ module.exports = function applyLifecycle(X) {
       }
     },
 
-    _startQuickMatch(p1, p2) {
+    _startQuickMatch(p1, p2, timeControlId = DEFAULT_TIME_CONTROL) {
       const code = this._genRoomCode();
       const roomId = genId();
-      const tc = TIME_CONTROLS[DEFAULT_TIME_CONTROL]; // 快速匹配固定 10 分钟包干
+      const tc = TIME_CONTROLS[timeControlId] || TIME_CONTROLS[DEFAULT_TIME_CONTROL];
       const room = {
         id: roomId,
         code,
@@ -542,20 +576,20 @@ module.exports = function applyLifecycle(X) {
      * @param {string[]} playerIds [先手, 后手]
      * @returns {{roomId:string}|null}
      */
-    createTournamentMatch(tournamentId, playerIds) {
-      if (!tournamentId || !Array.isArray(playerIds) || playerIds.length !== 2) return null;
+    createTournamentMatch(tournamentId, playerIds, arenaId = null, timeControlId = DEFAULT_TIME_CONTROL) {
+      if ((!tournamentId && !arenaId) || !Array.isArray(playerIds) || playerIds.length !== 2) return null;
       // 双方一旦进入赛事对局，就不能同时被快速匹配进另一局
       for (const pid of playerIds) this._cancelAllMatchesFor(pid);
       const code = this._genRoomCode();
       const roomId = genId();
-      const tc = TIME_CONTROLS[DEFAULT_TIME_CONTROL];
+      const tc = TIME_CONTROLS[timeControlId] || TIME_CONTROLS[DEFAULT_TIME_CONTROL];
       const room = {
         id: roomId,
         code,
         game: newGame(),
         players: { b: null, w: null },
         status: 'PLAYING',
-        type: 'tournament',
+        type: arenaId ? 'arena' : 'tournament',
         creatorId: null,
         createdAt: Date.now(),
         timeControl: tc.id,
@@ -565,8 +599,9 @@ module.exports = function applyLifecycle(X) {
         gameStartedAt: Date.now(), // P3：本局起点（durationSec 用）
         result: null,
         resultDetail: null,
-        rated: false, // 赛事对局不计 ELO
-        tournamentId,
+        rated: false, // 赛事 / Arena 对局不计 ELO
+        tournamentId: arenaId ? null : tournamentId,
+        arenaId: arenaId || null,
       };
       // 绑定双方（若在线；不在线则由其主动 joinTournamentMatch 进入）
       const attach = (seat, playerId) => {
@@ -597,6 +632,11 @@ module.exports = function applyLifecycle(X) {
         }
       }
       return { roomId };
+    },
+
+    /** Arena-lite：与赛事房同一套建房/绑座/断线规则，只是归属标记与时制不同。 */
+    createArenaMatch(arenaId, playerIds, timeControlId = DEFAULT_TIME_CONTROL) {
+      return this.createTournamentMatch(null, playerIds, arenaId, timeControlId);
     },
 
     /**
@@ -737,7 +777,7 @@ module.exports = function applyLifecycle(X) {
      */
     joinTournamentMatch(clientId, roomId, playerId) {
       const room = this._room(roomId);
-      if (!room || room.type !== 'tournament') return { ok: false, error: '赛事对局不存在' };
+      if (!room || !['tournament', 'arena'].includes(room.type)) return { ok: false, error: '赛事对局不存在' };
       // ⚠️ 2026-10-02 体验修复（问题 3「静默判负防护覆盖全部入口」）：入座前按 **playerId**
       // 检查"是否已在**别的**进行中对局里"（与 create_room / join_room / quick_match /
       // spectate 同一口径，这也是最后一个漏掉的入口）。放行的后果是同一身份同时挂在两局上：

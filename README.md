@@ -9,7 +9,7 @@
 - 游客免注册即可开局（`localStorage` 持久化），可在个人页注册账号保留数据（游客升级自动迁移对局/评级/棋谱）
 - 账号系统：用户名 + 密码（scrypt 加盐哈希 + HMAC 会话令牌）
 - 在线人人对战（**服务端权威规则判定**）+ 实时观战 + 随机观战
-- 好友房间（6 位房间码）+ 快速匹配 + 房间聊天
+- 好友房间（6 位房间码）+ 快速匹配（同时制分队列、按 ELO 分数带放宽）+ 房间聊天
 - 四种时制：`10:00`（10 分包干）/ `15+60` / `10+30` / `10sec`（0+10 每手读秒）
 - **手合割（駒落ち让子）**：香落ち / 角落ち / 飛車落ち / 二枚落ち … 十枚落ち共 **11 种**，
   上手执先、下手让子；**不计 ELO**（私人房间同款），经验照常
@@ -18,6 +18,16 @@
   支持 **`.tdpack` 扩展包**（ZIP + manifest）：先校验 → 安装为草稿 → 预览 → 发布；
   管理端可一键下载**可直接上传的示例模板**；读秒语音包可单独导入一个含 1–10 报时 MP3 的 ZIP，
   棋盘装扮装备后立即换肤；默认落子音为仓库自带的**木棋子敲击声**（设置中可换合成音/关闭）
+- **好友 / 关注 / 拉黑 / 约战**（`FEATURE_SOCIAL=1`）：好友申请/接受、单向关注、拉黑、选择时制发起约战；接受后双方直接进入对局
+- **站内通知中心**（`FEATURE_NOTIFICATIONS=1`）：好友申请/通过、约战、异步长局轮次与结果落库；导航铃铛显示未读，离线回来可补看。Web Push / 邮件提醒已于 2026-10-31 决定暂缓
+- **账号安全**：登录后可自助修改密码、退出所有设备；邮箱找回（`FEATURE_MAIL=1` + SMTP）作为忘记密码的兜底
+- **PWA**（`FEATURE_PWA=1`）：manifest + Service Worker、离线兜底、安装入口
+- **异步长局**（`FEATURE_CORRESPONDENCE=1`）：每步 1/3/7 天、落盘续局、超时判负、站内提醒；支持认输、提和/拒绝、两手内中止；不计 ELO
+- **分时制评级**：总 ELO 之外增加标准/极速两档；循环赛赛制已加入
+- **Arena 竞技场**（`FEATURE_ARENAS=1`）：时间窗口内自由加入/退出，按积分每 3/5/10/15 分钟配对；时制由主办人选择（10 分包干 / 10+30 / 15+60 / 10 秒）；胜 1 分、和 0.5 分、轮空轮换，不计 ELO
+- **赛季快照**（`FEATURE_SEASONS=1`）：管理员创建/关闭赛季，快照总榜与标准/极速前 10；按名次发积分，总榜冠军获称号；不重置历史评级
+- **开局统计 / 研究收藏**（`FEATURE_STUDIES=1`）：公开棋谱按战法 / 围玉标签聚合局数与先手胜率，点击标签可筛棋谱广场；复盘页可一键收藏到研究，`/study` 页面管理
+- **每日诘将棋 / 下一手**（`FEATURE_PUZZLES=1`）：服务端校验走法、每日一题、连续打卡；题库由管理员导入，不内置版权素材
 - 聊天快捷语（6 条通用礼貌语，点击即发，仍受 2 秒节流）+ 观众列表（带头像与等级）
 - 终局自动进入**感想战**：按规则推演、分支变化、待った、演示权交接、自由摆棋
 - 断线 60 秒重连宽限；中途退出/掉线判负并标记 `接続切断`
@@ -29,6 +39,7 @@
 **棋谱**
 - 自动保存，支持**日本标准 KIF / CSA** 导出（含每手耗时；KIF 带手数评论）、KIF 批量导入
 - 复盘器：日式/USI 切换、书签、评论、变着、自由摆放
+- **可选浏览器本地引擎复盘**（`FEATURE_ANALYSIS=1` + `npm run sync-engine`）：Fairy-Stockfish WASM 在 Web Worker 中分析，评估曲线、逐手评分、恶手/失误/不精确标记；服务端不跑引擎，不占对局 CPU
 - **棋谱广场**：管理员可将棋谱设为公开（赛事名局等），访客免登录浏览与复盘
 
 **社区与运营**
@@ -43,7 +54,7 @@
 - 选手信息悬停小窗、用户称号
 - **管理后台**：用户管理（登录 IP/UA、封禁、改名、重置 ELO/密码、改等级、编辑资料、删除账号）、
   赛事审核、棋谱导入、对局干预、操作审计、IP 封禁、**举报处理**、**🛒 商城与素材库**
-  （上传/预览/试听、引用保护删除、商品上下架、BGM 三轨）
+  （上传/预览/试听、引用保护删除、商品上下架、BGM 三轨、题库导入/上下架）
 - 移动端适配（棋盘竖排、触控拖拽、尺寸自适应）
 
 **多语言**
@@ -149,6 +160,9 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 | `ADMIN_ENTRY_KEY` | 空 | 设置后 `/admin.html` 需带 `?k=<key>`，否则 404（隐藏后台入口） |
 | `AUDIT_MAX_EVENTS` | 5000 | 事件日志容量上限 |
 | `AUDIT_RETENTION_DAYS` | 90 | 事件日志保留天数 |
+| `FEATURE_*` | 全部关闭 | 1.6–1.9 升级功能开关（如 `FEATURE_ANALYSIS=1`）；详见 `docs/UPGRADE-PLAN.md`。关闭时旧流程完全不受影响 |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | 空 | 邮箱验证与找回的 SMTP 配置；未配置时相关接口返回 `MAIL_UNAVAILABLE`，管理员重置密码仍可兜底 |
+| `PUBLIC_BASE_URL` | `http://localhost:PORT` | 邮件内链接的站点根地址，生产必须填公网地址 |
 
 ## 部署
 
@@ -158,6 +172,7 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 - **WebSocket 需反代放行**：Nginx 要带 `Upgrade` / `Connection` 头
 - **走反代必配 `TRUST_PROXY=1`**，并加 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
 - **服务端任何改动都必须重启进程**，前端静态资源已设 `no-cache` 协商缓存
+- **浏览器引擎资源**：`npm run sync-engine` 把 Fairy-Stockfish WASM 复制到 `public/engine/`（GPL-3.0；该目录已 gitignore，部署包会包含）；不使用引擎复盘时可不执行
 - **部署上传区**：`npm run pack` 把要传的文件同步到 **`github-upload/`**（目录，不是压缩包）——
   整目录拖到 GitHub 或 scp 到服务器即可，改完代码重新跑一次就同步：
   ```bash
@@ -173,8 +188,30 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/api/home` `/api/lobby` | GET | 首页 / 大厅数据（含 version，排障可查进程版本） |
+| `/api/features` | GET | 1.6–1.9 功能开关（公开；仅用于前端入口显隐，不代替鉴权） |
+| `/api/puzzles/daily` `/api/puzzles/me` | GET | 每日诘将棋 / 连续打卡（`FEATURE_PUZZLES=1`） |
+| `/api/puzzles/:id/attempt` | POST | 提交作答（服务端校验，不提前下发解法） |
+| `/api/social/overview` | GET | 好友/关注/拉黑/约战总览（`FEATURE_SOCIAL=1`） |
+| `/api/account/email` `/api/account/email/verify` | POST | 绑定邮箱 / 验证邮箱（`FEATURE_MAIL=1`） |
+| `/api/account/password/{forgot,reset}` | POST | 忘记密码 / 重置密码（邮件令牌；重置后旧会话失效） |
+| `/api/account/password/change` | POST | 登录态自助修改密码（旧令牌全部失效，返回新令牌） |
+| `/api/account/logout-all` | POST | 退出所有设备（撤销该账号全部令牌） |
+| `/api/social/friends/*` `/api/social/challenges*` | POST | 好友申请/处理、关注、拉黑、约战创建与响应 |
+| `/api/notifications` | GET | 站内通知列表与未读数（`FEATURE_NOTIFICATIONS=1`，需账号令牌） |
+| `/api/notifications/{read,read-all}` | POST | 标记单条 / 全部通知已读 |
+| `/api/correspondence` | GET/POST | 异步长局列表 / 发起对局（`FEATURE_CORRESPONDENCE=1`） |
+| `/api/correspondence/:id/{move,resign,draw-offer,abort}` | POST | 长局走子 / 认输 / 提和 / 两手内中止 |
+| `/api/correspondence/:id/draw-respond` | POST | 同意或拒绝和棋 |
+| `/api/leaderboard?category=` | GET | 分时制排行榜（overall / standard / ultra） |
+| `/api/seasons` `/api/seasons/:id` | GET | 赛季列表 / 快照详情（`FEATURE_SEASONS=1`） |
+| `/api/admin/seasons*` | GET/POST | 管理员创建/关闭赛季（关闭时发奖励） |
+| `/api/admin/arenas` `/api/admin/arenas/:id/cancel` | GET/POST | 管理员查看/取消竞技场 |
+| `/api/arenas` | GET/POST | 竞技场列表 / 创建（`FEATURE_ARENAS=1`；创建需 Lv.5） |
+| `/api/arenas/:id` | GET | 竞技场详情（积分榜、最近轮次、我的排名） |
+| `/api/arenas/:id/{join,leave,cancel}` | POST | 加入 / 退出 / 取消竞技场 |
+| `/api/studies/openings?limit=` | GET | 开局统计（公开棋谱按战法 / 围玉标签聚合；`FEATURE_STUDIES=1`） |
 | `/api/history?adminToken=` | GET | 全库棋谱（**仅管理员**，§Q7-1 收权；玩家查自己的棋谱走 `/api/profile?player=` 或 WS 检索） |
-| `/api/gallery?q=&tag=&page=` | GET | 棋谱广场（公开棋谱列表） |
+| `/api/gallery?q=&tag=&opening=&page=` | GET | 棋谱广场（公开棋谱列表；可按战法 / 围玉 `opening` 筛选） |
 | `/api/records/:id/playback` `/review` | GET | 回放 / 完整复盘数据（公开谱免登录） |
 | `/api/records/:id/export?fmt=kif\|csa` | GET | 导出（KIF 含手数评论） |
 | `/api/records/:id/{bookmark,comment,variation}` | POST | 写标注（评论支持编辑/删除，公开谱仅管理员） |
@@ -260,13 +297,13 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
 > 要跑这些请回到开发仓库（2026-09-21 审查 P2-5）。
 
 - **单元测试**：`npm test`（`tests/*.test.js`，Node 内置 `node --test`，纯函数不需起服）。
-  当前 **474 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、
+  当前 **506 项**：棋种映射（含"吃馬得角"回归）、FreeBoard 模型变换与视角切换、坐标换算、
   初始盘面（含駒落ち各手合割的 SFEN 生成）、`game.js` 规则引擎（含"候选着法必被接受"的不变量）、
   赛事状态机与权限、瑞士制配对与积分、等级特权、举报、多语言词典自检（含"翻译必须收敛"回归）、
   i18n 词条提取器（含"单行块注释吞掉后续代码"假绿回归）、设置 SCHEMA/归一化/`file:` 音频选项
   （落子音默认真实棋子敲击，`default` 才走合成音；文件音效失败保持静音）、音效与 BGM 音频链路
   （Audio 桩验 URL 映射/循环/切曲/总开关/BGM 默认静音）、
-  棋钟、限流、隐私脱敏等
+  棋钟、限流、隐私脱敏、浏览器引擎评分归一化/棋谱归属等
 - **静态检查**：`npm run lint`（eslint；`no-undef` 正是"路由层漏 require 导致接口 500"那类事故的克星）
 - **多语言**：`npm run i18n` 报告**还有哪些界面文案没有词条**（`--locale=ja` 看日语，
   `--js` 连提示语一起报）。词典在 `public/js/i18n.js`，**以中文原文为键**；
@@ -279,18 +316,19 @@ node -e "const db=require('better-sqlite3')(':memory:');db.exec('create table t(
   会与本实例抢端口，需单独跑。
   ⚠️ 别手搓"先起服再 `node scripts/e2e-xxx.js`"：**漏掉 `ADMIN_PASSWORD` 就会卡在
   "Admin 等待 admin_logged_in 超时"**，看起来像代码坏了——这正是把前提固化成一键入口的原因。
-- **文档**：`docs/PLAN.md`（路线图）/ `docs/ARCHITECTURE.md`（架构）/ `docs/UI-PAGES.md`（页面地图）/
+- **文档**：`docs/UPGRADE-PLAN.md`（**2026-10 升级改造计划**）/ `docs/PLAN.md`（历史设计与踩坑）/
+  `docs/ARCHITECTURE.md`（架构）/ `docs/UI-PAGES.md`（页面地图）/
   `docs/HANDOFF.md`（**尚未完成、需外部协助的困难任务清单**，含验收标准、已知坑与分工建议）
 
 ## 限制与扩展方向
 
-限制：无 AI 对战、赛事**无循环赛**（单败淘汰与瑞士制已有）、游客 id 无密码保护
+限制：无 AI 对战、赛事暂无联赛/团体赛（单败淘汰 / 瑞士制 / 循环赛 / Arena-lite 已有）、游客 id 无密码保护
 （拿到 id 即可顶替该身份，所以别把自己的链接外传）。
 
 多语言的已知残留：切换语言后，**已经渲染出来的日期文本**会保留切换前的格式 ——
 它们是普通字符串、不在词典里，要等该列表下次刷新（多数列表有轮询，会自愈）或刷新页面。
 
-方向：接入 USI 引擎（人机对战）、循环赛 / 联赛、内容运营（棋谱广场栏目化）、赛事自动化、PWA。
+方向：接入 USI 引擎（人机对战）、联赛 / 团体赛、内容运营（棋谱广场栏目化）、赛事自动化。
 （棋谱越权治理与接口速率限制已于 2026-09 完成，见 `docs/PLAN.md` §Q7；
 駒落ち让子与多语言已于 2026-09-20 完成，见 §Z）
 

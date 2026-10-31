@@ -30,10 +30,10 @@ function persist() {
 // 4–32 且为 2 的幂（Q3 用户确认）：保证对阵树是完美二叉树，不会出现「首轮轮空位」的复杂情形
 const SIZE_OPTIONS = [4, 8, 16, 32];
 
-// 赛制（T8）：单败淘汰 + 瑞士制。循环赛需求原文未要求，暂不做。
-const FORMATS = ['single-elimination', 'swiss'];
+// 赛制（1.8）：单败淘汰 + 瑞士制 + 循环赛。
+const FORMATS = ['single-elimination', 'swiss', 'round-robin'];
 
-const FORMAT_LABELS = { 'single-elimination': '单败淘汰', swiss: '瑞士制（积分编排）' };
+const FORMAT_LABELS = { 'single-elimination': '单败淘汰', swiss: '瑞士制（积分编排）', 'round-robin': '循环赛' };
 
 /** 瑞士制轮数区间：少于 3 轮区分度太差，多于 9 轮对 32 人档也没有必要 */
 const MIN_SWISS_ROUNDS = 3;

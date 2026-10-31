@@ -41,9 +41,13 @@ function securityHeaders(req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // 浏览器端 WASM 引擎（Fairy-Stockfish）需要 SharedArrayBuffer → 页面必须跨源隔离。
+  // credentialless 允许 Google Fonts 这类无 CORP 的跨源资源，不像 require-corp 会全部拦掉。
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
   res.setHeader('Content-Security-Policy', [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
     // ⚠️ Google Fonts 必须显式放行：`public/css/style.css` 用 `@import` 引了
     // Noto Serif SC / Noto Sans SC。收紧 CSP 时漏掉这两个 host，字体会**静默回退到系统字体**
     // —— 没有任何报错，只是全站排版悄悄变了样（本次就是这样被发现的）。

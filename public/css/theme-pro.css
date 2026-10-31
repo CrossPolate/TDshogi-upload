@@ -547,7 +547,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   margin-top: auto;
   padding-top: 4px;
 }
@@ -558,19 +558,26 @@ body {
   font-size: 13px;
   font-weight: 800;
   color: var(--gold-light);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .shop-price.free { color: var(--green, #3dcf7a); }
 .shop-card .btn { flex-shrink: 0; }
 .shop-actions {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
 .shop-preview {
-  padding: 2px 8px !important;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 2px 6px !important;
   font-size: 11px !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   opacity: 0.9;
 }
 .shop-preview.playing {

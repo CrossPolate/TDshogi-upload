@@ -40,9 +40,22 @@ const registerPublic = require('./src/http/routes/public');
 const registerRecords = require('./src/http/routes/records');
 const registerAccounts = require('./src/http/routes/accounts');
 const registerItems = require('./src/http/routes/items'); // ⚠️ 2026-10-03 新功能：道具系统骨架 —— REST 挂载
+const registerPuzzles = require('./src/http/routes/puzzles'); // 1.6：每日诘将棋
+const registerSocial = require('./src/http/routes/social'); // 1.7：好友 / 关注 / 约战
+const registerNotifications = require('./src/http/routes/notifications'); // 1.7：站内通知中心
+const registerMail = require('./src/http/routes/mail'); // 1.7：邮箱验证 / 密码找回
+const registerCorrespondence = require('./src/http/routes/correspondence'); // 1.8：异步长局
+const registerArenas = require('./src/http/routes/arenas'); // 1.8：Arena 竞技场
+const registerSeasons = require('./src/http/routes/seasons'); // 1.8：赛季快照
+const registerStudies = require('./src/http/routes/studies'); // 1.9：开局统计
+const correspondence = require('./src/correspondence');
+const arenas = require('./src/arenas');
+const features = require('./src/features');
 const registerTournaments = require('./src/http/routes/tournaments');
 const registerAdmin = require('./src/http/routes/admin');
 const registerHealth = require('./src/http/routes/health');
+const registerFeatures = require('./src/http/routes/features');
+const registerUpcoming = require('./src/http/routes/upcoming');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -129,10 +142,20 @@ app.use(express.static(PUBLIC_DIR, {
 // 顺序不影响 Express 的路径匹配（按 method + path 精确匹配），这里按
 // 「公开 → 棋谱 → 账号 → 管理」排列，便于阅读与排查。
 registerHealth(app); // §7.2：只读健康探针 GET /healthz（不鉴权、绝不 5xx）
+registerFeatures(app); // 1.6–1.9：前端据此决定是否显示新功能入口
+registerUpcoming(app); // 1.6–1.9：占位接口（开关关闭时返回 FEATURE_DISABLED）
 registerPublic(app);
 registerRecords(app);
 registerAccounts(app);
 registerItems(app); // ⚠️ 2026-10-03 新功能：道具系统骨架 —— 挂在 accounts 之后（§6 挂载约定）
+registerPuzzles(app); // 1.6：每日诘将棋 / 下一手（受 FEATURE_PUZZLES 保护）
+registerSocial(app); // 1.7：好友 / 关注 / 约战（受 FEATURE_SOCIAL 保护）
+registerNotifications(app); // 1.7：站内通知中心（受 FEATURE_NOTIFICATIONS 保护）
+registerMail(app); // 1.7：邮箱验证 / 密码找回（受 FEATURE_MAIL 保护）
+registerCorrespondence(app); // 1.8：异步长局（受 FEATURE_CORRESPONDENCE 保护）
+registerArenas(app); // 1.8：Arena 竞技场（受 FEATURE_ARENAS 保护）
+registerSeasons(app); // 1.8：赛季快照（受 FEATURE_SEASONS 保护）
+registerStudies(app); // 1.9：开局统计（受 FEATURE_STUDIES 保护）
 registerTournaments(app); // T3/T6：赛事管理（报名审批 / 踢人 / 开赛 / 取消成绩 / 重赛裁决）
 registerAdmin(app);
 
@@ -246,6 +269,16 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (err) => {
   log.error('process', '未处理的 Promise 拒绝（已兜住）', { err: err && err.message ? err.message : String(err) });
 });
+
+correspondence.startSweep((playerId, payload) => protocol.notifyPlayer(playerId, payload));
+
+// Arena-lite 调度：只在开关开启时跑，避免关闭功能后仍有后台配对。
+if (features.isOn('arenas')) {
+  arenas.startScheduler({
+    notify: (playerId, payload) => protocol.notifyPlayer(playerId, payload),
+    isOnline: (playerId) => protocol.playerToClients.has(playerId),
+  });
+}
 
 server.listen(PORT, () => {
   // 启动横幅（PLAN §P4）：走 logger 后与其余日志同一格式（带时间戳与级别，LOG_FORMAT=json 时为 JSON 行）

@@ -438,7 +438,7 @@ function isPublic(rec) {
  * 公开棋谱列表（§L4）：按置顶优先、时间倒序。
  * @param {{tag?:string, query?:string, page?:number, limit?:number}} opts
  */
-function listPublic({ tag = '', query = '', page = 1, limit = 20 } = {}) {
+function listPublic({ tag = '', query = '', opening = '', page = 1, limit = 20 } = {}) {
   const p = Math.max(1, parseInt(page, 10) || 1);
   const n = Math.min(60, Math.max(1, parseInt(limit, 10) || 20));
   // PLAN §Q7-2：改读摘要列（不解析整谱）。公开谱是管理员精选，数量有限。
@@ -446,6 +446,10 @@ function listPublic({ tag = '', query = '', page = 1, limit = 20 } = {}) {
   if (tag) {
     const t = String(tag).trim().toLowerCase();
     rows = rows.filter((r) => ((r.meta && r.meta.tags) || []).some((x) => String(x).toLowerCase() === t));
+  }
+  if (opening) {
+    const o = String(opening).trim();
+    rows = rows.filter((r) => String((r.meta && r.meta.opening) || '').trim() === o);
   }
   if (query) {
     const q = String(query).trim().toLowerCase();
@@ -495,6 +499,7 @@ function publicSummary(r) {
       featured: !!meta.featured,
       nameOverrides: meta.nameOverrides || null,
       resultNote: meta.resultNote || '',
+      opening: meta.opening || '',
     },
   };
 }
@@ -513,7 +518,7 @@ function setVisibility(id, visibility) {
 }
 
 /** 允许管理员编辑的展示字段（§L1） */
-const META_FIELDS = ['title', 'event', 'round', 'playedOn', 'tags', 'description', 'featured', 'nameOverrides', 'resultNote'];
+const META_FIELDS = ['title', 'event', 'round', 'playedOn', 'tags', 'description', 'featured', 'nameOverrides', 'resultNote', 'opening'];
 
 /**
  * 编辑展示信息（§L4，管理员）。只写允许字段，未传的不动。
@@ -690,7 +695,10 @@ function addVariation(id, parent, move) {
 }
 
 function isOwner(rec, playerId) {
-  return !!(rec && rec.playerIds && (rec.playerIds.b === playerId || rec.playerIds.w === playerId));
+  // ⚠️ 必须排除 null：KIF 导入/系统棋谱的 playerIds 可能两侧都是 null，
+  // 若只写 `rec.playerIds.b === playerId`，匿名请求（playerId=null）会被误判为谱主。
+  return !!playerId && !!(rec && rec.playerIds
+    && (rec.playerIds.b === playerId || rec.playerIds.w === playerId));
 }
 
 function writeRecord(record) {

@@ -25,7 +25,7 @@ const { roleOf, normalizeStatus, transition } = require('./rules');
  */
 function matchParticipants(t, matchId) {
   if (!matchId) return null;
-  if ((t.format || 'single-elimination') === 'swiss') {
+  if (['swiss', 'round-robin'].includes(t.format || 'single-elimination')) {
     for (const rec of t.rounds || []) {
       // 先查 `matchPairs`：赛后 `matchIds` 已被清空，只有它还留着"这一场是谁打谁"
       const mp = rec.matchPairs || {};
@@ -299,8 +299,8 @@ function publicInfo(t) {
     currentRound: t.currentRound || 0,
     // ⚠️ 只给瑞士制下发 rounds / standings：淘汰赛没有这两个概念，
     // 而 `standings` 每次都要重跑一遍积分计算（列表页会批量调 publicInfo）。
-    rounds: (t.format === 'swiss') ? (t.rounds || []) : [],
-    standings: (t.format === 'swiss') ? swissStandings(t) : [],
+    rounds: ['swiss', 'round-robin'].includes(t.format) ? (t.rounds || []) : [],
+    standings: ['swiss', 'round-robin'].includes(t.format) ? swissStandings(t) : [],
     championTie: !!t.championTie,
 
     championId: t.championId || null,
@@ -364,7 +364,7 @@ function placeOf(t, playerId) {
 
   if (t.championId === playerId) return 1;
 
-  if ((t.format || 'single-elimination') === 'swiss') {
+  if (['swiss', 'round-robin'].includes(t.format || 'single-elimination')) {
     const row = swissStandings(t).find((x) => x.id === playerId);
     if (!row) return null;
     return row.rank <= 2 ? row.rank : (row.rank <= 4 ? 3 : null);

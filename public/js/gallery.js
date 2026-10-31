@@ -40,6 +40,7 @@
       <button class="btn btn-primary btn-sm" id="btnSearch">搜索</button>
       <span id="totalTip" style="color:var(--text-dim);font-size:12px;"></span>
     </div>
+    <div id="openingFilter" style="display:none;font-size:13px;color:var(--text-dim);margin-bottom:12px;"></div>
 
     <div id="list"></div>
 
@@ -47,13 +48,15 @@
   </main>`;
     },
 
-    mount(container) {
+    mount(container, params) {
       this._teardown = [];
+      let opening = (params && params.opening) || '';
       const guest = global.NAV.getGuest(); // 替代原 NAV.renderNav('gallery')
       const api = global.API;
       const $ = (id) => UI.$(id);
       const esc = (s) => UI.esc(s);
       const toast = (m) => UI.toast(m);
+      const T = (s, vars) => (global.I18N && global.I18N.t ? global.I18N.t(s, vars) : s);
 
       const PAGE_SIZE = 20;
       let page = 1;
@@ -62,12 +65,29 @@
       const qEl = $('q');
       const tagEl = $('tagSel');
 
+      function renderOpeningFilter() {
+        const el = $('openingFilter');
+        if (!el) return;
+        if (!opening) { el.style.display = 'none'; el.innerHTML = ''; return; }
+        el.style.display = '';
+        el.innerHTML = `${T('开局 / 战法：')}<b style="color:var(--gold-light);">${esc(opening)}</b>
+          <button class="btn btn-ghost btn-sm" id="btnClearOpening" type="button" style="margin-left:8px;">${T('清除')}</button>`;
+        const btn = $('btnClearOpening');
+        if (btn) btn.addEventListener('click', () => {
+          opening = '';
+          try { history.replaceState({}, '', '/gallery'); } catch (_) {}
+          renderOpeningFilter();
+          page = 1;
+          load();
+        }, { once: true });
+      }
+
       async function load() {
         const q = (qEl.value || '').trim();
         const tag = tagEl.value || '';
         try {
           const data = await global.ApiUtils.get(
-            `/api/gallery?q=${encodeURIComponent(q)}&tag=${encodeURIComponent(tag)}&page=${page}&limit=${PAGE_SIZE}`
+            `/api/gallery?q=${encodeURIComponent(q)}&tag=${encodeURIComponent(tag)}&opening=${encodeURIComponent(opening)}&page=${page}&limit=${PAGE_SIZE}`
           );
           total = data.total || 0;
           renderList(data.records || []);
@@ -78,7 +98,7 @@
       }
 
       function renderList(records) {
-        $('totalTip').textContent = `共 ${total} 局`;
+        $('totalTip').textContent = T('共 {n} 局', { n: total });
         const el = $('list');
         if (!el) return;
         if (!records.length) {
@@ -180,6 +200,9 @@
         e.preventDefault();
         if (qEl) qEl.value = '';
         if (tagEl) tagEl.value = '';
+        opening = '';
+        try { history.replaceState({}, '', '/gallery'); } catch (_) {}
+        renderOpeningFilter();
         page = 1;
         load();
       };
@@ -188,6 +211,7 @@
         this._teardown.push(() => listEl.removeEventListener('click', onListClick));
       }
 
+      renderOpeningFilter();
       load();
     },
 

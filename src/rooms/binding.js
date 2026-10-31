@@ -173,7 +173,7 @@ module.exports = function applyBinding(X) {
 
     _unbindClient(clientId) {
       // 匹配队列清理：断线/退出的排队者必须移出，否则僵尸条目会毒化后续配对
-      const qIdx = this.matchQueue.indexOf(clientId);
+      const qIdx = this.matchQueue.findIndex((e) => e.clientId === clientId);
       if (qIdx >= 0) this.matchQueue.splice(qIdx, 1);
       // 聊天节流表清理（2026-09-21 审查 P2-3）：`_lastChatTs` 按 clientId **只写不删**，
       // 每个连过的 clientId 都会留一条，长跑缓慢增长。这里是**唯一的断连汇聚点**，

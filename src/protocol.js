@@ -50,6 +50,8 @@ const ratings = require('./ratings');
 const audit = require('./audit');
 const privacy = require('./privacy');
 const ratelimit = require('./ratelimit');
+const features = require('./features');
+const notifications = require('./notifications');
 const { RoomManager } = require('./rooms');
 const tournaments = require('./tournaments');
 const { listPlayerRecords, getRecord, exportRecord, recentSummaries } = require('./records');
@@ -276,7 +278,7 @@ class Protocol {
     switch (type) {
       case 'create_room': return this._hCreateRoom(clientId, player, data);
       case 'join_room': return this._hJoinRoom(clientId, player, data);
-      case 'quick_match': return this._hQuickMatch(clientId, player);
+      case 'quick_match': return this._hQuickMatch(clientId, player, data);
       case 'cancel_match': return this._hCancelMatch(clientId);
       case 'move': return this._hMove(clientId, player, data);
       case 'resign': return this._hResign(clientId);
@@ -488,6 +490,9 @@ class Protocol {
    * @returns {number|undefined} 实际发出的连接数（由 `_sendToPlayer` 决定）
    */
   notifyPlayer(playerId, payload) {
+    try {
+      if (features.isOn('notifications')) notifications.event(playerId, payload);
+    } catch (_) { /* 通知落库失败不能影响实时事件 */ }
     return this._sendToPlayer(playerId, payload);
   }
 
