@@ -132,8 +132,11 @@ function normalizeItem(raw) {
   // BGM 只接受真实音频（2026-10-21：默认合成曲已移除，不再允许 synth BGM）
   if (type === 'bgm' && kind !== 'audio') return null;
   if (type === 'byoyomi' && !isVoice) return null;
-  const price = it.price === null || it.price === undefined ? null : Number(it.price);
+  let price = it.price === null || it.price === undefined ? null : Number(it.price);
   if (price !== null && (!Number.isFinite(price) || price < 0)) return null;
+  // 0 元即免费，统一归一到 null。否则 price=0 会陷入三不管死局：
+  // buy 拒绝 <=0、equip 要求已拥有、前端却显示「购买 💰0」→ 永远拿不到。
+  if (price === 0) price = null;
   const out = {
     id,
     type,
