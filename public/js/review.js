@@ -589,11 +589,13 @@
         if (varBtn) varBtn.style.display = ''; // 变着入口任何情况下都可用（本地草稿）
         // ⚠️ 2026-10-02 体验修复：只读时给出明确标识（此前按钮凭空消失，用户分不清"没权限"还是"加载失败"）
         if (readonly) {
-          const anchor = $('boardContainer');
+          // 挂在 .play-main 之前（整宽横条）。若插进 .board-area 会成为横向 flex 的
+          // 一列，把棋盘挤去右边。
+          const anchor = $('boardContainer').closest('.play-main');
           if (anchor && anchor.parentNode && !$('readonlyTag')) {
             const tag = document.createElement('div');
             tag.id = 'readonlyTag';
-            tag.style.cssText = 'margin:8px 0;padding:6px 10px;border-radius:8px;background:rgba(201,162,39,0.12);color:var(--gold-light);font-size:12px;';
+            tag.style.cssText = 'margin:0 0 12px;padding:6px 10px;border-radius:8px;background:rgba(201,162,39,0.12);color:var(--gold-light);font-size:12px;';
             tag.textContent = '🔒 只读浏览（非谱主）——可回放 / 导出 / 添加本地变着（仅自己可见），但不能评论或修改棋谱';
             anchor.parentNode.insertBefore(tag, anchor);
           }
