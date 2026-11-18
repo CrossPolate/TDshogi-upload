@@ -255,6 +255,8 @@
       this.detach();
       this._removeGhost();
       this.model = null;
+      // 连带释放棋盘 canvas 特效层（fx.js）；重复 destroy 幂等
+      if (this.board && this.board.destroy) this.board.destroy();
     }
     attach() {
       // ⚠️ 2026-10-02 体验修复：加幂等保护。attach() 此前无任何状态标记，一旦被调用两次

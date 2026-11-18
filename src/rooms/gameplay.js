@@ -313,7 +313,7 @@ module.exports = function applyGameplay(X) {
      *
      * ⚠️ 必须**同步更新 clientToPlayer 的座位映射**：`state.seat` 是按连接算出来的
      * （见 state.js `getRoomStateForClient`），不同步的话前端 `mySeat` 不变 →
-     * 棋盘朝向 / 「先手·后手」标识 / 可动判断都不会跟着换（外包书 F2 明确要求）。
+     * 棋盘朝向 / 「先手·后手」标识 / 可动判断都不会跟着换。
      * 让子局不特殊处理：手合固定在 `b` 座，换座即"上下手一并互换"。
      */
     _swapSeats(room) {

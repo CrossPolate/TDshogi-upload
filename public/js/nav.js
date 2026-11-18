@@ -406,8 +406,10 @@
     // 管理员入口可见性随身份变化
     const entry = document.querySelector('.admin-entry');
     if (isAdminSession() && !entry) {
-      // 已是管理员但没入口 → 需要重建导航才能加回（罕见，安全兜底）
-      renderNav(null); setActive(global.Router && global.Router.current);
+      // 已是管理员但没入口 → 需要重建导航才能加回（罕见，安全兜底）。
+      // ⚠️ 必须 force=true：不带 force 的 renderNav 走 SPA 幂等分支，只会再调
+      // refreshBadge → 入口依旧不在 → 无限递归栈溢出（跨标签 storage 同步可触发）。
+      renderNav(null, true); setActive(global.Router && global.Router.current);
     } else if (!isAdminSession() && entry) {
       entry.remove();
     }

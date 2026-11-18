@@ -329,6 +329,49 @@ async function validatePack(buf, opts) {
         item.source = { kind: 'file', path: file };
         item.info = r.info;
         item.summary = `${r.info.width}×${r.info.height} · ${r.info.type.toUpperCase()}`;
+        // 立绘动画规格（2026-11-17 美术框架，可选字段，旧包不受影响）：
+        //   frames>1 = 横排帧条（N 帧等宽）；fps 播放帧率；
+        //   expressions = idle/talk/win/lose 各状态独立图（包内路径）。
+        if (type === 'sprite') {
+          const art = {};
+          const frames = raw.frames === undefined ? 1 : Number(raw.frames);
+          if (!Number.isInteger(frames) || frames < 1 || frames > 64) {
+            return fail(`items[${i}].frames 需为 1–64 的整数（横排帧条帧数）`);
+          }
+          const fps = raw.fps === undefined ? 8 : Number(raw.fps);
+          if (!Number.isFinite(fps) || fps < 1 || fps > 30) {
+            return fail(`items[${i}].fps 需为 1–30`);
+          }
+          if (frames > 1) {
+            art.frames = frames;
+            art.fps = fps;
+            if (r.info.width % frames !== 0) {
+              warnings.push(`${name} 帧条宽 ${r.info.width} 不能被帧数 ${frames} 整除，帧画面可能错位`);
+            }
+            item.summary += ` · ${frames} 帧 @${fps}fps`;
+          }
+          if (raw.expressions !== undefined) {
+            if (!raw.expressions || typeof raw.expressions !== 'object' || Array.isArray(raw.expressions)) {
+              return fail(`items[${i}].expressions 需为对象（idle/talk/win/lose → 包内路径）`);
+            }
+            const ex = {};
+            for (const [k, v] of Object.entries(raw.expressions)) {
+              if (!['idle', 'talk', 'win', 'lose'].includes(k)) {
+                return fail(`items[${i}].expressions 含未知状态：${k}（仅 idle/talk/win/lose）`);
+              }
+              const p = String(v || '').trim().replace(/\\/g, '/');
+              if (!p || !entries.has(p)) {
+                return fail(`items[${i}].expressions.${k} 引用的文件不存在：${p || '(空)'}`);
+              }
+              const er = imageInfo(entries.get(p), 'sprite', `${name}/${p}`, item.warnings);
+              if (er.error) return fail(`items[${i}].expressions.${k} ${er.error}`, 'BAD_IMAGE');
+              usedFiles.add(p);
+              ex[k] = p;
+            }
+            if (Object.keys(ex).length) art.expressions = ex;
+          }
+          if (Object.keys(art).length) item.art = art;
+        }
       }
     }
     prepared.push(item);
@@ -461,6 +504,20 @@ function materialize(parsed, tempDir) {
         width: it.info.width || null,
         height: it.info.height || null,
       });
+      // 立绘表情差分：逐状态落盘并换成可访问 URL（随商品 art 字段下发前端）
+      if (it.art && it.art.expressions) {
+        const exUrls = {};
+        for (const [state, src] of Object.entries(it.art.expressions)) {
+          const ebuf = entries.get(src);
+          const eext = (extOf(src) === 'jpeg' ? 'jpg' : extOf(src)) || 'png';
+          const destName = `${it.id}-${state}.${eext}`;
+          fs.writeFileSync(path.join(tempDir, destName), ebuf);
+          const eurl = relUrl(pack.id, destName);
+          exUrls[state] = eurl;
+          assetList.push({ kind: 'sprite', name: `${it.name}·${state}`, ext: eext, url: eurl, size: ebuf.length, width: null, height: null });
+        }
+        it.art = { ...it.art, expressions: exUrls };
+      }
     }
     const asset = it.type === 'byoyomi'
       ? { kind: 'audiopack', value: url }
@@ -476,6 +533,7 @@ function materialize(parsed, tempDir) {
       role: it.role,
       unlock: it.unlock,
       asset,
+      ...(it.art ? { art: it.art } : {}),
     });
   }
 

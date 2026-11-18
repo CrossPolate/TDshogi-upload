@@ -85,8 +85,10 @@
           <div class="player-clock" id="topClock">10:00</div>
         </div>
 
-        <!-- ⚠️ 2026-10-03 新功能：道具系统骨架 —— 立绘舞台（相对定位容器，供棋盘两侧的立绘绝对定位，不改动现有布局） -->
-        <div id="spriteStage" style="position:relative;width:100%;display:flex;justify-content:center;">
+        <!-- 立绘舞台：立绘与棋盘区同排 flex 实占列（结构上不遮挡驹台/棋盘）；
+             宽度不够时由 renderSprites 协商缩格或隐藏立绘（Portrait.fitColumns） -->
+        <div id="spriteStage" style="width:100%;display:flex;justify-content:center;align-items:center;gap:12px;">
+        <div id="spriteB" style="flex:0 0 auto;width:110px;display:none;align-items:center;justify-content:center;pointer-events:none;"></div>
         <!-- 棋盘区：左=对手持驹，中=棋盘，右=自己持驹（由 play.js 按视角摆放） -->
         <div class="board-area">
           <div class="hand-row" id="oppHand">
@@ -99,9 +101,7 @@
             <div class="hand-pieces" id="myHandPieces"></div>
           </div>
         </div>
-        <!-- ⚠️ 2026-10-03 新功能：道具系统骨架 —— 左右立绘（b=先手方 / w=后手方，由 play.js 按视角填充；空则隐藏） -->
-        <div id="spriteB" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:150px;display:none;align-items:center;pointer-events:none;"></div>
-        <div id="spriteW" style="position:absolute;right:0;top:50%;transform:translateY(-50%);width:150px;display:none;align-items:center;justify-content:flex-end;pointer-events:none;"></div>
+        <div id="spriteW" style="flex:0 0 auto;width:110px;display:none;align-items:center;justify-content:center;pointer-events:none;"></div>
         </div>
 
         <!-- 下方玩家栏（自己） -->
@@ -312,6 +312,7 @@
         throw new Error('play-views.js 必须在 play.js 之前加载（脚本顺序错了）');
       }
       const board = new global.ShogiBoard($('boardContainer'), {});
+      teardown.push(() => { try { board.destroy(); } catch (_) {} });
 
       /** 「退出对局」按钮：确认 → 发 leave → 路由回大厅/赛事页（原 btnLeave 内联逻辑搬入）。 */
       function leaveGame() {
@@ -542,6 +543,7 @@
       refreshSoundBtn();
 
       teardown.push(api.on('state', (data) => {
+        const prevStatus = state && state.status;
         const prevMoves = lastMoveCount;
         lastMoveCount = (data.moves || []).length;
         // 走子音效：手数增加（自己或对手走子）。
@@ -575,6 +577,13 @@
         }
         // 感想战路由（PLAN §G v6）：终局自动进入；新对局自动退出（§M5：实现在 play-demo.js）
         if (state.status === 'FINISHED' && state.result) {
+          // 终局庆祝：胜负已分时棋盘中央抛洒一次花瓣（emit 内部按档位过滤；
+          // 只在 PLAYING→FINISHED 沿触发，重连直接进终局/感想战反复推状态不重放）
+          if (prevStatus && prevStatus !== 'FINISHED' && (state.result === 'b' || state.result === 'w')
+              && global.FX && board.boardEl) {
+            const r = board.boardEl.getBoundingClientRect();
+            global.FX.emit(board.boardEl, 'burst', r.width / 2, r.height * 0.42, { size: Math.max(24, r.width / 9) });
+          }
           global.PlayDemo.enter(state);
           // ⚠️ 2026-10-02 体验修复：终局也必须渲染一次——胜负横幅在 render() 内，
           // 此前直接 return 导致「进入感想战」吞掉了正式结果呈现（只剩一闪而过的 toast）。
@@ -775,28 +784,87 @@
       // 独立处理器：**不改动既有的 state 渲染主逻辑**（play-views.js），只在本页额外
       // 挂一个 state 监听，把 `state.players[b|w].sprite` 画到棋盘两侧（见 DESIGN §9）。
       //   kind==='glyph' → 大号字形；kind==='image' → <img src=value>；空 → 容器留空（不占视觉）。
-      // 视角无关：先手(b)恒在右、后手(w)恒在左（与各自持驹所在方位一致，不随观战视角翻转）。
+      // 视角无关：B 恒在左、W 恒在右（固定座位侧，不随观战视角翻转）。
       // 移动端（<900px，与 CSS 断点对齐）不展示，直接隐藏。
+      //
+      // ⚠️ 遮挡修复（2026-11-17）：旧版立绘 absolute 钉在舞台左右缘（150px 宽），
+      // 而桌面驹台正是棋盘左右两列（64px）——立绘把驹台整个盖住。现改为 flex 实占列
+      // （结构上不可能重叠），宽度不够时按 Portrait.fitColumns 协商：棋盘缩格让位，
+      // 缩到 40px 格仍放不下则隐藏立绘。棋盘级 --cell-size 覆盖只作用于本局棋盘。
       // ==================================================================
-      const escHtml = UI.esc;
+      const SPRITE_COL_W = 110;  // 与模板内联宽度一致
+      const SPRITE_GAP = 12;     // 与模板 spriteStage gap 一致
+      const MIN_SPRITE_CELL = 40;
+      let lastSpriteState = null;
+      let spriteCellOverride = null; // 当前生效的棋盘级覆盖（null = 无覆盖，用全局默认）
+      let spriteResizeTimer = null;
+
       function renderSprites(st) {
+        lastSpriteState = st;
         const boxes = { b: $('spriteB'), w: $('spriteW') };
-        if (!boxes.b || !boxes.w) return; // HTML 里没插立绘容器就直接跳过
+        const stage = $('spriteStage');
+        if (!boxes.b || !boxes.w || !stage) return; // HTML 里没插立绘容器就直接跳过
         const narrow = window.innerWidth < 900;
+        // 终局表情：胜者 win / 败者 lose（和棋/无结果保持 idle）
+        const ended = st && st.status === 'FINISHED';
+        const winSeat = ended && (st.result === 'b' || st.result === 'w') ? st.result : null;
+        const specs = {};
+        for (const seat of ['b', 'w']) {
+          const sp = st && st.players && st.players[seat] ? st.players[seat].sprite : null;
+          specs[seat] = (!narrow && sp && sp.value) ? sp : null;
+        }
+        const boardEl = $('boardContainer') && $('boardContainer').querySelector('.shogi-board');
+        let showB = !!specs.b;
+        let showW = !!specs.w;
+        let wantCell = null;
+        if (boardEl && (showB || showW)) {
+          const area = stage.querySelector('.board-area');
+          const handsW = ['oppHand', 'myHand'].reduce((s, id) => {
+            const el = $(id); return s + (el ? el.offsetWidth : 0);
+          }, 0);
+          const areaGap = area ? (parseFloat(getComputedStyle(area).columnGap) || 0) * 2 : 28;
+          const bcs = getComputedStyle(boardEl);
+          const pad = (parseFloat(bcs.paddingLeft) || 0) + (parseFloat(bcs.paddingRight) || 0);
+          const rootCell = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cell-size'), 10);
+          const fit = global.Portrait.fitColumns({
+            left: showB, right: showW,
+            stageW: stage.clientWidth, handsW, areaGap,
+            stageGap: SPRITE_GAP, spriteW: SPRITE_COL_W, pad,
+            minCell: MIN_SPRITE_CELL,
+            baseCell: Number.isFinite(rootCell) && rootCell > 0 ? rootCell : 64,
+          });
+          showB = fit.show && showB;
+          showW = fit.show && showW;
+          wantCell = fit.show ? fit.cell : null;
+        }
+        // 覆盖值变化才写 + 重绘（render 按实时 cellSize 更新格子尺寸；同局面重绘不重播走子动画）
+        if (boardEl && wantCell !== spriteCellOverride) {
+          if (wantCell == null) boardEl.style.removeProperty('--cell-size');
+          else boardEl.style.setProperty('--cell-size', wantCell + 'px');
+          spriteCellOverride = wantCell;
+          if (fb && fb.model) fb.render();
+        }
         for (const seat of ['b', 'w']) {
           const box = boxes[seat];
-          const sp = st && st.players && st.players[seat] ? st.players[seat].sprite : null;
-          if (narrow || !sp || !sp.value) { box.style.display = 'none'; box.innerHTML = ''; continue; }
-          if (sp.kind === 'image') {
-            box.innerHTML = `<img src="${escHtml(sp.value)}" alt="" style="max-height:220px;max-width:100%;object-fit:contain;">`;
-          } else {
-            // 字形（glyph）占位立绘：大号衬线字
-            box.innerHTML = `<span style="font-size:72px;line-height:1;font-family:var(--font-serif);color:var(--gold-light);">${escHtml(sp.value)}</span>`;
-          }
-          box.style.display = 'flex';
+          const show = seat === 'b' ? showB : showW;
+          if (!show) { global.Portrait.render(box, null); continue; }
+          global.Portrait.render(box, specs[seat]);
+          global.Portrait.setState(box, winSeat ? (seat === winSeat ? 'win' : 'lose') : 'idle');
         }
       }
       teardown.push(api.on('state', (data) => renderSprites(data)));
+      // 窗口缩放：立绘显隐与棋盘让位都依赖舞台宽度，resize 后重新协商（节流 150ms）
+      const onSpriteResize = () => {
+        clearTimeout(spriteResizeTimer);
+        spriteResizeTimer = setTimeout(() => renderSprites(lastSpriteState), 150);
+      };
+      window.addEventListener('resize', onSpriteResize);
+      teardown.push(() => {
+        window.removeEventListener('resize', onSpriteResize);
+        clearTimeout(spriteResizeTimer);
+        global.Portrait.dispose($('spriteB'));
+        global.Portrait.dispose($('spriteW'));
+      });
 
       // ==================================================================
       // ★离开拦截（SPA）：对局进行中离开要提醒「离开即判负」

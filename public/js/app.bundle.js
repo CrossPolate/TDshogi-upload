@@ -108,7 +108,8 @@
     showCoords: false,          // 棋盘坐标（筋 1–9 / 段 一–九），默认隐藏
     dragToMove: false,          // 触屏拖拽走子；关闭时用「点选两步」避免误触
     highlightLastMove: true,    // 上一步落点高亮
-    animateMoves: true,         // 走子动画（落子/打子/吃子/升变，2026-10-11）
+    animateMoves: true,         // 走子特效（落子涟漪/吃子火花/升变金光，2026-10-31 升级）
+    fxQuality: 'auto',          // 特效质量：auto（按设备降级）/ lite（仅 CSS）/ full（CSS+canvas 粒子）
     spectatorNotices: true,     // §R3：聊天区显示「XX 进入/离开观战」
     // §U4 音效细分。取值：'off'（关闭）/ 'default'（合成音，可选）/
     // 'file:<名字>'（真实音频文件，落子音在 public/sound/）。
@@ -130,8 +131,11 @@
     { group: '显示', key: 'showCoords', type: 'bool', label: '棋盘坐标',
       hint: '棋盘四周显示 1–9 筋、一–九 段' },
     { group: '显示', key: 'highlightLastMove', type: 'bool', label: '上一步高亮' },
-    { group: '显示', key: 'animateMoves', type: 'bool', label: '走子动画',
-      hint: '落子/打子/吃子/升变的动效；关闭则棋子直接到位' },
+    { group: '显示', key: 'animateMoves', type: 'bool', label: '走子特效',
+      hint: '落子涟漪 / 吃子火花 / 升变金光的动效；关闭则棋子直接到位' },
+    { group: '显示', key: 'fxQuality', type: 'select', label: '特效质量',
+      options: [['auto', '自动'], ['lite', '轻量（CSS）'], ['full', '完整（粒子）']],
+      hint: '完整档在走子特效上叠加 canvas 粒子；自动档对低内存/省流设备降级为轻量' },
     { group: '对局', key: 'sound', type: 'bool', label: '行棋音效' },
     { group: '对局', key: 'dragToMove', type: 'bool', label: '触屏拖拽走子',
       hint: '关闭时用「点棋子 → 点目标格」两步走子，可减少误触' },
@@ -4642,8 +4646,10 @@
     // 管理员入口可见性随身份变化
     const entry = document.querySelector('.admin-entry');
     if (isAdminSession() && !entry) {
-      // 已是管理员但没入口 → 需要重建导航才能加回（罕见，安全兜底）
-      renderNav(null); setActive(global.Router && global.Router.current);
+      // 已是管理员但没入口 → 需要重建导航才能加回（罕见，安全兜底）。
+      // ⚠️ 必须 force=true：不带 force 的 renderNav 走 SPA 幂等分支，只会再调
+      // refreshBadge → 入口依旧不在 → 无限递归栈溢出（跨标签 storage 同步可触发）。
+      renderNav(null, true); setActive(global.Router && global.Router.current);
     } else if (!isAdminSession() && entry) {
       entry.remove();
     }
@@ -5395,6 +5401,295 @@
   }
 })(typeof window !== 'undefined' ? window : globalThis);
 
+/* ==== js/fx.js ==== */
+/**
+ * fx.js — 棋盘 canvas 特效层（完整档走子粒子 / 庆祝演出）
+ *
+ * 分层契约（2026-11-17 美术框架）：
+ *  - DOM 棋盘负责交互与无障碍；本模块只在 `.shogi-board` 上叠一层
+ *    `pointer-events:none` 的 canvas，绝不接管棋子渲染。
+ *  - off  = 走子特效关闭 / prefers-reduced-motion → 什么都不画；
+ *  - lite = 仅 board.css 的 CSS 伪元素特效（本模块不发射）；
+ *  - full = CSS + canvas 粒子（涟漪/火花/金晕/庆祝）。
+ *
+ * 生命周期：ShogiBoard.build() → FX.attach(boardEl)；destroy() → FX.detach。
+ * 全部 stage 共用**一个** rAF：粒子清空自动停表，页面隐藏暂停，
+ * 元素脱离文档自动回收（视图忘记 detach 也不泄漏）。DPR 封顶 2。
+ */
+(function (global) {
+  'use strict';
+
+  const DPR_CAP = 2;
+  const MAX_PARTS = 240;          // 单 stage 粒子上限：连点/终局庆祝也不失控
+  const GOLD = '232,196,106';
+  const EMBER = '224,90,71';
+  const WARM = '255,214,140';
+
+  const stages = new Map();       // boardEl → stage
+  let rafId = 0;
+  let lastT = 0;
+  let visBound = false;
+
+  /** 当前特效档位：off / lite / full（auto 按设备能力解析） */
+  function tier() {
+    const S = global.Settings;
+    if (!S) return 'lite';
+    if (S.get('animateMoves') === false) return 'off';
+    try {
+      if (global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'off';
+    } catch (_) { /* 无 matchMedia 的环境按正常档 */ }
+    const q = S.get('fxQuality');
+    if (q === 'lite' || q === 'full') return q;
+    const nav = global.navigator || {};
+    const saveData = nav.connection && nav.connection.saveData;
+    const mem = nav.deviceMemory;
+    if (saveData || (mem && mem <= 2)) return 'lite';
+    return 'full';
+  }
+
+  function resize(st) {
+    const rect = st.el.getBoundingClientRect ? st.el.getBoundingClientRect() : { width: 0, height: 0 };
+    const w = st.el.clientWidth || rect.width || 0;
+    const h = st.el.clientHeight || rect.height || 0;
+    const dpr = Math.min(DPR_CAP, global.devicePixelRatio || 1);
+    st.w = w; st.h = h; st.dpr = dpr;
+    st.canvas.width = Math.max(1, Math.round(w * dpr));
+    st.canvas.height = Math.max(1, Math.round(h * dpr));
+    st.canvas.style.width = w + 'px';
+    st.canvas.style.height = h + 'px';
+    if (st.ctx.setTransform) st.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function bindVisibility() {
+    if (visBound || typeof document === 'undefined' || !document.addEventListener) return;
+    visBound = true;
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) stopLoop();
+      else if (countParts() > 0) startLoop();
+    });
+  }
+
+  /** 移除节点：优先 parentNode.removeChild（极简 DOM 替身可能没有 el.remove()） */
+  function removeNode(node) {
+    if (node.parentNode && node.parentNode.removeChild) node.parentNode.removeChild(node);
+    else if (node.remove) node.remove();
+  }
+
+  /** 把 canvas 特效层挂到棋盘元素上（幂等）。无 2d 上下文时静默降级返回 null。 */
+  function attach(el) {
+    if (!el) return null;
+    if (stages.has(el)) return stages.get(el);
+    const canvas = document.createElement('canvas');
+    canvas.className = 'fx-layer';
+    canvas.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:5;';
+    canvas.setAttribute('aria-hidden', 'true');
+    el.appendChild(canvas);
+    const ctx = canvas.getContext ? canvas.getContext('2d') : null;
+    if (!ctx) { removeNode(canvas); return null; }
+    const st = { el, canvas, ctx, parts: [], ro: null, w: 0, h: 0, dpr: 1 };
+    resize(st);
+    if (typeof global.ResizeObserver === 'function') {
+      try { st.ro = new global.ResizeObserver(() => resize(st)); st.ro.observe(el); } catch (_) { st.ro = null; }
+    }
+    stages.set(el, st);
+    bindVisibility();
+    return st;
+  }
+
+  function detach(el) {
+    const st = stages.get(el);
+    if (!st) return;
+    if (st.ro && st.ro.disconnect) st.ro.disconnect();
+    removeNode(st.canvas);
+    stages.delete(el);
+    if (!countParts()) stopLoop();
+  }
+
+  function detachAll() {
+    [...stages.keys()].forEach(detach);
+  }
+
+  function countParts() {
+    let n = 0;
+    stages.forEach((st) => { n += st.parts.length; });
+    return n;
+  }
+
+  function startLoop() {
+    if (rafId || !countParts()) return;
+    lastT = 0;
+    rafId = global.requestAnimationFrame(tick);
+  }
+
+  function stopLoop() {
+    if (rafId) { global.cancelAnimationFrame(rafId); rafId = 0; }
+    lastT = 0;
+  }
+
+  // ------------------------------------------------------------------
+  // 粒子生成（程序化，无外部素材；颜色取自主题金/朱/暖白）
+  // ------------------------------------------------------------------
+
+  function rnd(a, b) { return a + Math.random() * (b - a); }
+
+  function spawn(type, x, y, size, opts) {
+    const out = [];
+    if (type === 'ripple') {
+      out.push({ kind: 'ring', x, y, t: 0, life: 0.36, r0: size * 0.16, r1: size * (opts.drop ? 1.05 : 0.85), color: GOLD });
+    } else if (type === 'sparks') {
+      out.push({ kind: 'ring', x, y, t: 0, life: 0.3, r0: size * 0.14, r1: size * 0.8, color: EMBER });
+      const n = 10;
+      for (let i = 0; i < n; i += 1) {
+        const a = (Math.PI * 2 * i) / n + rnd(-0.25, 0.25);
+        const sp = rnd(60, 170);
+        out.push({
+          kind: 'dot', x, y, t: 0, life: rnd(0.34, 0.56),
+          vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 30, g: 220,
+          size: rnd(1.6, 3), color: i % 2 ? EMBER : WARM,
+        });
+      }
+    } else if (type === 'glow') {
+      out.push({ kind: 'glow', x, y, t: 0, life: 0.55, r: size * 0.95, color: GOLD });
+      for (let i = 0; i < 6; i += 1) {
+        out.push({
+          kind: 'mote', x: x + rnd(-size * 0.3, size * 0.3), y: y + rnd(-size * 0.15, size * 0.2),
+          t: 0, life: rnd(0.45, 0.7), vx: rnd(-8, 8), vy: rnd(-55, -25), g: 0,
+          size: rnd(1.2, 2.4), color: WARM,
+        });
+      }
+    } else if (type === 'burst') {
+      // 终局庆祝：金/朱/暖白花瓣从落点向上抛洒
+      const n = 26;
+      for (let i = 0; i < n; i += 1) {
+        const a = rnd(-Math.PI * 0.85, -Math.PI * 0.15);
+        const sp = rnd(90, 260);
+        out.push({
+          kind: 'petal', x, y, t: 0, life: rnd(0.7, 1.2),
+          vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 300,
+          size: rnd(3, 6), rot: rnd(0, Math.PI * 2), vr: rnd(-6, 6),
+          color: [GOLD, EMBER, WARM][i % 3],
+        });
+      }
+    }
+    return out;
+  }
+
+  function step(p, dt) {
+    if (p.vx !== undefined) {
+      p.vy += (p.g || 0) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+    if (p.vr) p.rot += p.vr * dt;
+  }
+
+  function easeOut(k) { return 1 - (1 - k) * (1 - k); }
+
+  function draw(ctx, p) {
+    const k = Math.min(1, p.t / p.life);
+    if (p.kind === 'ring') {
+      const r = p.r0 + (p.r1 - p.r0) * easeOut(k);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = (1 - k) * 0.85;
+      ctx.strokeStyle = `rgba(${p.color},1)`;
+      ctx.lineWidth = Math.max(0.5, 2.2 * (1 - k));
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (p.kind === 'dot' || p.kind === 'mote') {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = p.kind === 'mote' ? Math.sin(Math.PI * k) * 0.9 : 1 - k;
+      ctx.fillStyle = `rgba(${p.color},1)`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, Math.max(0.4, p.size * (1 - k * 0.5)), 0, Math.PI * 2);
+      ctx.fill();
+    } else if (p.kind === 'glow') {
+      ctx.globalCompositeOperation = 'lighter';
+      const a = Math.sin(Math.PI * k) * 0.55;
+      const r = Math.max(1, p.r * (0.6 + 0.4 * easeOut(k)));
+      if (ctx.createRadialGradient) {
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+        g.addColorStop(0, `rgba(${p.color},${a})`);
+        g.addColorStop(1, `rgba(${p.color},0)`);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (p.kind === 'petal') {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1 - k * k;
+      ctx.fillStyle = `rgba(${p.color},1)`;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function tick(t) {
+    rafId = 0;
+    const dt = lastT ? Math.min(0.05, (t - lastT) / 1000) : 0.016;
+    lastT = t;
+    stages.forEach((st, el) => {
+      // 视图忘记 detach 的兜底：元素已脱离文档 → 自动回收
+      if (el.isConnected === false) { detach(el); return; }
+      const ctx = st.ctx;
+      if (ctx.clearRect) ctx.clearRect(0, 0, st.w, st.h);
+      const alive = [];
+      for (const p of st.parts) {
+        p.t += dt;
+        if (p.t >= p.life) continue;
+        step(p, dt);
+        draw(ctx, p);
+        alive.push(p);
+      }
+      st.parts = alive;
+    });
+    if (countParts()) rafId = global.requestAnimationFrame(tick);
+    else lastT = 0;
+  }
+
+  /**
+   * 发射一组粒子。非 full 档直接返回 0（lite 档由 CSS 负责演出）。
+   * @param {Element} el 已 attach 的棋盘元素
+   * @param {'ripple'|'sparks'|'glow'|'burst'} type
+   * @param {number} x 相对棋盘左上角的 px
+   * @param {number} y
+   * @param {{size?:number, drop?:boolean}} [opts] size=格子边长
+   * @returns {number} 实际生成的粒子数
+   */
+  function emit(el, type, x, y, opts) {
+    if (tier() !== 'full') return 0;
+    const st = stages.get(el) || attach(el);
+    if (!st) return 0;
+    const size = (opts && opts.size) || 40;
+    const made = spawn(type, x, y, size, opts || {});
+    if (!made.length) return 0;
+    st.parts.push(...made);
+    if (st.parts.length > MAX_PARTS) st.parts.splice(0, st.parts.length - MAX_PARTS);
+    startLoop();
+    return made.length;
+  }
+
+  /** 格子中心相对棋盘左上角的坐标（视角翻转已由调用方的 cell 引用消化） */
+  function centerOf(el, cell) {
+    if (!el || !cell || !el.getBoundingClientRect || !cell.getBoundingClientRect) return { x: 0, y: 0 };
+    const a = el.getBoundingClientRect();
+    const b = cell.getBoundingClientRect();
+    return { x: b.left - a.left + b.width / 2, y: b.top - a.top + b.height / 2 };
+  }
+
+  /** 运行状态（测试/排障用） */
+  function stats() {
+    return { stages: stages.size, particles: countParts(), running: !!rafId, tier: tier() };
+  }
+
+  global.FX = { attach, detach, detachAll, emit, centerOf, tier, stats };
+})(window);
 /* ==== js/board.js ==== */
 /**
  * board.js — 棋子渲染 + 棋盘渲染 + 走子交互
@@ -5518,9 +5813,12 @@
     return out;
   }
 
-  /** 当前格尺寸（px），由 CSS 变量 --cell-size 驱动，窄屏响应式缩小 */
-  function cellSize() {
-    const v = getComputedStyle(document.documentElement).getPropertyValue('--cell-size');
+  /** 当前格尺寸（px），由 CSS 变量 --cell-size 驱动，窄屏响应式缩小。
+   *  boardEl 上若有内联 --cell-size 覆盖（对局页立绘让位用，见 play.js renderSprites），
+   *  优先于全局值——只影响这一块棋盘，复盘/自由摆棋不受牵连。 */
+  function cellSize(boardEl) {
+    const scoped = boardEl && boardEl.style && boardEl.style.getPropertyValue('--cell-size');
+    const v = scoped || getComputedStyle(document.documentElement).getPropertyValue('--cell-size');
     const n = parseInt(v, 10);
     if (Number.isFinite(n) && n > 0 && /^\s*[\d.]+px/.test(v)) return n;
     // 移动端自适应（PLAN §N）：--cell-size 为 'auto' 时按视口宽度推导。
@@ -5601,6 +5899,15 @@
       this.renderEmptyBoard();
       this.buildCoords();
       this.container.appendChild(this.boardEl);
+      // 完整档特效的 canvas 层（lite/off 档 attach 后不发射，零开销）
+      if (global.FX) global.FX.attach(this.boardEl);
+    }
+
+    /** 视图卸载时调用：解绑 canvas 特效层，释放 rAF / ResizeObserver */
+    destroy() {
+      if (global.FX && this.boardEl) global.FX.detach(this.boardEl);
+      this.boardEl = null;
+      this.cells = [];
     }
 
     /**
@@ -5666,7 +5973,7 @@
       grid.className = 'board-grid';
       grid.style.cssText = 'display:grid;grid-template-columns:repeat(9,1fr);gap:0;position:relative;';
       this.cells = [];
-      const sz = cellSize();
+      const sz = cellSize(this.boardEl);
       for (let r = 0; r < 9; r++) {
         const row = [];
         for (let c = 0; c < 9; c++) {
@@ -5714,7 +6021,7 @@
       const board = state.board;
       const flipRow = viewpoint === 'w'; // 后手视角：行镜像（自己翻到底部）
       const colFrom = (c) => viewpoint === 'b' ? (8 - c) : c; // 列方向（先手9筋左，后手1筋左）
-      const sz = cellSize();
+      const sz = cellSize(this.boardEl);
       const atlas = getAtlas();
       for (let r = 0; r < 9; r++) {
         for (let c = 0; c < 9; c++) {
@@ -5793,6 +6100,14 @@
       if (d.from) {
         const fc = cellAt(d.from);
         if (fc) fc.classList.add('anim-vacate');                 // 出发格：暖光淡出
+      }
+      // 完整档：CSS 演出之上叠加 canvas 粒子（fx.js；lite/off 档 emit 内部直接返回）
+      if (global.FX && global.FX.tier() === 'full') {
+        const sz = cellSize(this.boardEl);
+        const pt = global.FX.centerOf(this.boardEl, cell);
+        global.FX.emit(this.boardEl, 'ripple', pt.x, pt.y, { size: sz, drop: d.isDrop });
+        if (d.captured) global.FX.emit(this.boardEl, 'sparks', pt.x, pt.y, { size: sz });
+        if (d.promoted) global.FX.emit(this.boardEl, 'glow', pt.x, pt.y, { size: sz });
       }
     }
 
@@ -6582,6 +6897,8 @@
       this.detach();
       this._removeGhost();
       this.model = null;
+      // 连带释放棋盘 canvas 特效层（fx.js）；重复 destroy 幂等
+      if (this.board && this.board.destroy) this.board.destroy();
     }
     attach() {
       // ⚠️ 2026-10-02 体验修复：加幂等保护。attach() 此前无任何状态标记，一旦被调用两次
@@ -6838,6 +7155,209 @@
   FreeBoard.DRAG_THRESHOLD_TOUCH = DRAG_THRESHOLD_TOUCH;
 })(typeof window !== 'undefined' ? window : globalThis);
 
+/* ==== js/portrait.js ==== */
+/**
+ * portrait.js — 立绘槽位（对局两侧 / 未来选手卡复用）
+ *
+ * 素材契约（2026-11-17 美术框架，.tdpack sprite 商品的可选 `art` 字段）：
+ *   spec = { kind:'image'|'glyph', value, art?:{ frames, fps, expressions } }
+ *   - frames>1：value 是**横排帧条**（N 帧等宽，推荐单帧 3:4），按 fps 循环播放；
+ *   - expressions：{ idle, talk, win, lose } → 各状态独立图（仅单图模式换图；
+ *     帧条模式只切换状态演出类）；
+ *   - 缺素材 / 加载失败 → 回退金色剪影，绝不出现破图。
+ *
+ * 状态机：idle（呼吸）/ talk（说话轻摆）/ win（金光弹跳）/ lose（灰暗低垂）。
+ * 演出全部走 CSS（style.css 立绘段 + motion.css 令牌），reduced-motion 自动全关。
+ *
+ * 防闪烁：同一素材签名不重建 DOM（state 广播每手都来，重建会重置动画/重新拉图）。
+ * 生命周期：视图 unmount 调 Portrait.dispose(box) 清 talk 定时器与 DOM。
+ */
+(function (global) {
+  'use strict';
+
+  const STATES = ['idle', 'talk', 'win', 'lose'];
+  const MAX_FRAMES = 64;
+  const MAX_FPS = 30;
+
+  const SILHOUETTE = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 160'>"
+    + "<g fill='none' stroke='#c9a227' stroke-width='3' opacity='0.55'>"
+    + "<circle cx='60' cy='52' r='26'/>"
+    + "<path d='M20 150c0-30 18-46 40-46s40 16 40 46'/>"
+    + "</g></svg>",
+  );
+
+  function specOf(spec) {
+    if (!spec || !spec.value) return null;
+    const art = (spec.art && typeof spec.art === 'object') ? spec.art : {};
+    let frames = Math.floor(Number(art.frames));
+    if (!Number.isFinite(frames) || frames < 1) frames = 1;
+    frames = Math.min(MAX_FRAMES, frames);
+    let fps = Number(art.fps);
+    if (!Number.isFinite(fps) || fps < 1) fps = 8;
+    fps = Math.min(MAX_FPS, fps);
+    const expressions = {};
+    if (art.expressions && typeof art.expressions === 'object') {
+      for (const s of STATES) {
+        const u = art.expressions[s];
+        if (typeof u === 'string' && u) expressions[s] = u;
+      }
+    }
+    return { kind: spec.kind === 'image' ? 'image' : 'glyph', value: String(spec.value), frames, fps, expressions };
+  }
+
+  function sigOf(p) {
+    return JSON.stringify([p.kind, p.value, p.frames, p.fps, p.expressions]);
+  }
+
+  function findImg(box) {
+    for (const c of box.children || []) {
+      if (c.tagName === 'IMG') return c;
+      for (const cc of c.children || []) if (cc.tagName === 'IMG') return cc;
+    }
+    return null;
+  }
+
+  function clearBox(box) {
+    if (box._portrait && box._portrait.talkTimer) clearTimeout(box._portrait.talkTimer);
+    box.innerHTML = '';
+    if (box.classList) STATES.forEach((s) => box.classList.remove('portrait-' + s));
+  }
+
+  /**
+   * 渲染立绘到槽位。spec 为空 → 隐藏槽位（空默认商城模型：未装备不占视觉）。
+   * 同签名重复调用只保证可见，不重建 DOM。
+   */
+  function render(box, spec) {
+    if (!box) return;
+    const p = specOf(spec);
+    if (!p) {
+      clearBox(box);
+      box.style.display = 'none';
+      box._portrait = null;
+      return;
+    }
+    const sig = sigOf(p);
+    if (box._portrait && box._portrait.sig === sig) {
+      box.style.display = 'flex';
+      return;
+    }
+    clearBox(box);
+    box.style.display = 'flex';
+    box.classList.add('portrait-slot');
+    box._portrait = { sig, spec: p, state: 'idle', base: 'idle', talkTimer: 0 };
+
+    if (p.kind === 'glyph') {
+      const span = document.createElement('span');
+      span.className = 'portrait-glyph';
+      span.textContent = p.value;
+      box.appendChild(span);
+    } else if (p.frames > 1) {
+      const strip = document.createElement('div');
+      strip.className = 'portrait-strip';
+      const img = document.createElement('img');
+      img.className = 'portrait-img portrait-strip-img';
+      img.alt = '';
+      img.decoding = 'async';
+      img.src = p.expressions.idle || p.value;
+      img.style.width = (p.frames * 100) + '%';
+      img.style.maxWidth = 'none';
+      img.style.height = '100%';
+      img.style.objectFit = 'fill';
+      const dur = (p.frames / p.fps).toFixed(3);
+      img.style.setProperty('--p-end', '-' + (((p.frames - 1) / p.frames) * 100).toFixed(4) + '%');
+      img.style.animation = `portrait-strip ${dur}s steps(${p.frames - 1}) infinite`;
+      img.addEventListener('error', () => fallback(box), { once: true });
+      strip.appendChild(img);
+      box.appendChild(strip);
+    } else {
+      const img = document.createElement('img');
+      img.className = 'portrait-img';
+      img.alt = '';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.src = p.expressions.idle || p.value;
+      img.addEventListener('error', () => fallback(box), { once: true });
+      box.appendChild(img);
+    }
+    setState(box, 'idle');
+  }
+
+  /** 加载失败回退：金色剪影（只回退一次，剪影本身不再触发） */
+  function fallback(box) {
+    const img = findImg(box);
+    if (!img || img.src === SILHOUETTE) return;
+    if (img.style) {
+      img.style.animation = '';
+      img.style.width = '';
+      img.style.maxWidth = '100%';
+      img.style.objectFit = 'contain';
+    }
+    img.src = SILHOUETTE;
+    if (box.classList) box.classList.add('portrait-fallback');
+  }
+
+  /** 切换状态：idle / talk / win / lose（非法值归一 idle） */
+  function setState(box, state) {
+    if (!box || !box._portrait) return;
+    if (!STATES.includes(state)) state = 'idle';
+    const rec = box._portrait;
+    if (state !== 'talk') rec.base = state;
+    rec.state = state;
+    STATES.forEach((s) => box.classList.remove('portrait-' + s));
+    box.classList.add('portrait-' + state);
+    // 表情差分：仅单图模式换图（帧条模式保持帧动画，只切演出类）；
+    // idle 无差分图时回到主图，避免停留在 win/lose 表情上
+    const p = rec.spec;
+    if (p.kind === 'image' && p.frames === 1) {
+      const target = p.expressions[state] || (state === 'idle' ? p.value : '');
+      const img = findImg(box);
+      if (target && img && !box.classList.contains('portrait-fallback')) img.src = target;
+    }
+  }
+
+  /** 说话演出：talk 持续 ms 后回到基础状态（win/lose 不会被 talk 覆盖回去） */
+  function talk(box, ms) {
+    if (!box || !box._portrait) return;
+    const rec = box._portrait;
+    if (rec.base === 'win' || rec.base === 'lose') return;
+    setState(box, 'talk');
+    if (rec.talkTimer) clearTimeout(rec.talkTimer);
+    rec.talkTimer = setTimeout(() => {
+      rec.talkTimer = 0;
+      if (box._portrait === rec && rec.state === 'talk') setState(box, rec.base);
+    }, Math.max(200, Number(ms) || 1200));
+  }
+
+  /** 视图卸载：清定时器 + DOM + 状态记录 */
+  function dispose(box) {
+    if (!box) return;
+    clearBox(box);
+    box._portrait = null;
+  }
+
+  /**
+   * 立绘列布局协商（纯函数，play.js 与测试共用）。
+   *
+   * 立绘与「棋盘 + 两侧驹台」同处一行（flex 实占列，**结构上不可能遮挡**）。
+   * 舞台宽减去驹台 / 间隙 / 立绘列 / 棋盘内边距后，余量才是棋盘能用的宽度：
+   * 默认格尺寸放得下 → 棋盘不动（cell=null）；放不下 → 缩格让位；
+   * 缩到 minCell 以下仍放不下 → 放弃立绘（show=false），绝不压驹台、也不把棋盘挤到不可用。
+   *
+   * @param {object} o {left,right:boolean, stageW,handsW,areaGap,stageGap,spriteW,pad,minCell,baseCell:number}
+   * @returns {{show:boolean, cell:number|null}}
+   */
+  function fitColumns(o) {
+    const n = (o.left ? 1 : 0) + (o.right ? 1 : 0);
+    if (!n) return { show: false, cell: null };
+    const avail = o.stageW - o.handsW - o.areaGap - o.stageGap * n - o.spriteW * n - o.pad;
+    const fit = Math.floor(avail / 9);
+    if (fit < o.minCell) return { show: false, cell: null };
+    return { show: true, cell: fit < o.baseCell ? fit : null };
+  }
+
+  global.Portrait = { STATES, render, setState, talk, dispose, fitColumns, SILHOUETTE };
+})(window);
 /* ==== js/router.js ==== */
 /**
  * router.js — SPA 路由（History API）与 View 注册表
@@ -13766,6 +14286,7 @@
 
       // ---- 棋盘栈调用（纯库 API，保持原样）----
       const board = new window.ShogiBoard($('boardContainer'), { readonly: true });
+      teardown.push(() => { try { board.destroy(); } catch (_) {} });
       let review = null;     // 完整复盘数据
       let positions = [];    // 中间局面（来自 playback 或本地重放）
       let cursor = 0;        // 当前手（0=初始）
@@ -15536,6 +16057,9 @@
         // 不存就只有"刚收到的那条"有头像，一切 tab 就没了。
         avatar: data.avatar || null,
       });
+      // 立绘说话演出：玩家发言 → 对应槽位轻摆（未装备/窄屏隐藏时 talk 自动无效）
+      const seat = data.role === 'player-b' ? 'b' : data.role === 'player-w' ? 'w' : null;
+      if (seat && window.Portrait) window.Portrait.talk($(seat === 'b' ? 'spriteB' : 'spriteW'), 1400);
     }));
 
     // 观战者进入时系统提示（rebind=选手掉线重进回位，不算观战）
@@ -16473,8 +16997,10 @@ function showResult(st) {
           <div class="player-clock" id="topClock">10:00</div>
         </div>
 
-        <!-- ⚠️ 2026-10-03 新功能：道具系统骨架 —— 立绘舞台（相对定位容器，供棋盘两侧的立绘绝对定位，不改动现有布局） -->
-        <div id="spriteStage" style="position:relative;width:100%;display:flex;justify-content:center;">
+        <!-- 立绘舞台：立绘与棋盘区同排 flex 实占列（结构上不遮挡驹台/棋盘）；
+             宽度不够时由 renderSprites 协商缩格或隐藏立绘（Portrait.fitColumns） -->
+        <div id="spriteStage" style="width:100%;display:flex;justify-content:center;align-items:center;gap:12px;">
+        <div id="spriteB" style="flex:0 0 auto;width:110px;display:none;align-items:center;justify-content:center;pointer-events:none;"></div>
         <!-- 棋盘区：左=对手持驹，中=棋盘，右=自己持驹（由 play.js 按视角摆放） -->
         <div class="board-area">
           <div class="hand-row" id="oppHand">
@@ -16487,9 +17013,7 @@ function showResult(st) {
             <div class="hand-pieces" id="myHandPieces"></div>
           </div>
         </div>
-        <!-- ⚠️ 2026-10-03 新功能：道具系统骨架 —— 左右立绘（b=先手方 / w=后手方，由 play.js 按视角填充；空则隐藏） -->
-        <div id="spriteB" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:150px;display:none;align-items:center;pointer-events:none;"></div>
-        <div id="spriteW" style="position:absolute;right:0;top:50%;transform:translateY(-50%);width:150px;display:none;align-items:center;justify-content:flex-end;pointer-events:none;"></div>
+        <div id="spriteW" style="flex:0 0 auto;width:110px;display:none;align-items:center;justify-content:center;pointer-events:none;"></div>
         </div>
 
         <!-- 下方玩家栏（自己） -->
@@ -16700,6 +17224,7 @@ function showResult(st) {
         throw new Error('play-views.js 必须在 play.js 之前加载（脚本顺序错了）');
       }
       const board = new global.ShogiBoard($('boardContainer'), {});
+      teardown.push(() => { try { board.destroy(); } catch (_) {} });
 
       /** 「退出对局」按钮：确认 → 发 leave → 路由回大厅/赛事页（原 btnLeave 内联逻辑搬入）。 */
       function leaveGame() {
@@ -16930,6 +17455,7 @@ function showResult(st) {
       refreshSoundBtn();
 
       teardown.push(api.on('state', (data) => {
+        const prevStatus = state && state.status;
         const prevMoves = lastMoveCount;
         lastMoveCount = (data.moves || []).length;
         // 走子音效：手数增加（自己或对手走子）。
@@ -16963,6 +17489,13 @@ function showResult(st) {
         }
         // 感想战路由（PLAN §G v6）：终局自动进入；新对局自动退出（§M5：实现在 play-demo.js）
         if (state.status === 'FINISHED' && state.result) {
+          // 终局庆祝：胜负已分时棋盘中央抛洒一次花瓣（emit 内部按档位过滤；
+          // 只在 PLAYING→FINISHED 沿触发，重连直接进终局/感想战反复推状态不重放）
+          if (prevStatus && prevStatus !== 'FINISHED' && (state.result === 'b' || state.result === 'w')
+              && global.FX && board.boardEl) {
+            const r = board.boardEl.getBoundingClientRect();
+            global.FX.emit(board.boardEl, 'burst', r.width / 2, r.height * 0.42, { size: Math.max(24, r.width / 9) });
+          }
           global.PlayDemo.enter(state);
           // ⚠️ 2026-10-02 体验修复：终局也必须渲染一次——胜负横幅在 render() 内，
           // 此前直接 return 导致「进入感想战」吞掉了正式结果呈现（只剩一闪而过的 toast）。
@@ -17163,28 +17696,87 @@ function showResult(st) {
       // 独立处理器：**不改动既有的 state 渲染主逻辑**（play-views.js），只在本页额外
       // 挂一个 state 监听，把 `state.players[b|w].sprite` 画到棋盘两侧（见 DESIGN §9）。
       //   kind==='glyph' → 大号字形；kind==='image' → <img src=value>；空 → 容器留空（不占视觉）。
-      // 视角无关：先手(b)恒在右、后手(w)恒在左（与各自持驹所在方位一致，不随观战视角翻转）。
+      // 视角无关：B 恒在左、W 恒在右（固定座位侧，不随观战视角翻转）。
       // 移动端（<900px，与 CSS 断点对齐）不展示，直接隐藏。
+      //
+      // ⚠️ 遮挡修复（2026-11-17）：旧版立绘 absolute 钉在舞台左右缘（150px 宽），
+      // 而桌面驹台正是棋盘左右两列（64px）——立绘把驹台整个盖住。现改为 flex 实占列
+      // （结构上不可能重叠），宽度不够时按 Portrait.fitColumns 协商：棋盘缩格让位，
+      // 缩到 40px 格仍放不下则隐藏立绘。棋盘级 --cell-size 覆盖只作用于本局棋盘。
       // ==================================================================
-      const escHtml = UI.esc;
+      const SPRITE_COL_W = 110;  // 与模板内联宽度一致
+      const SPRITE_GAP = 12;     // 与模板 spriteStage gap 一致
+      const MIN_SPRITE_CELL = 40;
+      let lastSpriteState = null;
+      let spriteCellOverride = null; // 当前生效的棋盘级覆盖（null = 无覆盖，用全局默认）
+      let spriteResizeTimer = null;
+
       function renderSprites(st) {
+        lastSpriteState = st;
         const boxes = { b: $('spriteB'), w: $('spriteW') };
-        if (!boxes.b || !boxes.w) return; // HTML 里没插立绘容器就直接跳过
+        const stage = $('spriteStage');
+        if (!boxes.b || !boxes.w || !stage) return; // HTML 里没插立绘容器就直接跳过
         const narrow = window.innerWidth < 900;
+        // 终局表情：胜者 win / 败者 lose（和棋/无结果保持 idle）
+        const ended = st && st.status === 'FINISHED';
+        const winSeat = ended && (st.result === 'b' || st.result === 'w') ? st.result : null;
+        const specs = {};
+        for (const seat of ['b', 'w']) {
+          const sp = st && st.players && st.players[seat] ? st.players[seat].sprite : null;
+          specs[seat] = (!narrow && sp && sp.value) ? sp : null;
+        }
+        const boardEl = $('boardContainer') && $('boardContainer').querySelector('.shogi-board');
+        let showB = !!specs.b;
+        let showW = !!specs.w;
+        let wantCell = null;
+        if (boardEl && (showB || showW)) {
+          const area = stage.querySelector('.board-area');
+          const handsW = ['oppHand', 'myHand'].reduce((s, id) => {
+            const el = $(id); return s + (el ? el.offsetWidth : 0);
+          }, 0);
+          const areaGap = area ? (parseFloat(getComputedStyle(area).columnGap) || 0) * 2 : 28;
+          const bcs = getComputedStyle(boardEl);
+          const pad = (parseFloat(bcs.paddingLeft) || 0) + (parseFloat(bcs.paddingRight) || 0);
+          const rootCell = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cell-size'), 10);
+          const fit = global.Portrait.fitColumns({
+            left: showB, right: showW,
+            stageW: stage.clientWidth, handsW, areaGap,
+            stageGap: SPRITE_GAP, spriteW: SPRITE_COL_W, pad,
+            minCell: MIN_SPRITE_CELL,
+            baseCell: Number.isFinite(rootCell) && rootCell > 0 ? rootCell : 64,
+          });
+          showB = fit.show && showB;
+          showW = fit.show && showW;
+          wantCell = fit.show ? fit.cell : null;
+        }
+        // 覆盖值变化才写 + 重绘（render 按实时 cellSize 更新格子尺寸；同局面重绘不重播走子动画）
+        if (boardEl && wantCell !== spriteCellOverride) {
+          if (wantCell == null) boardEl.style.removeProperty('--cell-size');
+          else boardEl.style.setProperty('--cell-size', wantCell + 'px');
+          spriteCellOverride = wantCell;
+          if (fb && fb.model) fb.render();
+        }
         for (const seat of ['b', 'w']) {
           const box = boxes[seat];
-          const sp = st && st.players && st.players[seat] ? st.players[seat].sprite : null;
-          if (narrow || !sp || !sp.value) { box.style.display = 'none'; box.innerHTML = ''; continue; }
-          if (sp.kind === 'image') {
-            box.innerHTML = `<img src="${escHtml(sp.value)}" alt="" style="max-height:220px;max-width:100%;object-fit:contain;">`;
-          } else {
-            // 字形（glyph）占位立绘：大号衬线字
-            box.innerHTML = `<span style="font-size:72px;line-height:1;font-family:var(--font-serif);color:var(--gold-light);">${escHtml(sp.value)}</span>`;
-          }
-          box.style.display = 'flex';
+          const show = seat === 'b' ? showB : showW;
+          if (!show) { global.Portrait.render(box, null); continue; }
+          global.Portrait.render(box, specs[seat]);
+          global.Portrait.setState(box, winSeat ? (seat === winSeat ? 'win' : 'lose') : 'idle');
         }
       }
       teardown.push(api.on('state', (data) => renderSprites(data)));
+      // 窗口缩放：立绘显隐与棋盘让位都依赖舞台宽度，resize 后重新协商（节流 150ms）
+      const onSpriteResize = () => {
+        clearTimeout(spriteResizeTimer);
+        spriteResizeTimer = setTimeout(() => renderSprites(lastSpriteState), 150);
+      };
+      window.addEventListener('resize', onSpriteResize);
+      teardown.push(() => {
+        window.removeEventListener('resize', onSpriteResize);
+        clearTimeout(spriteResizeTimer);
+        global.Portrait.dispose($('spriteB'));
+        global.Portrait.dispose($('spriteW'));
+      });
 
       // ==================================================================
       // ★离开拦截（SPA）：对局进行中离开要提醒「离开即判负」
@@ -20697,6 +21289,8 @@ r.detail ? `<br>说明：${esc(r.detail)}` : ''}</div>
               图片目录 <code>avatars/ sprites/ pieces/ boards/</code>，BGM <code>bgm/</code>，读秒 <code>byoyomi/</code>；
               可选 <code>cover.webp</code>、<code>LICENSE.txt</code>。<br>
               头像必须 256×256；棋子图集必须 2:1（推荐 512×256，8 列 × 4 行）；棋盘建议 ≥512。<br>
+              立绘可选动画规格：<code>frames</code>（1–64，横排帧条）、<code>fps</code>（1–30）、
+              <code>expressions</code>（idle/talk/win/lose → 包内图片路径）。<br>
               读秒包需 13 条：<code>remain_60/30/20</code> + <code>count_10…count_01</code>；
               也接受 <code>60/30/20.mp3</code> 与 <code>1…10.mp3</code>（或中文「一…十」）。
               MP3 建议 96kbps 单声道 44.1kHz，单条 0.4–1.8 秒、≤2MB。

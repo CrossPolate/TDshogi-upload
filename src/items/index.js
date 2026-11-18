@@ -406,7 +406,8 @@ function skinFor(accountId) {
   const out = { sprite: null, pieces: null, board: null, bgm: null };
   for (const slot of ['sprite', 'pieces', 'board']) {
     const it = eq[slot] ? getItem(eq[slot]) : null;
-    out[slot] = it ? { ...it.asset } : null;
+    // sprite 附带 art（帧条/表情差分规格，2026-11-17 美术框架），前端 Portrait 消费
+    out[slot] = it ? { ...it.asset, ...(it.art ? { art: it.art } : {}) } : null;
   }
   const tracks = bgmTracksFor(id);
   out.bgm = tracks.game || null;

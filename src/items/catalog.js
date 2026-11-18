@@ -173,6 +173,24 @@ function normalizeItem(raw) {
     copy('cover', 300); copy('copyright', 200);
     if (Object.keys(meta).length) out.meta = meta;
   }
+  // 立绘动画规格（2026-11-17 美术框架）：sprite 可选 art = { frames, fps, expressions }。
+  // expressions 只接受站内 URL（扩展包安装器已把包内路径换成 /uploads/...）。
+  if (type === 'sprite' && it.art && typeof it.art === 'object' && !Array.isArray(it.art)) {
+    const art = {};
+    const f = Number(it.art.frames);
+    if (Number.isInteger(f) && f > 1 && f <= 64) art.frames = f;
+    const fps = Number(it.art.fps);
+    if (art.frames && Number.isFinite(fps) && fps >= 1 && fps <= 30) art.fps = fps;
+    if (it.art.expressions && typeof it.art.expressions === 'object' && !Array.isArray(it.art.expressions)) {
+      const ex = {};
+      for (const k of ['idle', 'talk', 'win', 'lose']) {
+        const u = it.art.expressions[k];
+        if (typeof u === 'string' && u.startsWith('/')) ex[k] = u.slice(0, 300);
+      }
+      if (Object.keys(ex).length) art.expressions = ex;
+    }
+    if (Object.keys(art).length) out.art = art;
+  }
   return out;
 }
 

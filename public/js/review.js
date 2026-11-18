@@ -343,6 +343,7 @@
 
       // ---- 棋盘栈调用（纯库 API，保持原样）----
       const board = new window.ShogiBoard($('boardContainer'), { readonly: true });
+      teardown.push(() => { try { board.destroy(); } catch (_) {} });
       let review = null;     // 完整复盘数据
       let positions = [];    // 中间局面（来自 playback 或本地重放）
       let cursor = 0;        // 当前手（0=初始）

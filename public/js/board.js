@@ -120,9 +120,12 @@
     return out;
   }
 
-  /** 当前格尺寸（px），由 CSS 变量 --cell-size 驱动，窄屏响应式缩小 */
-  function cellSize() {
-    const v = getComputedStyle(document.documentElement).getPropertyValue('--cell-size');
+  /** 当前格尺寸（px），由 CSS 变量 --cell-size 驱动，窄屏响应式缩小。
+   *  boardEl 上若有内联 --cell-size 覆盖（对局页立绘让位用，见 play.js renderSprites），
+   *  优先于全局值——只影响这一块棋盘，复盘/自由摆棋不受牵连。 */
+  function cellSize(boardEl) {
+    const scoped = boardEl && boardEl.style && boardEl.style.getPropertyValue('--cell-size');
+    const v = scoped || getComputedStyle(document.documentElement).getPropertyValue('--cell-size');
     const n = parseInt(v, 10);
     if (Number.isFinite(n) && n > 0 && /^\s*[\d.]+px/.test(v)) return n;
     // 移动端自适应（PLAN §N）：--cell-size 为 'auto' 时按视口宽度推导。
@@ -203,6 +206,15 @@
       this.renderEmptyBoard();
       this.buildCoords();
       this.container.appendChild(this.boardEl);
+      // 完整档特效的 canvas 层（lite/off 档 attach 后不发射，零开销）
+      if (global.FX) global.FX.attach(this.boardEl);
+    }
+
+    /** 视图卸载时调用：解绑 canvas 特效层，释放 rAF / ResizeObserver */
+    destroy() {
+      if (global.FX && this.boardEl) global.FX.detach(this.boardEl);
+      this.boardEl = null;
+      this.cells = [];
     }
 
     /**
@@ -268,7 +280,7 @@
       grid.className = 'board-grid';
       grid.style.cssText = 'display:grid;grid-template-columns:repeat(9,1fr);gap:0;position:relative;';
       this.cells = [];
-      const sz = cellSize();
+      const sz = cellSize(this.boardEl);
       for (let r = 0; r < 9; r++) {
         const row = [];
         for (let c = 0; c < 9; c++) {
@@ -316,7 +328,7 @@
       const board = state.board;
       const flipRow = viewpoint === 'w'; // 后手视角：行镜像（自己翻到底部）
       const colFrom = (c) => viewpoint === 'b' ? (8 - c) : c; // 列方向（先手9筋左，后手1筋左）
-      const sz = cellSize();
+      const sz = cellSize(this.boardEl);
       const atlas = getAtlas();
       for (let r = 0; r < 9; r++) {
         for (let c = 0; c < 9; c++) {
@@ -395,6 +407,14 @@
       if (d.from) {
         const fc = cellAt(d.from);
         if (fc) fc.classList.add('anim-vacate');                 // 出发格：暖光淡出
+      }
+      // 完整档：CSS 演出之上叠加 canvas 粒子（fx.js；lite/off 档 emit 内部直接返回）
+      if (global.FX && global.FX.tier() === 'full') {
+        const sz = cellSize(this.boardEl);
+        const pt = global.FX.centerOf(this.boardEl, cell);
+        global.FX.emit(this.boardEl, 'ripple', pt.x, pt.y, { size: sz, drop: d.isDrop });
+        if (d.captured) global.FX.emit(this.boardEl, 'sparks', pt.x, pt.y, { size: sz });
+        if (d.promoted) global.FX.emit(this.boardEl, 'glow', pt.x, pt.y, { size: sz });
       }
     }
 

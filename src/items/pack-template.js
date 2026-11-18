@@ -137,7 +137,7 @@ cover.png            商城卡片封面（可选，640×360 左右）
 LICENSE.txt          授权说明（可选，但与 manifest.license 至少一项）
 README.txt           本说明（不会作为商品素材）
 avatars/             头像：必须 256×256
-sprites/             立绘：64–2048
+sprites/             立绘：64–2048（可选动画规格见下）
 pieces/              棋子图集：必须 2:1（8 列 × 4 行，推荐 512×256）
 boards/              棋盘：建议 ≥512
 bgm/                 BGM：1 秒–30 分钟
@@ -164,6 +164,15 @@ items[]      商品列表：
   file       图片/音频路径（byoyomi 用 dir 或 files）
   limited    true = 限定（不进商城，只能发放/兑换）
   unlock     { "type":"level"|"games", "value":3 }（可选门槛）
+
+立绘动画规格（sprite 可选，2026-11-17 美术框架）
+------------------------------------------------
+  frames       1–64：value 图为**横排帧条**（N 帧等宽，推荐单帧 3:4），>1 时循环播放
+  fps          1–30：帧条播放帧率（默认 8）
+  expressions  { "idle":"sprites/idle.png", "talk":"…", "win":"…", "lose":"…" }
+               各状态独立图（可只写部分）；仅单图模式换图，帧条模式只切状态演出
+  例：{ "type":"sprite", "file":"sprites/strip.png", "frames":4, "fps":8,
+        "expressions":{ "win":"sprites/win.png", "lose":"sprites/lose.png" } }
 
 读秒语音包命名（13 条）
 -----------------------

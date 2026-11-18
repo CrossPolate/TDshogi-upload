@@ -206,6 +206,9 @@
         // 不存就只有"刚收到的那条"有头像，一切 tab 就没了。
         avatar: data.avatar || null,
       });
+      // 立绘说话演出：玩家发言 → 对应槽位轻摆（未装备/窄屏隐藏时 talk 自动无效）
+      const seat = data.role === 'player-b' ? 'b' : data.role === 'player-w' ? 'w' : null;
+      if (seat && window.Portrait) window.Portrait.talk($(seat === 'b' ? 'spriteB' : 'spriteW'), 1400);
     }));
 
     // 观战者进入时系统提示（rebind=选手掉线重进回位，不算观战）

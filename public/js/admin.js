@@ -245,6 +245,8 @@
               图片目录 <code>avatars/ sprites/ pieces/ boards/</code>，BGM <code>bgm/</code>，读秒 <code>byoyomi/</code>；
               可选 <code>cover.webp</code>、<code>LICENSE.txt</code>。<br>
               头像必须 256×256；棋子图集必须 2:1（推荐 512×256，8 列 × 4 行）；棋盘建议 ≥512。<br>
+              立绘可选动画规格：<code>frames</code>（1–64，横排帧条）、<code>fps</code>（1–30）、
+              <code>expressions</code>（idle/talk/win/lose → 包内图片路径）。<br>
               读秒包需 13 条：<code>remain_60/30/20</code> + <code>count_10…count_01</code>；
               也接受 <code>60/30/20.mp3</code> 与 <code>1…10.mp3</code>（或中文「一…十」）。
               MP3 建议 96kbps 单声道 44.1kHz，单条 0.4–1.8 秒、≤2MB。

@@ -24,7 +24,8 @@
     showCoords: false,          // 棋盘坐标（筋 1–9 / 段 一–九），默认隐藏
     dragToMove: false,          // 触屏拖拽走子；关闭时用「点选两步」避免误触
     highlightLastMove: true,    // 上一步落点高亮
-    animateMoves: true,         // 走子动画（落子/打子/吃子/升变，2026-10-11）
+    animateMoves: true,         // 走子特效（落子涟漪/吃子火花/升变金光，2026-10-31 升级）
+    fxQuality: 'auto',          // 特效质量：auto（按设备降级）/ lite（仅 CSS）/ full（CSS+canvas 粒子）
     spectatorNotices: true,     // §R3：聊天区显示「XX 进入/离开观战」
     // §U4 音效细分。取值：'off'（关闭）/ 'default'（合成音，可选）/
     // 'file:<名字>'（真实音频文件，落子音在 public/sound/）。
@@ -46,8 +47,11 @@
     { group: '显示', key: 'showCoords', type: 'bool', label: '棋盘坐标',
       hint: '棋盘四周显示 1–9 筋、一–九 段' },
     { group: '显示', key: 'highlightLastMove', type: 'bool', label: '上一步高亮' },
-    { group: '显示', key: 'animateMoves', type: 'bool', label: '走子动画',
-      hint: '落子/打子/吃子/升变的动效；关闭则棋子直接到位' },
+    { group: '显示', key: 'animateMoves', type: 'bool', label: '走子特效',
+      hint: '落子涟漪 / 吃子火花 / 升变金光的动效；关闭则棋子直接到位' },
+    { group: '显示', key: 'fxQuality', type: 'select', label: '特效质量',
+      options: [['auto', '自动'], ['lite', '轻量（CSS）'], ['full', '完整（粒子）']],
+      hint: '完整档在走子特效上叠加 canvas 粒子；自动档对低内存/省流设备降级为轻量' },
     { group: '对局', key: 'sound', type: 'bool', label: '行棋音效' },
     { group: '对局', key: 'dragToMove', type: 'bool', label: '触屏拖拽走子',
       hint: '关闭时用「点棋子 → 点目标格」两步走子，可减少误触' },
