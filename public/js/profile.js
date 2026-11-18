@@ -986,18 +986,23 @@
         const isOwned = (id) => (snap.owned || []).indexOf(id) >= 0;
         const catById = (id) => (snap.catalog || []).find((c) => c.id === id) || null;
 
-        function artOf(it) {
+        function artOf(it, thumb) {
           if (!it || !it.asset) return '<span class="glyph">❔</span>';
           const a = it.asset;
+          // ⚠️ 2026-11-18：槽位缩略图必须限尺寸（thumb），否则大头像/立绘按原图尺寸
+          // 渲染会把装备栏撑大；商城卡片不传 thumb，仍由 .shop-card-art CSS 约束。
           // ⚠️ 2026-10-08：棋子图集商品只显示**一枚**棋子（玉将 cell），不铺整张图集
           if (it.type === 'pieces' && a.kind === 'image' && a.value) {
-            const size = 64;
+            const size = thumb || 64;
             return `<div class="piece-img shop-piece-cell" style="width:${size}px;height:${size}px;`
               + `background-image:url('${esc(a.value)}');background-position:0 0;`
-              + `background-size:${8 * size}px auto;"></div>`;
+              + `background-size:${8 * size}px auto;vertical-align:middle;"></div>`;
           }
           if (a.kind === 'image' && a.value) {
-            return `<img src="${esc(a.value)}" alt="" loading="lazy">`;
+            const dim = thumb
+              ? ` style="width:${thumb}px;height:${thumb}px;object-fit:cover;border-radius:6px;vertical-align:middle;"`
+              : '';
+            return `<img src="${esc(a.value)}" alt="" loading="lazy"${dim}>`;
           }
           if (a.kind === 'audio') return '<span class="glyph">🎵</span>';
           if (a.kind === 'audiopack') return '<span class="glyph">🎙</span>';
@@ -1030,7 +1035,7 @@
             const name = it ? esc(it.name) : '未装备';
             return `<div class="shop-slot${it ? '' : ' empty'}" data-unequip="${slot}" title="${it ? '点击卸下' + esc(it.name) : SLOT_LABELS[slot]}">`
               + `<div class="shop-slot-label">${SLOT_LABELS[slot]}</div>`
-              + `<div class="shop-slot-name">${it ? artOf(it) + ' ' : ''}${name}</div>`
+              + `<div class="shop-slot-name">${it ? artOf(it, 22) + ' ' : ''}${name}</div>`
               + (it ? `<button class="btn btn-ghost btn-sm shop-slot-unequip" data-unequip="${slot}" type="button">卸下</button>` : '')
               + `</div>`;
           }).join('');

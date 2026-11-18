@@ -199,6 +199,9 @@ function equip(accountId, slot, itemId) {
     if (rawSlot === 'avatar') {
       try { require('../auth').setAvatar(id, null, null, []); } catch (_) { /* 会话同步失败不阻断 */ }
       pushAvatar(id, null);
+    } else {
+      // 卸下皮肤/立绘同样要清房间缓存并重推，否则对局里仍显示旧装扮（"卸不掉/看不到默认"）
+      try { require('../http/context').protocol.rooms.refreshItems(id); } catch (_) { /* 房间未就绪（如 CLI/离线） */ }
     }
     return { ok: true, equipped: r.equipped };
   }
